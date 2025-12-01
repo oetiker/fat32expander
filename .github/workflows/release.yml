@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Check branch
         run: |
@@ -48,7 +48,7 @@ jobs:
     steps:
       - name: Check test status
         id: test-status
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -178,7 +178,7 @@ jobs:
       release_date: ${{ steps.generate_version.outputs.release_date }}
     steps:
       - name: Checkout code with history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -371,11 +371,9 @@ jobs:
             archive_name: linux-arm64-gnu
           - target: x86_64-unknown-linux-musl
             archive_name: linux-amd64-musl
-          - target: aarch64-unknown-linux-musl
-            archive_name: linux-arm64-musl
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.create-tag.outputs.version }}
 
@@ -395,14 +393,6 @@ jobs:
             x86_64-unknown-linux-musl)
               sudo apt-get install -y musl-tools
               ;;
-            aarch64-unknown-linux-musl)
-              sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
-              # Install aarch64 musl cross compiler
-              wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
-              tar -xzf aarch64-linux-musl-cross.tgz
-              sudo mv aarch64-linux-musl-cross /opt/
-              echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
-              ;;
           esac
 
       - name: Build
@@ -414,10 +404,6 @@ jobs:
           case "${{ matrix.target }}" in
             aarch64-unknown-linux-gnu)
               export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-              ;;
-            aarch64-unknown-linux-musl)
-              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
-              export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
               ;;
           esac
 
@@ -456,12 +442,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code for release notes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.create-tag.outputs.version }}
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: release-archives/
           merge-multiple: true
