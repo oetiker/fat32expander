@@ -134,7 +134,10 @@ pub fn execute_relocation(
     let sectors_per_cluster = boot.sectors_per_cluster() as u32;
 
     if verbose {
-        eprintln!("Shifting data forward: {} clusters need movement", plan.moves.len());
+        eprintln!(
+            "Shifting data forward: {} clusters need movement",
+            plan.moves.len()
+        );
         eprintln!("  Old first data sector: {}", plan.old_first_data_sector);
         eprintln!("  New first data sector: {}", plan.new_first_data_sector);
     }
@@ -189,7 +192,7 @@ mod tests {
     fn test_cluster_move() {
         let mv = ClusterMove {
             from_cluster: 5,
-            to_cluster: 5,  // Same cluster number with new approach
+            to_cluster: 5, // Same cluster number with new approach
             from_sector: 1000,
             to_sector: 2000,
         };
@@ -243,10 +246,8 @@ mod tests {
     #[test]
     fn test_verify_relocation_always_succeeds() {
         let fat = vec![
-            0x0FFFFFF8,
-            0x0FFFFFFF,
-            0x00000003,  // Cluster 2 in use
-            0x0FFFFFFF,  // Cluster 3 in use
+            0x0FFFFFF8, 0x0FFFFFFF, 0x00000003, // Cluster 2 in use
+            0x0FFFFFFF, // Cluster 3 in use
         ];
 
         // With new approach, verification always succeeds

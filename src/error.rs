@@ -21,7 +21,9 @@ pub enum Error {
     #[error("Backup boot sector does not match primary boot sector")]
     BackupMismatch,
 
-    #[error("Device is smaller than current filesystem ({current} sectors < {minimum} sectors needed)")]
+    #[error(
+        "Device is smaller than current filesystem ({current} sectors < {minimum} sectors needed)"
+    )]
     DeviceTooSmall { current: u64, minimum: u64 },
 
     #[error("Filesystem is already at maximum size for this device")]
@@ -60,7 +62,9 @@ pub enum Error {
     #[error("Filesystem has been invalidated by an interrupted resize operation. Checkpoint not found or corrupted - cannot recover automatically.")]
     InvalidatedFilesystem,
 
-    #[error("Incomplete resize detected at phase {0}, but device size changed. Cannot safely resume.")]
+    #[error(
+        "Incomplete resize detected at phase {0}, but device size changed. Cannot safely resume."
+    )]
     ResizeSizeMismatch(u8),
 }
 

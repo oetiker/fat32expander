@@ -31,8 +31,10 @@ fn format_build_time() -> String {
     // Calculate year/month/day from days since 1970-01-01
     let (year, month, day) = days_to_ymd(days_since_epoch);
 
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
-            year, month, day, hours, minutes, seconds)
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        year, month, day, hours, minutes, seconds
+    )
 }
 
 fn days_to_ymd(days: u64) -> (u64, u64, u64) {
@@ -71,10 +73,12 @@ fn is_leap_year(year: i64) -> bool {
 }
 
 fn version_long() -> String {
-    format!("{} (built {} git:{})",
-            env!("CARGO_PKG_VERSION"),
-            format_build_time(),
-            GIT_HASH)
+    format!(
+        "{} (built {} git:{})",
+        env!("CARGO_PKG_VERSION"),
+        format_build_time(),
+        GIT_HASH
+    )
 }
 
 #[derive(Parser)]
@@ -163,7 +167,9 @@ fn main() -> Result<()> {
                     }
 
                     if !info.backup_matches && !force {
-                        eprintln!("Warning: Backup boot sector does not match primary boot sector.");
+                        eprintln!(
+                            "Warning: Backup boot sector does not match primary boot sector."
+                        );
                         eprintln!("         This could indicate filesystem corruption.");
                         anyhow::bail!("Use --force to proceed anyway");
                     }
@@ -230,7 +236,14 @@ fn main() -> Result<()> {
 
             // Print results
             println!();
-            println!("Resize {}!", if dry_run { "preview complete" } else { "complete" });
+            println!(
+                "Resize {}!",
+                if dry_run {
+                    "preview complete"
+                } else {
+                    "complete"
+                }
+            );
             println!();
             println!("Operations performed:");
             for op in &result.operations {

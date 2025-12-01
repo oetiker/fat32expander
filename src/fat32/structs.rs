@@ -24,7 +24,9 @@ impl BootSector {
         }
 
         // Store the full sector data for read-modify-write
-        Ok(Self { raw: bytes.to_vec() })
+        Ok(Self {
+            raw: bytes.to_vec(),
+        })
     }
 
     /// Get the raw bytes (full sector)
@@ -341,7 +343,9 @@ impl FSInfo {
         }
 
         // Store the full sector data for read-modify-write
-        Ok(Self { raw: bytes.to_vec() })
+        Ok(Self {
+            raw: bytes.to_vec(),
+        })
     }
 
     /// Get the raw bytes (full sector)

@@ -26,10 +26,7 @@ pub fn check_not_mounted(device_path: &str) -> Result<()> {
             // Check if this mount entry matches our device
             if let Ok(resolved_mount) = resolve_device_path(mount_device) {
                 if resolved_mount == device_path {
-                    return Err(Error::DeviceMounted(
-                        device_path,
-                        mount_point.to_string(),
-                    ));
+                    return Err(Error::DeviceMounted(device_path, mount_point.to_string()));
                 }
             }
         }

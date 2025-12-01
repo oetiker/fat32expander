@@ -92,9 +92,7 @@ fn validate_boot_sector_impl(boot: &BootSector, allow_invalidated: bool) -> Resu
 
     // Check FAT size
     if boot.fat_size_32() == 0 {
-        return Err(Error::BootSectorValidation(
-            "FAT size is 0".to_string(),
-        ));
+        return Err(Error::BootSectorValidation("FAT size is 0".to_string()));
     }
 
     // Check root cluster (must be >= 2)

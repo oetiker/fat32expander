@@ -561,7 +561,9 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
             - boot.reserved_sectors() as u32
             - (boot.num_fats() as u32 * calculation.old_fat_size))
             / boot.sectors_per_cluster() as u32;
-        let additional_clusters = calculation.new_data_clusters.saturating_sub(old_data_clusters);
+        let additional_clusters = calculation
+            .new_data_clusters
+            .saturating_sub(old_data_clusters);
 
         let new_free = if old_free == FSInfo::UNKNOWN_FREE {
             FSInfo::UNKNOWN_FREE
@@ -758,8 +760,9 @@ impl std::fmt::Display for FSInfoReport {
         if self.free_clusters == FSInfo::UNKNOWN_FREE {
             writeln!(f, "  Free clusters: Unknown")?;
         } else {
-            let free_bytes =
-                self.free_clusters as u64 * self.bytes_per_sector as u64 * self.sectors_per_cluster as u64;
+            let free_bytes = self.free_clusters as u64
+                * self.bytes_per_sector as u64
+                * self.sectors_per_cluster as u64;
             writeln!(
                 f,
                 "  Free clusters: {} ({} bytes)",
@@ -775,7 +778,11 @@ impl std::fmt::Display for FSInfoReport {
             self.current_size_bytes as f64 / (1024.0 * 1024.0)
         )?;
         writeln!(f, "  Device sectors: {}", self.device_sectors)?;
-        writeln!(f, "  Can grow: {}", if self.can_grow { "Yes" } else { "No" })?;
+        writeln!(
+            f,
+            "  Can grow: {}",
+            if self.can_grow { "Yes" } else { "No" }
+        )?;
         if let Some(max_size) = self.max_new_size_bytes {
             writeln!(
                 f,

@@ -1,7 +1,9 @@
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::fat32::structs::{fat_entry, BootSector, FSInfo};
-use crate::fat32::validation::{validate_boot_sector, validate_boot_sector_for_recovery, validate_fsinfo};
+use crate::fat32::validation::{
+    validate_boot_sector, validate_boot_sector_for_recovery, validate_fsinfo,
+};
 
 /// Maximum sector size supported by FAT32 (4096 bytes)
 const MAX_SECTOR_SIZE: usize = 4096;
@@ -281,9 +283,8 @@ pub fn find_free_cluster(
     }
 
     // Wrap around and search from beginning
-    (2..start).find(|&cluster| {
-        cluster < fat.len() as u32 && fat_entry::is_free(fat[cluster as usize])
-    })
+    (2..start)
+        .find(|&cluster| cluster < fat.len() as u32 && fat_entry::is_free(fat[cluster as usize]))
 }
 
 /// Count free clusters in the FAT

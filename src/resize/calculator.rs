@@ -164,7 +164,9 @@ pub fn calculate_fat_size(
     let tmp_val2 = (entries_per_sector * sectors_per_cluster as u64) + (num_fats as u64 / 2);
 
     if tmp_val2 == 0 {
-        return Err(Error::Calculation("Division by zero in FAT size calculation".to_string()));
+        return Err(Error::Calculation(
+            "Division by zero in FAT size calculation".to_string(),
+        ));
     }
 
     // FATSz = (TMPVal1 + (TmpVal2 – 1)) / TmpVal2
@@ -172,7 +174,9 @@ pub fn calculate_fat_size(
 
     // Ensure it fits in u32
     if fat_size > u32::MAX as u64 {
-        return Err(Error::Calculation("FAT size exceeds u32 maximum".to_string()));
+        return Err(Error::Calculation(
+            "FAT size exceeds u32 maximum".to_string(),
+        ));
     }
 
     Ok(fat_size as u32)
