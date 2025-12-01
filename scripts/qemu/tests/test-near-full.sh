@@ -10,3 +10,4 @@ TEST_IMAGE_SIZE_MB=64
 TEST_RESIZE_TO_MB=128
 TEST_DATA_TYPE="fill"
 TEST_EXTRA_ARGS="100"
+TEST_TIMEOUT=180  # Longer timeout for filling filesystem

@@ -278,10 +278,11 @@ while true; do
     if [ "\$USED" -ge ${percent} ]; then
         break
     fi
-    dd if=/dev/urandom of="filldir/fill_\$FILE_NUM.bin" bs=1024 count=50 2>/dev/null || break
+    # Use 512KB chunks for faster filling
+    dd if=/dev/urandom of="filldir/fill_\$FILE_NUM.bin" bs=65536 count=8 2>/dev/null || break
     FILE_NUM=\$((FILE_NUM + 1))
-    if [ \$((FILE_NUM % 20)) -eq 0 ]; then
-        echo "  Written \$FILE_NUM files, \${USED}% used..."
+    if [ \$((FILE_NUM % 10)) -eq 0 ]; then
+        echo "  Written \$FILE_NUM files (~\$((FILE_NUM / 2))MB), \${USED}% used..."
     fi
 done
 echo "Created \$FILE_NUM fill files"
@@ -315,12 +316,17 @@ run_test() {
     TEST_DESCRIPTION="No description"
     TEST_EXTRA_ARGS=""
     TEST_SECTOR_SIZE=512
+    TEST_TIMEOUT=""  # Per-test timeout override
     source "$test_script"
+
+    # Use per-test timeout if specified, otherwise use global VM_TIMEOUT
+    local timeout="${TEST_TIMEOUT:-$VM_TIMEOUT}"
 
     log_info "Description: $TEST_DESCRIPTION"
     log_info "Image: ${TEST_IMAGE_SIZE_MB}MB -> ${TEST_RESIZE_TO_MB}MB"
     log_info "Sector size: ${TEST_SECTOR_SIZE} bytes"
     log_info "Data type: $TEST_DATA_TYPE"
+    log_info "Timeout: ${timeout}s"
 
     # Create test data script
     local test_data_script="$work_dir/test-data.sh"
@@ -333,7 +339,7 @@ run_test() {
             "$BINARY" \
             "$ALPINE_KERNEL" \
             "$ALPINE_INITRD" \
-            "$VM_TIMEOUT" \
+            "$timeout" \
             "$TEST_IMAGE_SIZE_MB" \
             "$TEST_RESIZE_TO_MB" \
             "$TEST_SECTOR_SIZE"; then

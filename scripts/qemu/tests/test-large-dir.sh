@@ -12,3 +12,4 @@ TEST_DESCRIPTION="Large directory spanning multiple clusters (500+ files)"
 TEST_IMAGE_SIZE_MB=64
 TEST_RESIZE_TO_MB=128
 TEST_DATA_TYPE="largedir"
+TEST_TIMEOUT=180  # Creating many files takes time
