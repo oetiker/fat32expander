@@ -1,0 +1,134 @@
+name: Rust Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+
+    - name: Install test dependencies
+      run: |
+        echo "::group::Installing dependencies"
+        sudo apt-get update && sudo apt-get install -y dosfstools mtools
+        echo "::endgroup::"
+
+    - name: Check formatting
+      run: |
+        echo "::group::Checking code formatting"
+        cargo fmt -- --check
+        echo "::endgroup::"
+
+    - name: Run clippy
+      run: |
+        echo "::group::Running clippy lints"
+        cargo clippy -- -D warnings
+        echo "::endgroup::"
+
+    - name: Build
+      run: |
+        echo "::group::Building project"
+        cargo build --release
+        echo "::endgroup::"
+
+    - name: Run unit tests
+      id: unit-tests
+      run: |
+        echo "::group::Running unit tests"
+        echo "::notice title=Running Tests::Starting unit tests"
+
+        # Run tests with JSON output for parsing
+        cargo test --lib --no-fail-fast -- --format=json -Z unstable-options 2>&1 | tee unit-test-results.json || true
+        UNIT_TEST_EXIT_CODE=${PIPESTATUS[0]}
+
+        # Count test results
+        PASSED=$(grep -c '"type":"test","event":"ok"' unit-test-results.json || echo "0")
+        FAILED=$(grep -c '"type":"test","event":"failed"' unit-test-results.json || echo "0")
+        IGNORED=$(grep -c '"type":"test","event":"ignored"' unit-test-results.json || echo "0")
+
+        # Add unit test summary
+        echo "## Unit Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "- Passed: $PASSED" >> $GITHUB_STEP_SUMMARY
+        echo "- Failed: $FAILED" >> $GITHUB_STEP_SUMMARY
+        echo "- Ignored: $IGNORED" >> $GITHUB_STEP_SUMMARY
+
+        if [ "$FAILED" -gt 0 ]; then
+          echo "### Failed Tests" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep '"type":"test","event":"failed"' unit-test-results.json >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "::error title=Unit Tests Failed::$FAILED unit test(s) failed"
+        fi
+
+        echo "::endgroup::"
+        exit $UNIT_TEST_EXIT_CODE
+
+    - name: Run integration tests
+      id: integration-tests
+      run: |
+        echo "::group::Running integration tests"
+        echo "::notice title=Running Tests::Starting integration tests"
+
+        # Run integration tests (marked with #[ignore])
+        cargo test --test integration_test -- --ignored --format=json -Z unstable-options 2>&1 | tee integration-test-results.json || true
+        INTEGRATION_TEST_EXIT_CODE=${PIPESTATUS[0]}
+
+        # Count test results
+        PASSED=$(grep -c '"type":"test","event":"ok"' integration-test-results.json || echo "0")
+        FAILED=$(grep -c '"type":"test","event":"failed"' integration-test-results.json || echo "0")
+        IGNORED=$(grep -c '"type":"test","event":"ignored"' integration-test-results.json || echo "0")
+
+        # Add integration test summary
+        echo "## Integration Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "- Passed: $PASSED" >> $GITHUB_STEP_SUMMARY
+        echo "- Failed: $FAILED" >> $GITHUB_STEP_SUMMARY
+        echo "- Ignored: $IGNORED" >> $GITHUB_STEP_SUMMARY
+
+        if [ "$FAILED" -gt 0 ]; then
+          echo "### Failed Tests" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep '"type":"test","event":"failed"' integration-test-results.json >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "::error title=Integration Tests Failed::$FAILED integration test(s) failed"
+        fi
+
+        echo "::endgroup::"
+        exit $INTEGRATION_TEST_EXIT_CODE
+
+    - name: Run test script
+      run: |
+        echo "::group::Running test-resize.sh"
+        ./scripts/test-resize.sh
+        echo "::endgroup::"
+
+    - name: Generate test summary
+      if: always()
+      run: |
+        echo "## Overall Test Summary" >> $GITHUB_STEP_SUMMARY
+
+        if [ -f unit-test-results.json ] && [ -f integration-test-results.json ]; then
+          TOTAL_PASSED=$(( $(grep -c '"type":"test","event":"ok"' unit-test-results.json || echo 0) + $(grep -c '"type":"test","event":"ok"' integration-test-results.json || echo 0) ))
+          TOTAL_FAILED=$(( $(grep -c '"type":"test","event":"failed"' unit-test-results.json || echo 0) + $(grep -c '"type":"test","event":"failed"' integration-test-results.json || echo 0) ))
+
+          echo "- Total passed: $TOTAL_PASSED" >> $GITHUB_STEP_SUMMARY
+          echo "- Total failed: $TOTAL_FAILED" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$TOTAL_FAILED" -eq 0 ]; then
+            echo "::notice title=Tests Summary::All tests passed: $TOTAL_PASSED tests run"
+          else
+            echo "::error title=Tests Summary::Some tests failed: $TOTAL_FAILED failed out of $((TOTAL_PASSED + TOTAL_FAILED)) tests"
+          fi
+        fi

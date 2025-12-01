@@ -1,0 +1,32 @@
+[package]
+name = "fat32expander"
+version = "0.1.0"
+edition = "2021"
+authors = ["Tobias Oetiker"]
+description = "Resize FAT32 filesystems in-place after partition has been grown"
+license = "MIT"
+readme = "README.md"
+
+[features]
+default = []
+# Enable fault injection for crash recovery testing
+# Build with: cargo build --features fault-injection
+fault-injection = []
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+thiserror = "1.0"
+anyhow = "1.0"
+libc = "0.2"
+crc32fast = "1.4"
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[[bin]]
+name = "fat32expander"
+path = "src/main.rs"
+
+[lib]
+name = "fat32expander"
+path = "src/lib.rs"

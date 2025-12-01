@@ -1,0 +1,172 @@
+#!/usr/bin/expect -f
+#
+# Expect script to automate Alpine Linux VM for FAT32 testing
+#
+# Usage: run-vm.exp <work_dir> <kernel> <initrd> [kvm_flag] [timeout]
+#
+# The VM will:
+# 1. Boot with the work_dir shared via 9p virtfs
+# 2. Execute /mnt/host/guest-commands.sh
+# 3. Shutdown cleanly
+#
+
+# Parse arguments
+if {$argc < 3} {
+    puts "Usage: run-vm.exp <work_dir> <kernel> <initrd> \[kvm_flag\] \[timeout\]"
+    exit 1
+}
+
+set work_dir [lindex $argv 0]
+set kernel [lindex $argv 1]
+set initrd [lindex $argv 2]
+set kvm_flag [expr {$argc > 3 ? [lindex $argv 3] : ""}]
+set vm_timeout [expr {$argc > 4 ? [lindex $argv 4] : 120}]
+
+# Set expect timeout
+set timeout $vm_timeout
+
+# Log file for debugging
+log_file -noappend "$work_dir/vm-console.log"
+
+puts "Starting QEMU VM..."
+puts "  Work dir: $work_dir"
+puts "  Kernel: $kernel"
+puts "  Initrd: $initrd"
+puts "  KVM: [expr {$kvm_flag ne "" ? "enabled" : "disabled (slow)"}]"
+puts "  Timeout: ${vm_timeout}s"
+
+# Build QEMU command
+set qemu_cmd [list qemu-system-x86_64 \
+    -m 384 \
+    -kernel $kernel \
+    -initrd $initrd \
+    -append "console=ttyS0 quiet" \
+    -virtfs "local,path=$work_dir,mount_tag=hostshare,security_model=none" \
+    -nographic \
+    -no-reboot \
+]
+
+# Add KVM if available
+if {$kvm_flag ne ""} {
+    lappend qemu_cmd -enable-kvm
+}
+
+# Start QEMU
+spawn {*}$qemu_cmd
+
+# Wait for boot and shell prompt
+# Alpine's initramfs boots to a shell prompt
+expect {
+    -re {localhost:~#|/ #|~\s*#} {
+        puts "\n>>> VM booted, got shell prompt"
+    }
+    timeout {
+        puts "\n>>> ERROR: Timeout waiting for boot"
+        # Try to capture any output
+        send "\r"
+        expect -re {.*}
+        exit 1
+    }
+    eof {
+        puts "\n>>> ERROR: QEMU exited unexpectedly during boot"
+        exit 1
+    }
+}
+
+# Mount the 9p host share
+puts ">>> Mounting host share..."
+send "mkdir -p /mnt/host && mount -t 9p -o trans=virtio,msize=262144 hostshare /mnt/host\r"
+expect {
+    -re {localhost:~#|/ #|~\s*#} {
+        puts ">>> Host share mounted"
+    }
+    "mount:" {
+        puts ">>> ERROR: Mount failed"
+        send "dmesg | tail -20\r"
+        expect -re {.*#}
+        exit 1
+    }
+    timeout {
+        puts ">>> ERROR: Timeout mounting host share"
+        exit 1
+    }
+}
+
+# Check if guest-commands.sh exists
+send "test -f /mnt/host/guest-commands.sh && echo EXISTS || echo MISSING\r"
+expect {
+    "EXISTS" {
+        puts ">>> Found guest-commands.sh"
+    }
+    "MISSING" {
+        puts ">>> ERROR: guest-commands.sh not found in work directory"
+        send "ls -la /mnt/host/\r"
+        expect -re {.*#}
+        exit 1
+    }
+    timeout {
+        puts ">>> ERROR: Timeout checking for guest-commands.sh"
+        exit 1
+    }
+}
+expect -re {localhost:~#|/ #|~\s*#}
+
+# Execute the guest commands script
+puts ">>> Executing guest-commands.sh..."
+send "chmod +x /mnt/host/guest-commands.sh && /mnt/host/guest-commands.sh 2>&1\r"
+
+# Wait for completion marker or error
+# The guest script should write GUEST_DONE or GUEST_ERROR to indicate completion
+expect {
+    "GUEST_DONE" {
+        puts "\n>>> Guest commands completed successfully"
+    }
+    "GUEST_ERROR" {
+        puts "\n>>> Guest commands reported an error"
+        # Don't exit yet, let it clean up
+    }
+    timeout {
+        puts "\n>>> ERROR: Timeout waiting for guest commands to complete"
+        # Try to see what's happening
+        send "\003"  ;# Ctrl-C
+        sleep 1
+        send "echo TIMEOUT_INTERRUPT\r"
+        expect -re {.*#}
+        # Write error marker
+        send "echo 'timeout' > /mnt/host/result.txt\r"
+        expect -re {.*#}
+    }
+    eof {
+        puts "\n>>> ERROR: QEMU exited during guest command execution"
+        exit 1
+    }
+}
+
+# Wait for prompt after guest commands
+expect -re {localhost:~#|/ #|~\s*#}
+
+# Sync and unmount
+puts ">>> Syncing and unmounting..."
+send "sync\r"
+expect -re {localhost:~#|/ #|~\s*#}
+send "umount /mnt/host 2>/dev/null || true\r"
+expect -re {localhost:~#|/ #|~\s*#}
+
+# Shutdown
+puts ">>> Shutting down VM..."
+send "poweroff -f\r"
+
+# Wait for QEMU to exit
+expect {
+    eof {
+        puts ">>> VM shutdown complete"
+    }
+    timeout {
+        puts ">>> Warning: VM didn't shutdown cleanly, killing..."
+        close
+        wait
+    }
+}
+
+puts ">>> VM session finished"
+exit 0
