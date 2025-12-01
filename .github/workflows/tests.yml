@@ -23,8 +23,11 @@ jobs:
     - name: Install test dependencies
       run: |
         echo "::group::Installing dependencies"
-        sudo apt-get update && sudo apt-get install -y dosfstools mtools
+        sudo apt-get update && sudo apt-get install -y dosfstools mtools qemu-system-x86 musl-tools
         echo "::endgroup::"
+
+    - name: Install musl target for static builds
+      run: rustup target add x86_64-unknown-linux-musl
 
     - name: Check formatting
       run: |
@@ -83,4 +86,35 @@ jobs:
         echo "## Test Script" >> $GITHUB_STEP_SUMMARY
         echo "✅ test-resize.sh passed" >> $GITHUB_STEP_SUMMARY
         echo "::endgroup::"
+
+    - name: Setup Alpine for QEMU tests
+      run: |
+        echo "::group::Setting up Alpine Linux for QEMU"
+        ./scripts/qemu/setup-alpine.sh setup
+        echo "::endgroup::"
+
+    - name: Build static binary for QEMU tests
+      run: |
+        echo "::group::Building static musl binary"
+        cargo build --release --target x86_64-unknown-linux-musl
+        echo "::endgroup::"
+
+    - name: Run QEMU tests
+      run: |
+        echo "::group::Running QEMU-based tests"
+        ./scripts/qemu/test-qemu.sh 2>&1 | tee qemu-test-results.txt
+        QEMU_EXIT=${PIPESTATUS[0]}
+
+        # Add summary
+        echo "## QEMU Test Results" >> $GITHUB_STEP_SUMMARY
+        if [ $QEMU_EXIT -eq 0 ]; then
+          PASSED=$(grep -c "PASSED" qemu-test-results.txt || echo "0")
+          echo "✅ All QEMU tests passed ($PASSED tests)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ QEMU tests failed" >> $GITHUB_STEP_SUMMARY
+          grep -E "(FAILED|ERROR)" qemu-test-results.txt >> $GITHUB_STEP_SUMMARY || true
+        fi
+
+        echo "::endgroup::"
+        exit $QEMU_EXIT
 

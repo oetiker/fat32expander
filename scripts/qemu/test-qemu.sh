@@ -17,6 +17,9 @@
 
 set -e
 
+# Ensure sbin directories are in PATH (dosfstools often installed there)
+export PATH="$PATH:/sbin:/usr/sbin"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 
