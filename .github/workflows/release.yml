@@ -89,7 +89,7 @@ jobs:
 
                 // Implement a polling mechanism to wait for tests to complete
                 const runId = inProgressRun.id;
-                const maxWaitTimeMs = 2 * 60 * 1000; // 2 minutes in milliseconds
+                const maxWaitTimeMs = 5 * 60 * 1000; // 2 minutes in milliseconds
                 const checkIntervalMs = 5000; // Check every 5 seconds
                 const startTime = Date.now();
 

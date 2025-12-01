@@ -328,25 +328,41 @@ run_test() {
     log_info "Data type: $TEST_DATA_TYPE"
     log_info "Timeout: ${timeout}s"
 
-    # Create test data script
-    local test_data_script="$work_dir/test-data.sh"
-    create_test_script "$test_data_script" "$TEST_DATA_TYPE" "$TEST_EXTRA_ARGS"
-
-    # Run the VM test
-    if ! "$SCRIPT_DIR/run-vm.sh" \
-            "$work_dir" \
-            "$test_data_script" \
-            "$BINARY" \
-            "$ALPINE_KERNEL" \
-            "$ALPINE_INITRD" \
-            "$timeout" \
-            "$TEST_IMAGE_SIZE_MB" \
-            "$TEST_RESIZE_TO_MB" \
-            "$TEST_SECTOR_SIZE"; then
-        log_error "Test FAILED: $test_name"
-        result=1
+    # Run the appropriate VM test based on data type
+    if [ "$TEST_DATA_TYPE" = "multistage" ]; then
+        # Use specialized multi-stage runner
+        if ! "$SCRIPT_DIR/run-vm-multistage.sh" \
+                "$work_dir" \
+                "$BINARY" \
+                "$ALPINE_KERNEL" \
+                "$ALPINE_INITRD" \
+                "$timeout"; then
+            log_error "Test FAILED: $test_name"
+            result=1
+        else
+            log_info "Test PASSED: $test_name"
+        fi
     else
-        log_info "Test PASSED: $test_name"
+        # Create test data script for standard single-resize test
+        local test_data_script="$work_dir/test-data.sh"
+        create_test_script "$test_data_script" "$TEST_DATA_TYPE" "$TEST_EXTRA_ARGS"
+
+        # Run the VM test
+        if ! "$SCRIPT_DIR/run-vm.sh" \
+                "$work_dir" \
+                "$test_data_script" \
+                "$BINARY" \
+                "$ALPINE_KERNEL" \
+                "$ALPINE_INITRD" \
+                "$timeout" \
+                "$TEST_IMAGE_SIZE_MB" \
+                "$TEST_RESIZE_TO_MB" \
+                "$TEST_SECTOR_SIZE"; then
+            log_error "Test FAILED: $test_name"
+            result=1
+        else
+            log_info "Test PASSED: $test_name"
+        fi
     fi
 
     # Cleanup or preserve
