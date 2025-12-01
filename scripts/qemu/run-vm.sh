@@ -301,6 +301,7 @@ fi
 
 # Run QEMU
 # -nographic redirects serial to stdio automatically
+# Filter out checksum lines from display (they're still captured in the log)
 echo "Booting VM..."
 timeout "$VM_TIMEOUT" qemu-system-x86_64 \
     $KVM_OPTS \
@@ -310,7 +311,7 @@ timeout "$VM_TIMEOUT" qemu-system-x86_64 \
     -initrd "$COMBINED_INITRD" \
     -append "console=ttyS0 quiet initial_size=$INITIAL_SIZE_MB final_size=$FINAL_SIZE_MB sector_size=$SECTOR_SIZE" \
     -no-reboot \
-    2>&1 | tee "$SERIAL_LOG"
+    2>&1 | tee "$SERIAL_LOG" | grep -Ev "^[a-f0-9]{64}  \."
 
 QEMU_EXIT=$?
 
