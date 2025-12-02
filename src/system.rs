@@ -91,7 +91,8 @@ pub fn get_block_device_size(path: impl AsRef<Path>) -> Result<u64> {
     use std::io::{Seek, SeekFrom};
 
     let path = path.as_ref();
-    let mut file = File::open(path).map_err(|_| Error::DeviceNotFound(path.display().to_string()))?;
+    let mut file =
+        File::open(path).map_err(|_| Error::DeviceNotFound(path.display().to_string()))?;
     let size = file.seek(SeekFrom::End(0))?;
     Ok(size)
 }

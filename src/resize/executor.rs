@@ -331,7 +331,10 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
     } else {
         Device::open(options.device_path())?
     };
-    operations.push(format!("Opened device: {}", options.device_path().display()));
+    operations.push(format!(
+        "Opened device: {}",
+        options.device_path().display()
+    ));
 
     // Read boot sector - use recovery mode to allow invalidated signature
     // from an interrupted resize operation
@@ -844,9 +847,7 @@ mod tests {
 
     #[test]
     fn test_resize_options() {
-        let opts = ResizeOptions::new("/dev/sda1")
-            .dry_run(true)
-            .verbose(false);
+        let opts = ResizeOptions::new("/dev/sda1").dry_run(true).verbose(false);
 
         assert_eq!(opts.device_path(), std::path::Path::new("/dev/sda1"));
         assert!(opts.is_dry_run());

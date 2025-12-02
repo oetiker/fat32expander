@@ -3,7 +3,7 @@ pub mod structs;
 pub mod validation;
 
 // Re-export types from structs
-pub use structs::{BootSector, ClusterId, FSInfo, SectorNum, fat_entry};
+pub use structs::{fat_entry, BootSector, ClusterId, FSInfo, SectorNum};
 
 // Re-export operations
 pub use operations::{
