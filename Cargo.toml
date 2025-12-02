@@ -1,6 +1,6 @@
 [package]
 name = "fat32expander"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 authors = ["Tobias Oetiker"]
 description = "Resize FAT32 filesystems in-place after partition has been grown"
