@@ -1,5 +1,125 @@
 use crate::error::{Error, Result};
 
+// ===== Newtype Wrappers for Type Safety =====
+
+/// A cluster ID in a FAT32 filesystem.
+///
+/// Cluster IDs start at 2 (clusters 0 and 1 are reserved).
+/// This newtype prevents accidentally mixing up cluster IDs with sector numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClusterId(u32);
+
+impl ClusterId {
+    /// The first valid data cluster (cluster 2)
+    pub const FIRST_DATA_CLUSTER: Self = Self(2);
+
+    /// Create a new ClusterId from a raw value.
+    ///
+    /// Note: This does not validate that the cluster ID is >= 2.
+    /// Use `new_checked` for validation.
+    #[inline]
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    /// Create a new ClusterId with validation.
+    ///
+    /// Returns `None` if the cluster ID is less than 2 (reserved).
+    #[inline]
+    pub const fn new_checked(id: u32) -> Option<Self> {
+        if id >= 2 {
+            Some(Self(id))
+        } else {
+            None
+        }
+    }
+
+    /// Get the raw cluster ID value.
+    #[inline]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Get the cluster index (0-based offset from cluster 2).
+    ///
+    /// This is useful for calculating sector offsets.
+    #[inline]
+    pub const fn index(self) -> u32 {
+        self.0.saturating_sub(2)
+    }
+}
+
+impl From<u32> for ClusterId {
+    fn from(id: u32) -> Self {
+        Self(id)
+    }
+}
+
+impl From<ClusterId> for u32 {
+    fn from(id: ClusterId) -> Self {
+        id.0
+    }
+}
+
+impl std::fmt::Display for ClusterId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cluster {}", self.0)
+    }
+}
+
+/// A sector number in a FAT32 filesystem.
+///
+/// This newtype prevents accidentally mixing up sector numbers with cluster IDs
+/// or byte offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SectorNum(u64);
+
+impl SectorNum {
+    /// Create a new SectorNum from a raw value.
+    #[inline]
+    pub const fn new(sector: u64) -> Self {
+        Self(sector)
+    }
+
+    /// Get the raw sector number.
+    #[inline]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Add an offset to this sector number.
+    #[inline]
+    pub const fn offset(self, offset: u64) -> Self {
+        Self(self.0 + offset)
+    }
+
+    /// Calculate byte offset from start of device given a sector size.
+    #[inline]
+    pub const fn to_byte_offset(self, sector_size: u32) -> u64 {
+        self.0 * sector_size as u64
+    }
+}
+
+impl From<u64> for SectorNum {
+    fn from(sector: u64) -> Self {
+        Self(sector)
+    }
+}
+
+impl From<SectorNum> for u64 {
+    fn from(sector: SectorNum) -> Self {
+        sector.0
+    }
+}
+
+impl std::fmt::Display for SectorNum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sector {}", self.0)
+    }
+}
+
+// ===== FAT32 Structures =====
+
 /// FAT32 Boot Sector / BIOS Parameter Block
 ///
 /// This structure represents the first sector of a FAT32 filesystem.

@@ -175,7 +175,9 @@ impl ResizeCheckpoint {
         }
 
         // Parse phase
-        let phase = ResizePhase::from_u8(data[9]).ok_or(Error::CheckpointCorrupted)?;
+        let Some(phase) = ResizePhase::from_u8(data[9]) else {
+            return Err(Error::CheckpointCorrupted);
+        };
 
         // Parse fields
         let old_total_sectors = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
@@ -255,12 +257,47 @@ fn check_for_incomplete_resize(
 /// Options for the resize operation
 #[derive(Debug, Clone)]
 pub struct ResizeOptions {
-    /// Path to the device or image file
-    pub device_path: String,
-    /// Dry run mode - don't actually make changes
-    pub dry_run: bool,
-    /// Verbose output
-    pub verbose: bool,
+    device_path: std::path::PathBuf,
+    dry_run: bool,
+    verbose: bool,
+}
+
+impl ResizeOptions {
+    /// Create new resize options for the given device path
+    pub fn new(device_path: impl AsRef<std::path::Path>) -> Self {
+        Self {
+            device_path: device_path.as_ref().to_path_buf(),
+            dry_run: false,
+            verbose: false,
+        }
+    }
+
+    /// Enable or disable dry run mode (don't make changes)
+    pub fn dry_run(mut self, enable: bool) -> Self {
+        self.dry_run = enable;
+        self
+    }
+
+    /// Enable or disable verbose output
+    pub fn verbose(mut self, enable: bool) -> Self {
+        self.verbose = enable;
+        self
+    }
+
+    /// Get the device path
+    pub fn device_path(&self) -> &std::path::Path {
+        &self.device_path
+    }
+
+    /// Check if dry run mode is enabled
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// Check if verbose mode is enabled
+    pub fn is_verbose(&self) -> bool {
+        self.verbose
+    }
 }
 
 /// Result of a resize operation
@@ -285,16 +322,16 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
     let mut operations = Vec::new();
 
     // Check if mounted
-    check_not_mounted(&options.device_path)?;
+    check_not_mounted(options.device_path())?;
     operations.push("Verified device is not mounted".to_string());
 
     // Open device
-    let mut device = if options.dry_run {
-        Device::open_readonly(&options.device_path)?
+    let mut device = if options.is_dry_run() {
+        Device::open_readonly(options.device_path())?
     } else {
-        Device::open(&options.device_path)?
+        Device::open(options.device_path())?
     };
-    operations.push(format!("Opened device: {}", options.device_path));
+    operations.push(format!("Opened device: {}", options.device_path().display()));
 
     // Read boot sector - use recovery mode to allow invalidated signature
     // from an interrupted resize operation
@@ -306,7 +343,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
     ));
 
     // Check for incomplete resize operation
-    let incomplete_resize = if !options.dry_run {
+    let incomplete_resize = if !options.is_dry_run() {
         check_for_incomplete_resize(&device, &boot)?
     } else {
         None
@@ -385,17 +422,8 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         calculation.old_total_sectors, calculation.new_total_sectors
     ));
 
-    if options.verbose {
-        eprintln!("Current filesystem:");
-        eprintln!("  Total sectors: {}", calculation.old_total_sectors);
-        eprintln!("  FAT size: {} sectors", calculation.old_fat_size);
-        eprintln!("  Data clusters: {}", boot.data_clusters());
-        eprintln!();
-        eprintln!("After resize:");
-        eprintln!("  Total sectors: {}", calculation.new_total_sectors);
-        eprintln!("  FAT size: {} sectors", calculation.new_fat_size);
-        eprintln!("  Data clusters: {}", calculation.new_data_clusters);
-        eprintln!("  FAT needs growth: {}", calculation.fat_needs_growth);
+    if options.is_verbose() {
+        print_verbose_resize_info(&boot, &calculation);
     }
 
     let old_size_bytes = calculation.old_total_sectors as u64 * boot.bytes_per_sector() as u64;
@@ -437,12 +465,12 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
                 plan.total_bytes
             ));
 
-            if options.verbose {
+            if options.is_verbose() {
                 eprintln!("\nData shift plan (cluster numbers unchanged, sectors shift forward):");
                 eprintln!("  {} clusters will be moved", plan.moves.len());
             }
 
-            if !options.dry_run {
+            if !options.is_dry_run() {
                 // === PHASE 0: Data shift (safe - source preserved) ===
                 if starting_phase == ResizePhase::Started {
                     // Write initial checkpoint
@@ -466,7 +494,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
                         &plan,
                         calculation.new_fat_size,
                         calculation.new_data_clusters,
-                        options.verbose,
+                        options.is_verbose(),
                     )?;
                     clusters_relocated = plan.cluster_count();
                     operations.push(format!("Shifted {} clusters forward", clusters_relocated));
@@ -540,7 +568,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         }
     }
 
-    if !options.dry_run {
+    if !options.is_dry_run() {
         // === PHASE 2: Metadata update (restore boot sector) ===
 
         // Update boot sector with new values and restore signature
@@ -593,6 +621,20 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         calculation,
         operations,
     })
+}
+
+/// Print verbose resize information to stderr
+fn print_verbose_resize_info(boot: &BootSector, calculation: &SizeCalculation) {
+    eprintln!("Current filesystem:");
+    eprintln!("  Total sectors: {}", calculation.old_total_sectors);
+    eprintln!("  FAT size: {} sectors", calculation.old_fat_size);
+    eprintln!("  Data clusters: {}", boot.data_clusters());
+    eprintln!();
+    eprintln!("After resize:");
+    eprintln!("  Total sectors: {}", calculation.new_total_sectors);
+    eprintln!("  FAT size: {} sectors", calculation.new_fat_size);
+    eprintln!("  Data clusters: {}", calculation.new_data_clusters);
+    eprintln!("  FAT needs growth: {}", calculation.fat_needs_growth);
 }
 
 /// Helper to calculate data clusters from parameters
@@ -660,7 +702,8 @@ fn sync_fat_copies(device: &Device, boot: &BootSector, calc: &SizeCalculation) -
 }
 
 /// Get information about a FAT32 filesystem without modifying it
-pub fn get_fs_info(device_path: &str) -> Result<FSInfoReport> {
+pub fn get_fs_info(device_path: impl AsRef<std::path::Path>) -> Result<FSInfoReport> {
+    let device_path = device_path.as_ref();
     let mut device = Device::open_readonly(device_path)?;
     let boot = read_boot_sector(&mut device)?;
 
@@ -682,7 +725,7 @@ pub fn get_fs_info(device_path: &str) -> Result<FSInfoReport> {
     };
 
     Ok(FSInfoReport {
-        device_path: device_path.to_string(),
+        device_path: device_path.to_path_buf(),
         bytes_per_sector: boot.bytes_per_sector(),
         sectors_per_cluster: boot.sectors_per_cluster(),
         reserved_sectors: boot.reserved_sectors(),
@@ -705,7 +748,7 @@ pub fn get_fs_info(device_path: &str) -> Result<FSInfoReport> {
 /// Report about a FAT32 filesystem
 #[derive(Debug)]
 pub struct FSInfoReport {
-    pub device_path: String,
+    pub device_path: std::path::PathBuf,
     pub bytes_per_sector: u16,
     pub sectors_per_cluster: u8,
     pub reserved_sectors: u16,
@@ -728,7 +771,7 @@ impl std::fmt::Display for FSInfoReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "FAT32 Filesystem Information")?;
         writeln!(f, "============================")?;
-        writeln!(f, "Device: {}", self.device_path)?;
+        writeln!(f, "Device: {}", self.device_path.display())?;
         writeln!(f)?;
         writeln!(f, "Geometry:")?;
         writeln!(f, "  Bytes per sector: {}", self.bytes_per_sector)?;
@@ -801,15 +844,13 @@ mod tests {
 
     #[test]
     fn test_resize_options() {
-        let opts = ResizeOptions {
-            device_path: "/dev/sda1".to_string(),
-            dry_run: true,
-            verbose: false,
-        };
+        let opts = ResizeOptions::new("/dev/sda1")
+            .dry_run(true)
+            .verbose(false);
 
-        assert_eq!(opts.device_path, "/dev/sda1");
-        assert!(opts.dry_run);
-        assert!(!opts.verbose);
+        assert_eq!(opts.device_path(), std::path::Path::new("/dev/sda1"));
+        assert!(opts.is_dry_run());
+        assert!(!opts.is_verbose());
     }
 
     #[test]

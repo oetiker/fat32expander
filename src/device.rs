@@ -2,26 +2,37 @@ use crate::error::{Error, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Wrapper around a block device or image file for sector-based I/O
 pub struct Device {
     file: File,
-    path: String,
+    path: PathBuf,
     sector_size: u32,
     total_sectors: u64,
 }
 
+impl std::fmt::Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Device")
+            .field("path", &self.path)
+            .field("sector_size", &self.sector_size)
+            .field("total_sectors", &self.total_sectors)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Device {
-    /// Open a device or image file for read/write access
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path_str = path.as_ref().to_string_lossy().to_string();
+    /// Internal helper to open a device with specified mode
+    fn open_impl<P: AsRef<Path>>(path: P, writable: bool) -> Result<Self> {
+        let path_buf = path.as_ref().to_path_buf();
+        let path_display = path_buf.display().to_string();
 
         let file = OpenOptions::new()
             .read(true)
-            .write(true)
-            .open(&path)
-            .map_err(|_| Error::DeviceNotFound(path_str.clone()))?;
+            .write(writable)
+            .open(&path_buf)
+            .map_err(|_| Error::DeviceNotFound(path_display))?;
 
         // Get device size
         let metadata = file.metadata()?;
@@ -41,42 +52,24 @@ impl Device {
 
         Ok(Self {
             file,
-            path: path_str,
+            path: path_buf,
             sector_size,
             total_sectors,
         })
+    }
+
+    /// Open a device or image file for read/write access
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::open_impl(path, true)
     }
 
     /// Open a device in read-only mode (for dry-run)
     pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path_str = path.as_ref().to_string_lossy().to_string();
-
-        let file = OpenOptions::new()
-            .read(true)
-            .open(&path)
-            .map_err(|_| Error::DeviceNotFound(path_str.clone()))?;
-
-        let metadata = file.metadata()?;
-        let size = if metadata.is_file() {
-            metadata.len()
-        } else {
-            let mut f = file.try_clone()?;
-            f.seek(SeekFrom::End(0))?
-        };
-
-        let sector_size = 512u32;
-        let total_sectors = size / sector_size as u64;
-
-        Ok(Self {
-            file,
-            path: path_str,
-            sector_size,
-            total_sectors,
-        })
+        Self::open_impl(path, false)
     }
 
     /// Get the device path
-    pub fn path(&self) -> &str {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 

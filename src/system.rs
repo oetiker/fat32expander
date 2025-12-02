@@ -5,8 +5,8 @@ use std::path::Path;
 /// Check if a device is currently mounted
 ///
 /// On Linux, this parses /proc/mounts to check if the device is mounted.
-pub fn check_not_mounted(device_path: &str) -> Result<()> {
-    let device_path = resolve_device_path(device_path)?;
+pub fn check_not_mounted(device_path: impl AsRef<Path>) -> Result<()> {
+    let device_path = resolve_device_path(device_path.as_ref())?;
 
     // Read /proc/mounts
     let mounts = fs::read_to_string("/proc/mounts").map_err(|e| {
@@ -24,7 +24,7 @@ pub fn check_not_mounted(device_path: &str) -> Result<()> {
             let mount_point = parts[1];
 
             // Check if this mount entry matches our device
-            if let Ok(resolved_mount) = resolve_device_path(mount_device) {
+            if let Ok(resolved_mount) = resolve_device_path(Path::new(mount_device)) {
                 if resolved_mount == device_path {
                     return Err(Error::DeviceMounted(device_path, mount_point.to_string()));
                 }
@@ -38,9 +38,7 @@ pub fn check_not_mounted(device_path: &str) -> Result<()> {
 /// Resolve a device path to its canonical form
 ///
 /// This handles symlinks (e.g., /dev/disk/by-uuid/... -> /dev/sda1)
-fn resolve_device_path(path: &str) -> Result<String> {
-    let path = Path::new(path);
-
+fn resolve_device_path(path: &Path) -> Result<String> {
     // Try to canonicalize the path
     match path.canonicalize() {
         Ok(canonical) => Ok(canonical.to_string_lossy().to_string()),
@@ -58,11 +56,12 @@ pub fn check_root() -> bool {
 
 /// Get the size of a block device in bytes
 #[cfg(target_os = "linux")]
-pub fn get_block_device_size(path: &str) -> Result<u64> {
+pub fn get_block_device_size(path: impl AsRef<Path>) -> Result<u64> {
     use std::fs::File;
     use std::os::unix::io::AsRawFd;
 
-    let file = File::open(path).map_err(|_| Error::DeviceNotFound(path.to_string()))?;
+    let path = path.as_ref();
+    let file = File::open(path).map_err(|_| Error::DeviceNotFound(path.display().to_string()))?;
     let fd = file.as_raw_fd();
 
     // Use BLKGETSIZE64 ioctl
@@ -87,11 +86,12 @@ pub fn get_block_device_size(path: &str) -> Result<u64> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn get_block_device_size(path: &str) -> Result<u64> {
+pub fn get_block_device_size(path: impl AsRef<Path>) -> Result<u64> {
     use std::fs::File;
     use std::io::{Seek, SeekFrom};
 
-    let mut file = File::open(path).map_err(|_| Error::DeviceNotFound(path.to_string()))?;
+    let path = path.as_ref();
+    let mut file = File::open(path).map_err(|_| Error::DeviceNotFound(path.display().to_string()))?;
     let size = file.seek(SeekFrom::End(0))?;
     Ok(size)
 }
@@ -105,9 +105,8 @@ mod tests {
     fn test_resolve_device_path() {
         // Test with a regular file
         let file = NamedTempFile::new().unwrap();
-        let path = file.path().to_str().unwrap();
 
-        let resolved = resolve_device_path(path).unwrap();
+        let resolved = resolve_device_path(file.path()).unwrap();
         // Should be an absolute path
         assert!(resolved.starts_with('/'));
     }
@@ -116,10 +115,9 @@ mod tests {
     fn test_check_not_mounted_file() {
         // Create a temp file - should not be mounted
         let file = NamedTempFile::new().unwrap();
-        let path = file.path().to_str().unwrap();
 
         // Should succeed since temp files aren't mounted
-        let result = check_not_mounted(path);
+        let result = check_not_mounted(file.path());
         assert!(result.is_ok());
     }
 
@@ -129,7 +127,7 @@ mod tests {
         // Write some data
         std::fs::write(file.path(), vec![0u8; 4096]).unwrap();
 
-        let size = get_block_device_size(file.path().to_str().unwrap()).unwrap();
+        let size = get_block_device_size(file.path()).unwrap();
         assert_eq!(size, 4096);
     }
 }

@@ -54,7 +54,7 @@ fn check_filesystem(path: &std::path::Path) -> bool {
 #[ignore] // Requires mkfs.fat and dosfsck
 fn test_info_command() {
     let image = create_fat32_image(128);
-    let info = get_fs_info(image.path().to_str().unwrap()).expect("Failed to get fs info");
+    let info = get_fs_info(image.path()).expect("Failed to get fs info");
 
     assert_eq!(info.bytes_per_sector, 512);
     assert!(info.data_clusters > 65525, "Should be FAT32");
@@ -71,21 +71,19 @@ fn test_resize_without_fat_growth() {
     extend_image(image.path(), 150);
 
     // Get info before resize
-    let info_before = get_fs_info(image.path().to_str().unwrap()).expect("Failed to get fs info");
+    let info_before = get_fs_info(image.path()).expect("Failed to get fs info");
     assert!(info_before.can_grow);
 
     // Resize
-    let options = ResizeOptions {
-        device_path: image.path().to_str().unwrap().to_string(),
-        dry_run: false,
-        verbose: false,
-    };
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
     let result = resize_fat32(options).expect("Resize failed");
 
     assert!(result.new_size_bytes > result.old_size_bytes);
 
     // Get info after resize
-    let info_after = get_fs_info(image.path().to_str().unwrap()).expect("Failed to get fs info");
+    let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
     assert!(!info_after.can_grow, "Should be at max size now");
 
     // Verify filesystem integrity
@@ -102,22 +100,20 @@ fn test_resize_with_fat_growth() {
     extend_image(image.path(), 256);
 
     // Get info before resize
-    let info_before = get_fs_info(image.path().to_str().unwrap()).expect("Failed to get fs info");
+    let info_before = get_fs_info(image.path()).expect("Failed to get fs info");
     assert!(info_before.can_grow);
 
     // Resize
-    let options = ResizeOptions {
-        device_path: image.path().to_str().unwrap().to_string(),
-        dry_run: false,
-        verbose: true,
-    };
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(true);
     let result = resize_fat32(options).expect("Resize failed");
 
     assert!(result.new_size_bytes > result.old_size_bytes);
     // FAT growth depends on the size increase
 
     // Get info after resize
-    let info_after = get_fs_info(image.path().to_str().unwrap()).expect("Failed to get fs info");
+    let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
     assert!(!info_after.can_grow, "Should be at max size now");
     assert!(
         info_after.data_clusters > info_before.data_clusters,
@@ -138,21 +134,19 @@ fn test_dry_run() {
     extend_image(image.path(), 256);
 
     // Get original size
-    let info_before = get_fs_info(image.path().to_str().unwrap()).expect("Failed to get fs info");
+    let info_before = get_fs_info(image.path()).expect("Failed to get fs info");
 
     // Dry run resize
-    let options = ResizeOptions {
-        device_path: image.path().to_str().unwrap().to_string(),
-        dry_run: true,
-        verbose: false,
-    };
+    let options = ResizeOptions::new(image.path())
+        .dry_run(true)
+        .verbose(false);
     let result = resize_fat32(options).expect("Dry run failed");
 
     // Verify it reported what would happen
     assert!(result.new_size_bytes > result.old_size_bytes);
 
     // Verify no changes were made
-    let info_after = get_fs_info(image.path().to_str().unwrap()).expect("Failed to get fs info");
+    let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
     assert_eq!(info_before.total_sectors, info_after.total_sectors);
     assert_eq!(info_before.fat_size_sectors, info_after.fat_size_sectors);
 }
@@ -164,11 +158,9 @@ fn test_already_max_size() {
     let image = create_fat32_image(128);
 
     // Try to resize - should fail because already at max size
-    let options = ResizeOptions {
-        device_path: image.path().to_str().unwrap().to_string(),
-        dry_run: false,
-        verbose: false,
-    };
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
     let result = resize_fat32(options);
 
     assert!(result.is_err());
@@ -187,11 +179,9 @@ fn test_resize_with_data() {
     extend_image(image.path(), 256);
 
     // Resize
-    let options = ResizeOptions {
-        device_path: image.path().to_str().unwrap().to_string(),
-        dry_run: false,
-        verbose: false,
-    };
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
     resize_fat32(options).expect("Resize failed");
 
     // Verify filesystem integrity

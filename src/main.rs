@@ -225,11 +225,9 @@ fn main() -> Result<()> {
             }
 
             // Perform the resize
-            let options = ResizeOptions {
-                device_path: device.clone(),
-                dry_run,
-                verbose,
-            };
+            let options = ResizeOptions::new(&device)
+                .dry_run(dry_run)
+                .verbose(verbose);
 
             let result = resize_fat32(options)
                 .with_context(|| format!("Failed to resize filesystem on {}", device))?;
