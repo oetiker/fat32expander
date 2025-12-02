@@ -1,5 +1,9 @@
 # fat32expander
 
+[![Rust Tests](https://github.com/oetiker/fat32expander/actions/workflows/tests.yml/badge.svg)](https://github.com/oetiker/fat32expander/actions/workflows/tests.yml)
+[![Latest Release](https://img.shields.io/github/v/release/oetiker/fat32expander)](https://github.com/oetiker/fat32expander/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A command-line tool to expand FAT32 filesystems in-place after their underlying partition or disk image has been grown.
 
 ## Warning
@@ -23,7 +27,7 @@ When you resize a partition (e.g., with `parted`, `fdisk`, or by expanding a vir
 
 ### Pre-built Binaries
 
-Download from the [releases page](https://github.com/youruser/fat32expander/releases).
+Download from the [releases page](https://github.com/oetiker/fat32expander/releases).
 
 ### Building from Source
 
@@ -31,7 +35,7 @@ Requires Rust 1.70 or later.
 
 ```bash
 # Clone the repository
-git clone https://github.com/youruser/fat32expander.git
+git clone https://github.com/oetiker/fat32expander.git
 cd fat32expander
 
 # Build release binary
@@ -180,8 +184,18 @@ make test-qemu-one TEST=test-fragmented
 ## Limitations
 
 - Linux only (mount detection via `/proc/mounts`)
-- Expand only; cannot shrink filesystems
+- Expand only; cannot shrink filesystems (see below)
 - Recovery requires running the same tool version that started the operation
+
+### Why No Shrinking?
+
+Expanding is straightforward: shift cluster data forward, keep cluster numbers unchanged, no FAT chain or directory updates needed. Shrinking is fundamentally harder.
+
+When shrinking, clusters beyond the new boundary must be relocated to free space within it. Unlike expanding, this changes cluster numbers, requiring updates to FAT chains and every directory entry pointing to moved files. This means traversing the entire directory tree, parsing entries (including long filename handling), and updating cluster pointers in place.
+
+Additionally, shrinking a filesystem without also shrinking its partition is pointless—partitioning tools won't recognize the reduced size. Supporting both MBR and GPT partition tables adds further complexity.
+
+The result would roughly double the codebase size and risk. Since expanding (growing VM disks, SD cards, disk images) is the common use case, the added complexity isn't justified.
 
 ## License
 

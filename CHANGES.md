@@ -8,13 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### New
-
+- added a note to the readme why we are not shrinking
 ### Changed
 
 ### Fixed
 
-## 0.0.1 - 2025-12-01
-## 0.0.1 - 2025-12-01
 ## 0.0.1 - 2025-12-01
 ### New
 - initial release
