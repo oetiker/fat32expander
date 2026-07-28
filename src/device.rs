@@ -106,13 +106,33 @@ impl Device {
         }
     }
 
+    /// Attach this device's identity to a failed I/O call.
+    ///
+    /// The path and sector size live here and nowhere else, so this is the only
+    /// place that can turn "failed to fill whole buffer" into a statement about
+    /// a particular sector of a particular device ([F-R30]). Sector-addressed
+    /// callers pass the offset they already computed; the sector is derived so
+    /// byte-addressed callers get one too.
+    fn io_err(&self, op: &'static str, offset: u64, len: usize, source: std::io::Error) -> Error {
+        Error::DeviceIo {
+            op,
+            path: self.path.display().to_string(),
+            offset,
+            sector: offset / self.sector_size as u64,
+            len,
+            source,
+        }
+    }
+
     /// Read sectors starting at the given sector number
     pub fn read_sectors(&self, start_sector: u64, count: u32) -> Result<Vec<u8>> {
         let offset = start_sector * self.sector_size as u64;
         let size = count as usize * self.sector_size as usize;
         let mut buffer = vec![0u8; size];
 
-        self.file.read_exact_at(&mut buffer, offset)?;
+        self.file
+            .read_exact_at(&mut buffer, offset)
+            .map_err(|e| self.io_err("read", offset, size, e))?;
         Ok(buffer)
     }
 
@@ -124,41 +144,47 @@ impl Device {
     /// Write sectors starting at the given sector number
     pub fn write_sectors(&self, start_sector: u64, data: &[u8]) -> Result<()> {
         let offset = start_sector * self.sector_size as u64;
-        self.file.write_all_at(data, offset)?;
+        self.file
+            .write_all_at(data, offset)
+            .map_err(|e| self.io_err("write", offset, data.len(), e))?;
         Ok(())
     }
 
     /// Write a single sector
     pub fn write_sector(&self, sector: u64, data: &[u8]) -> Result<()> {
         if data.len() != self.sector_size as usize {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Data size {} does not match sector size {}",
-                    data.len(),
-                    self.sector_size
-                ),
-            )));
+            return Err(Error::SectorLengthMismatch {
+                path: self.path.display().to_string(),
+                expected: self.sector_size,
+                actual: data.len(),
+            });
         }
         self.write_sectors(sector, data)
     }
 
     /// Flush all writes to disk
     pub fn sync(&self) -> Result<()> {
-        self.file.sync_all()?;
+        self.file.sync_all().map_err(|source| Error::DeviceSync {
+            path: self.path.display().to_string(),
+            source,
+        })?;
         Ok(())
     }
 
     /// Read raw bytes from a byte offset (used for bootstrapping before sector size is known)
     pub fn read_bytes_at(&self, offset: u64, size: usize) -> Result<Vec<u8>> {
         let mut buffer = vec![0u8; size];
-        self.file.read_exact_at(&mut buffer, offset)?;
+        self.file
+            .read_exact_at(&mut buffer, offset)
+            .map_err(|e| self.io_err("read", offset, size, e))?;
         Ok(buffer)
     }
 
     /// Write raw bytes at a byte offset
     pub fn write_bytes_at(&self, offset: u64, data: &[u8]) -> Result<()> {
-        self.file.write_all_at(data, offset)?;
+        self.file
+            .write_all_at(data, offset)
+            .map_err(|e| self.io_err("write", offset, data.len(), e))?;
         Ok(())
     }
 
@@ -251,6 +277,61 @@ mod tests {
         assert!(
             device.read_sector(4).is_err(),
             "reading past the end of the device must fail, not return zeros"
+        );
+    }
+
+    /// [F-R30]: a failed sector read must say *which* device and *which*
+    /// sector. `Device` holds both, so a bare `io::Error` ("failed to fill
+    /// whole buffer") is throwing away context the type already has.
+    #[test]
+    fn sector_io_failures_name_the_device_and_the_sector() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![0u8; 4 * 512]).unwrap();
+        let path = file.path().display().to_string();
+
+        let device = Device::open(file.path()).unwrap();
+        let err = device
+            .read_sector(4)
+            .expect_err("reading past the end must fail");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains(&path),
+            "the error must name the device, got: {msg}"
+        );
+        assert!(
+            msg.contains("sector 4"),
+            "the error must name the sector, got: {msg}"
+        );
+
+        // The underlying io::Error must remain reachable, not be flattened
+        // into a string.
+        use std::error::Error as _;
+        assert!(
+            err.source()
+                .and_then(|s| s.downcast_ref::<std::io::Error>())
+                .is_some(),
+            "the underlying io::Error must survive as the source, got: {err:?}"
+        );
+    }
+
+    /// The bootstrap read of the boot sector is byte-addressed, and it is the
+    /// case [F-R30]'s evidence actually cites -- a short read of the backup
+    /// boot sector. It must carry the device too.
+    #[test]
+    fn byte_addressed_io_failures_name_the_device() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![0u8; 512]).unwrap();
+        let path = file.path().display().to_string();
+
+        let device = Device::open(file.path()).unwrap();
+        let err = device
+            .read_bytes_at(0, 4096)
+            .expect_err("reading more than the file holds must fail");
+
+        assert!(
+            err.to_string().contains(&path),
+            "the error must name the device, got: {err}"
         );
     }
 

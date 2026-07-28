@@ -58,6 +58,47 @@ pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// A read or write against a device failed. `Device` knows the path and the
+    /// sector size, so it fills both in rather than letting a bare
+    /// "failed to fill whole buffer" escape with no idea which device or which
+    /// sector it refers to ([F-R30]).
+    ///
+    /// `offset` and `sector` both appear because byte-addressed calls -- the
+    /// boot-sector bootstrap reads 4096 bytes at offset 0 before the sector
+    /// size is known -- cannot name a sector themselves, but `Device` can
+    /// always derive one.
+    #[error(
+        "Failed to {op} {len} byte(s) at offset {offset} (sector {sector}) of device '{path}'"
+    )]
+    DeviceIo {
+        op: &'static str,
+        path: String,
+        offset: u64,
+        sector: u64,
+        len: usize,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Flushing a device failed. Has no offset to report, unlike [`Error::DeviceIo`].
+    #[error("Failed to flush device '{path}'")]
+    DeviceSync {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A caller passed a buffer whose length is not the sector size. This is an
+    /// argument error, not an I/O failure; it used to be dressed as an
+    /// `io::Error` with `ErrorKind::InvalidInput`, which is the same
+    /// conflation [F-R30] flags one level down.
+    #[error("Buffer of {actual} byte(s) does not match the {expected}-byte sector size of device '{path}'")]
+    SectorLengthMismatch {
+        path: String,
+        expected: u32,
+        actual: usize,
+    },
+
     #[error("Calculation error: {0}")]
     Calculation(String),
 
