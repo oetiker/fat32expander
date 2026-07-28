@@ -131,69 +131,82 @@ fn render_fs_info(info: &FSInfoReport) -> String {
 
     out.push_str("FAT32 Filesystem Information\n");
     out.push_str("============================\n");
-    out.push_str(&format!("Device: {}\n", info.device_path.display()));
+    out.push_str(&format!("Device: {}\n", info.device_path().display()));
 
     out.push_str("\nGeometry:\n");
-    out.push_str(&format!("  Bytes per sector: {}\n", info.bytes_per_sector));
+    out.push_str(&format!(
+        "  Bytes per sector: {}\n",
+        info.boot().bytes_per_sector()
+    ));
     out.push_str(&format!(
         "  Sectors per cluster: {}\n",
-        info.sectors_per_cluster
+        info.boot().sectors_per_cluster()
     ));
     out.push_str(&format!(
         "  Bytes per cluster: {}\n",
-        info.bytes_per_sector as u32 * info.sectors_per_cluster as u32
+        info.boot().bytes_per_sector() as u32 * info.boot().sectors_per_cluster() as u32
     ));
 
     out.push_str("\nLayout:\n");
-    out.push_str(&format!("  Reserved sectors: {}\n", info.reserved_sectors));
-    out.push_str(&format!("  Number of FATs: {}\n", info.num_fats));
+    out.push_str(&format!(
+        "  Reserved sectors: {}\n",
+        info.boot().reserved_sectors()
+    ));
+    out.push_str(&format!("  Number of FATs: {}\n", info.boot().num_fats()));
     out.push_str(&format!(
         "  FAT size (sectors): {}\n",
-        info.fat_size_sectors
+        info.boot().fat_size()
     ));
-    out.push_str(&format!("  Total sectors: {}\n", info.total_sectors));
-    out.push_str(&format!("  Data clusters: {}\n", info.data_clusters));
+    out.push_str(&format!(
+        "  Total sectors: {}\n",
+        info.boot().total_sectors()
+    ));
+    out.push_str(&format!("  Data clusters: {}\n", info.data_clusters()));
 
     out.push_str("\nSpecial sectors:\n");
     out.push_str(&format!(
         "  Root directory cluster: {}\n",
-        info.root_cluster
+        info.boot().root_cluster()
     ));
-    out.push_str(&format!("  FSInfo sector: {}\n", info.fsinfo_sector));
+    out.push_str(&format!(
+        "  FSInfo sector: {}\n",
+        info.boot().fs_info_sector()
+    ));
     out.push_str(&format!(
         "  Backup boot sector: {}\n",
-        info.backup_boot_sector
+        info.boot().backup_boot_sector()
     ));
     out.push_str(&format!(
         "  Backup matches primary: {}\n",
-        if info.backup_matches { "Yes" } else { "NO" }
+        if info.backup_matches() { "Yes" } else { "NO" }
     ));
 
     out.push_str("\nUsage:\n");
-    if info.free_clusters == FSInfo::UNKNOWN_FREE {
+    if info.free_clusters() == FSInfo::UNKNOWN_FREE {
         out.push_str("  Free clusters: Unknown\n");
     } else {
-        let free_bytes = info.free_clusters as u64
-            * info.bytes_per_sector as u64
-            * info.sectors_per_cluster as u64;
+        let free_bytes = info.free_clusters() as u64
+            * info.boot().bytes_per_sector() as u64
+            * info.boot().sectors_per_cluster() as u64;
         out.push_str(&format!(
             "  Free clusters: {} ({} bytes)\n",
-            info.free_clusters, free_bytes
+            info.free_clusters(),
+            free_bytes
         ));
     }
 
     out.push_str("\nSize:\n");
     out.push_str(&format!(
         "  Current size: {} bytes ({:.2} MB)\n",
-        info.current_size_bytes,
-        info.current_size_bytes as f64 / (1024.0 * 1024.0)
+        info.current_size_bytes(),
+        info.current_size_bytes() as f64 / (1024.0 * 1024.0)
     ));
-    out.push_str(&format!("  Device sectors: {}\n", info.device_sectors));
+    out.push_str(&format!("  Device sectors: {}\n", info.device_sectors()));
     out.push_str(&format!(
         "  Can grow: {}\n",
-        if info.can_grow { "Yes" } else { "No" }
+        if info.can_grow() { "Yes" } else { "No" }
     ));
-    if let Some(max_size) = info.max_new_size_bytes {
+    if let Some(max_size) = info.max_new_size_bytes() {
         out.push_str(&format!(
             "  Max new size: {} bytes ({:.2} MB)\n",
             max_size,
@@ -244,14 +257,14 @@ fn main() -> Result<()> {
                     }
 
                     // Check if resize is possible
-                    if !info.can_grow {
+                    if !info.can_grow() {
                         anyhow::bail!(
                             "Filesystem is already at maximum size for the device ({} bytes)",
-                            info.current_size_bytes
+                            info.current_size_bytes()
                         );
                     }
 
-                    if !info.backup_matches && !force {
+                    if !info.backup_matches() && !force {
                         eprintln!(
                             "Warning: Backup boot sector does not match primary boot sector."
                         );
@@ -259,8 +272,10 @@ fn main() -> Result<()> {
                         anyhow::bail!("Use --force to proceed anyway");
                     }
 
-                    let new_size = info.max_new_size_bytes.unwrap_or(info.current_size_bytes);
-                    (true, info.current_size_bytes, new_size)
+                    let new_size = info
+                        .max_new_size_bytes()
+                        .unwrap_or(info.current_size_bytes());
+                    (true, info.current_size_bytes(), new_size)
                 }
                 Err(e) => {
                     // Check if this might be an invalidated boot sector from a crash

@@ -134,34 +134,48 @@ fn report_fields_match_a_known_geometry() {
     let image = growable_image();
     let info = get_fs_info(image.path()).expect("fixture must be a valid FAT32 filesystem");
 
-    assert_eq!(info.device_path, image.path(), "device_path");
-    assert_eq!(info.bytes_per_sector, BYTES_PER_SECTOR, "bytes_per_sector");
+    assert_eq!(info.device_path(), image.path(), "device_path");
     assert_eq!(
-        info.sectors_per_cluster, SECTORS_PER_CLUSTER,
+        info.boot().bytes_per_sector(),
+        BYTES_PER_SECTOR,
+        "bytes_per_sector"
+    );
+    assert_eq!(
+        info.boot().sectors_per_cluster(),
+        SECTORS_PER_CLUSTER,
         "sectors_per_cluster"
     );
-    assert_eq!(info.reserved_sectors, RESERVED_SECTORS, "reserved_sectors");
-    assert_eq!(info.num_fats, NUM_FATS, "num_fats");
-    assert_eq!(info.fat_size_sectors, FAT_SIZE, "fat_size_sectors");
-    assert_eq!(info.total_sectors, TOTAL_SECTORS, "total_sectors");
-    assert_eq!(info.data_clusters, EXPECTED_DATA_CLUSTERS, "data_clusters");
-    assert_eq!(info.root_cluster, ROOT_CLUSTER, "root_cluster");
-    assert_eq!(info.fsinfo_sector, FSINFO_SECTOR, "fsinfo_sector");
     assert_eq!(
-        info.backup_boot_sector, BACKUP_BOOT_SECTOR,
+        info.boot().reserved_sectors(),
+        RESERVED_SECTORS,
+        "reserved_sectors"
+    );
+    assert_eq!(info.boot().num_fats(), NUM_FATS, "num_fats");
+    assert_eq!(info.boot().fat_size(), FAT_SIZE, "fat_size_sectors");
+    assert_eq!(info.boot().total_sectors(), TOTAL_SECTORS, "total_sectors");
+    assert_eq!(
+        info.data_clusters(),
+        EXPECTED_DATA_CLUSTERS,
+        "data_clusters"
+    );
+    assert_eq!(info.boot().root_cluster(), ROOT_CLUSTER, "root_cluster");
+    assert_eq!(info.boot().fs_info_sector(), FSINFO_SECTOR, "fsinfo_sector");
+    assert_eq!(
+        info.boot().backup_boot_sector(),
+        BACKUP_BOOT_SECTOR,
         "backup_boot_sector"
     );
-    assert_eq!(info.free_clusters, FREE_CLUSTERS, "free_clusters");
-    assert!(info.backup_matches, "backup_matches");
-    assert_eq!(info.device_sectors, 90_000, "device_sectors");
-    assert!(info.can_grow, "can_grow");
+    assert_eq!(info.free_clusters(), FREE_CLUSTERS, "free_clusters");
+    assert!(info.backup_matches(), "backup_matches");
+    assert_eq!(info.device_sectors(), 90_000, "device_sectors");
+    assert!(info.can_grow(), "can_grow");
     assert_eq!(
-        info.current_size_bytes,
+        info.current_size_bytes(),
         TOTAL_SECTORS as u64 * BYTES_PER_SECTOR as u64,
         "current_size_bytes"
     );
     assert_eq!(
-        info.max_new_size_bytes,
+        info.max_new_size_bytes(),
         Some(90_000 * BYTES_PER_SECTOR as u64),
         "max_new_size_bytes"
     );
@@ -169,9 +183,9 @@ fn report_fields_match_a_known_geometry() {
     // Guard the fixture itself: if this stops being FAT32, the test above is
     // asserting against a volume the tool should have rejected.
     assert!(
-        info.data_clusters >= 65525,
+        info.data_clusters() >= 65525,
         "fixture must be FAT32, got {} clusters",
-        info.data_clusters
+        info.data_clusters()
     );
 }
 
@@ -225,15 +239,16 @@ fn a_filesystem_filling_its_device_reports_no_headroom() {
     let info = get_fs_info(image.path()).expect("fixture must be valid");
 
     assert!(
-        !info.can_grow,
+        !info.can_grow(),
         "a filesystem filling its device cannot grow"
     );
     assert_eq!(
-        info.max_new_size_bytes, None,
+        info.max_new_size_bytes(),
+        None,
         "there is no larger size to offer"
     );
     assert_eq!(
-        info.current_size_bytes,
+        info.current_size_bytes(),
         TOTAL_SECTORS as u64 * BYTES_PER_SECTOR as u64
     );
     assert!(rendered_report(image.path()).contains("Can grow: No"));
@@ -247,7 +262,7 @@ fn a_mismatched_backup_boot_sector_is_reported_not_raised() {
     let image = fixture_image(90_000, FREE_CLUSTERS, false);
     let info = get_fs_info(image.path()).expect("a backup mismatch must not fail the query");
 
-    assert!(!info.backup_matches, "the mismatch must be reported");
+    assert!(!info.backup_matches(), "the mismatch must be reported");
     assert!(
         rendered_report(image.path()).contains("Backup matches primary: NO"),
         "the rendered report must surface the mismatch"
@@ -261,7 +276,7 @@ fn an_unknown_free_count_is_reported_as_unknown() {
     let image = fixture_image(90_000, 0xFFFF_FFFF, true);
     let info = get_fs_info(image.path()).expect("fixture must be valid");
 
-    assert_eq!(info.free_clusters, 0xFFFF_FFFF);
+    assert_eq!(info.free_clusters(), 0xFFFF_FFFF);
     let rendered = rendered_report(image.path());
     assert!(
         rendered.contains("Free clusters: Unknown"),

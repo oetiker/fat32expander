@@ -56,9 +56,9 @@ fn test_info_command() {
     let image = create_fat32_image(128);
     let info = get_fs_info(image.path()).expect("Failed to get fs info");
 
-    assert_eq!(info.bytes_per_sector, 512);
-    assert!(info.data_clusters > 65525, "Should be FAT32");
-    assert!(!info.can_grow, "Same size should not be growable");
+    assert_eq!(info.boot().bytes_per_sector(), 512);
+    assert!(info.data_clusters() > 65525, "Should be FAT32");
+    assert!(!info.can_grow(), "Same size should not be growable");
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn test_resize_without_fat_growth() {
 
     // Get info before resize
     let info_before = get_fs_info(image.path()).expect("Failed to get fs info");
-    assert!(info_before.can_grow);
+    assert!(info_before.can_grow());
 
     // Resize
     let options = ResizeOptions::new(image.path())
@@ -84,7 +84,7 @@ fn test_resize_without_fat_growth() {
 
     // Get info after resize
     let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
-    assert!(!info_after.can_grow, "Should be at max size now");
+    assert!(!info_after.can_grow(), "Should be at max size now");
 
     // Verify filesystem integrity
     assert!(check_filesystem(image.path()), "Filesystem check failed");
@@ -101,7 +101,7 @@ fn test_resize_with_fat_growth() {
 
     // Get info before resize
     let info_before = get_fs_info(image.path()).expect("Failed to get fs info");
-    assert!(info_before.can_grow);
+    assert!(info_before.can_grow());
 
     // Resize
     let options = ResizeOptions::new(image.path())
@@ -114,9 +114,9 @@ fn test_resize_with_fat_growth() {
 
     // Get info after resize
     let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
-    assert!(!info_after.can_grow, "Should be at max size now");
+    assert!(!info_after.can_grow(), "Should be at max size now");
     assert!(
-        info_after.data_clusters > info_before.data_clusters,
+        info_after.data_clusters() > info_before.data_clusters(),
         "Should have more clusters"
     );
 
@@ -264,11 +264,11 @@ fn test_free_cluster_count_tracks_added_clusters() {
 
     let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
 
-    let added_clusters = info_after.data_clusters - info_before.data_clusters;
+    let added_clusters = info_after.data_clusters() - info_before.data_clusters();
     assert!(added_clusters > 0, "resize should add clusters");
     assert_eq!(
-        info_after.free_clusters,
-        info_before.free_clusters + added_clusters,
+        info_after.free_clusters(),
+        info_before.free_clusters() + added_clusters,
         "free count must grow by exactly the number of clusters added"
     );
 }
@@ -296,8 +296,11 @@ fn test_dry_run() {
 
     // Verify no changes were made
     let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
-    assert_eq!(info_before.total_sectors, info_after.total_sectors);
-    assert_eq!(info_before.fat_size_sectors, info_after.fat_size_sectors);
+    assert_eq!(
+        info_before.boot().total_sectors(),
+        info_after.boot().total_sectors()
+    );
+    assert_eq!(info_before.boot().fat_size(), info_after.boot().fat_size());
 }
 
 #[test]
@@ -399,12 +402,16 @@ fn mkfs_produced_filesystems_validate_across_sector_sizes() {
         let info = get_fs_info(image.path())
             .unwrap_or_else(|e| panic!("get_fs_info rejected a real filesystem ({label}): {e:?}"));
 
-        assert_eq!(info.bytes_per_sector as u32, sector_size, "bps {label}");
-        assert_eq!(info.sectors_per_cluster as u32, spc, "spc {label}");
+        assert_eq!(
+            info.boot().bytes_per_sector() as u32,
+            sector_size,
+            "bps {label}"
+        );
+        assert_eq!(info.boot().sectors_per_cluster() as u32, spc, "spc {label}");
         assert!(
-            info.data_clusters >= 65525,
+            info.data_clusters() >= 65525,
             "mkfs volume reported as non-FAT32 ({label}): {} clusters",
-            info.data_clusters
+            info.data_clusters()
         );
         assert!(
             check_filesystem(image.path()),
