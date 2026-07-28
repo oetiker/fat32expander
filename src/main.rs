@@ -219,7 +219,88 @@ fn render_fs_info(info: &FSInfoReport) -> String {
     out
 }
 
-fn main() -> Result<()> {
+/// Exit codes, grouped by what a caller should *do* about the failure.
+///
+/// Deliberately not one code per error variant: the exit code is an ABI, and
+/// the error enum changes shape far too often to be one. Callers branch on
+/// "can't open the device" or "needs recovery", not on which constructor ran.
+///
+/// 2 is left free for clap's own usage errors, and everything stays below 125,
+/// where the shell's own conventions (126, 127, 128+n) begin.
+mod exit {
+    pub const OK: u8 = 0;
+    pub const INTERNAL: u8 = 1;
+    pub const DEVICE_UNOPENABLE: u8 = 3;
+    pub const DEVICE_MOUNTED: u8 = 4;
+    pub const NOT_USABLE_FAT32: u8 = 5;
+    pub const ALREADY_MAX_SIZE: u8 = 6;
+    pub const DEVICE_TOO_SMALL: u8 = 7;
+    pub const BACKUP_MISMATCH: u8 = 8;
+    pub const NEEDS_RECOVERY: u8 = 9;
+    pub const IO_FAILURE: u8 = 10;
+    pub const ROOT_REQUIRED: u8 = 11;
+}
+
+/// Map a failure to its exit code. Anything that is not one of our own errors
+/// -- a context-only `anyhow` error, say -- is an internal failure.
+fn exit_code_for(err: &anyhow::Error) -> u8 {
+    let Some(e) = err.downcast_ref::<Error>() else {
+        return exit::INTERNAL;
+    };
+
+    match e {
+        Error::DeviceOpen { .. } => exit::DEVICE_UNOPENABLE,
+        Error::DeviceMounted(..) => exit::DEVICE_MOUNTED,
+
+        Error::InvalidFAT32(_)
+        | Error::BootSectorValidation(_)
+        | Error::FSInfoValidation(_)
+        | Error::UnsupportedSectorSize(_) => exit::NOT_USABLE_FAT32,
+
+        Error::AlreadyMaxSize => exit::ALREADY_MAX_SIZE,
+        Error::DeviceTooSmall { .. } => exit::DEVICE_TOO_SMALL,
+        Error::BackupMismatch => exit::BACKUP_MISMATCH,
+
+        // Everything that means "this filesystem is mid-resize": either we can
+        // still recover it, or we know we cannot and the user must intervene.
+        Error::BootSectorInvalidated
+        | Error::InvalidatedFilesystem
+        | Error::CheckpointCorrupted
+        | Error::ResizeSizeMismatch(_) => exit::NEEDS_RECOVERY,
+
+        Error::DeviceIo { .. }
+        | Error::DeviceSync { .. }
+        | Error::Io(_)
+        | Error::SectorLengthMismatch { .. } => exit::IO_FAILURE,
+
+        Error::RootRequired => exit::ROOT_REQUIRED,
+
+        Error::Calculation(_) | Error::Relocation(_) => exit::INTERNAL,
+    }
+}
+
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::from(exit::OK),
+        Err(err) => {
+            // "Already at maximum size" reaching here means the library found
+            // nothing to do. That is a successful no-op, not a failure: the
+            // tool has to be safe to re-run from a provisioning script that
+            // does not track whether it already ran.
+            if matches!(err.downcast_ref::<Error>(), Some(Error::AlreadyMaxSize)) {
+                println!("Filesystem is already at maximum size for the device. Nothing to do.");
+                return std::process::ExitCode::from(exit::OK);
+            }
+
+            // Same rendering anyhow's own `fn main() -> Result` produces, so
+            // the message and its "Caused by:" chain are unchanged.
+            eprintln!("Error: {:?}", err);
+            std::process::ExitCode::from(exit_code_for(&err))
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -244,7 +325,7 @@ fn main() -> Result<()> {
                 eprintln!("Warning: This tool requires root privileges to modify block devices.");
                 eprintln!("         Use --dry-run to preview changes without root.");
                 if !force {
-                    anyhow::bail!("Run as root or use --force to continue anyway");
+                    return Err(Error::RootRequired.into());
                 }
             }
 
@@ -258,12 +339,16 @@ fn main() -> Result<()> {
                         println!();
                     }
 
-                    // Check if resize is possible
+                    // Nothing to do is not a failure -- the tool must be safe to
+                    // re-run from a script that does not track whether it has
+                    // already run ([F-R31]).
                     if !info.can_grow() {
-                        anyhow::bail!(
-                            "Filesystem is already at maximum size for the device ({} bytes)",
+                        println!(
+                            "Filesystem is already at maximum size for the device ({} bytes). \
+                             Nothing to do.",
                             info.current_size_bytes()
                         );
+                        return Ok(());
                     }
 
                     if !info.backup_matches() && !force {
@@ -271,7 +356,8 @@ fn main() -> Result<()> {
                             "Warning: Backup boot sector does not match primary boot sector."
                         );
                         eprintln!("         This could indicate filesystem corruption.");
-                        anyhow::bail!("Use --force to proceed anyway");
+                        eprintln!("         Use --force to proceed anyway.");
+                        return Err(Error::BackupMismatch.into());
                     }
 
                     let new_size = info

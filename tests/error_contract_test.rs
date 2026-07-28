@@ -243,6 +243,115 @@ fn failures_name_the_device_they_refer_to() {
     );
 }
 
+/// [F-R31]: a calling script must be able to branch on *why* the run failed.
+/// Before this, every one of these exited 1.
+///
+/// The codes are grouped by what the caller should do about the failure, not
+/// one-per-variant -- the error enum changes shape too often for that to be a
+/// stable ABI.
+#[test]
+fn failure_modes_get_distinct_exit_codes() {
+    let missing = run_resize(std::path::Path::new(
+        "/nonexistent/fat32expander/exit/code/device.img",
+    ));
+    assert_eq!(
+        missing.status.code(),
+        Some(3),
+        "a device that cannot be opened must exit 3.\nstderr:\n{}",
+        stderr_of(&missing)
+    );
+
+    let garbage_image = image_with_signature(8, 0x1234);
+    let garbage = run_resize(garbage_image.path());
+    assert_eq!(
+        garbage.status.code(),
+        Some(5),
+        "an unusable filesystem must exit 5.\nstderr:\n{}",
+        stderr_of(&garbage)
+    );
+
+    // A *valid* filesystem whose signature is zeroed is a genuinely interrupted
+    // resize: recovery is attempted, finds no checkpoint, and gives up.
+    let interrupted_image = valid_image(96, 64);
+    let mut data = std::fs::read(interrupted_image.path()).unwrap();
+    data[510] = 0x00;
+    data[511] = 0x00;
+    std::fs::write(interrupted_image.path(), &data).unwrap();
+
+    let interrupted = run_resize(interrupted_image.path());
+    assert_eq!(
+        interrupted.status.code(),
+        Some(9),
+        "an interrupted resize that cannot be recovered must exit 9.\nstderr:\n{}",
+        stderr_of(&interrupted)
+    );
+
+    // The 8 MB fixture is too small to be valid FAT32, so it enters recovery
+    // (its signature is the invalidation marker) and then fails validation.
+    // That is a filesystem problem, not a recovery problem, and must be told
+    // apart from the case above.
+    let too_small_image = image_with_signature(8, 0x0000);
+    let too_small = run_resize(too_small_image.path());
+    assert_eq!(
+        too_small.status.code(),
+        Some(5),
+        "entering recovery and then failing validation must exit 5, not 9.\nstderr:\n{}",
+        stderr_of(&too_small)
+    );
+}
+
+/// A resize that finds nothing to do is not a failure. Running the tool twice
+/// must succeed twice, which is what makes it safe to put in a provisioning
+/// script that does not track whether it has already run.
+///
+/// This is a deliberate behaviour change made with the developer's approval:
+/// before, "already at maximum size" exited non-zero.
+#[test]
+fn a_filesystem_already_at_maximum_size_exits_zero() {
+    let image = valid_image(64, 64);
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr_of(&output)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a filesystem with no room to grow must exit 0.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("maximum size"),
+        "it must still say why there was nothing to do.\noutput:\n{combined}"
+    );
+
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a no-op resize must not modify the image by a single byte"
+    );
+}
+
+/// Running it a second time must behave identically to the first -- that is
+/// what "idempotent" has to mean for a script that reruns it.
+#[test]
+fn resizing_an_already_maximal_filesystem_twice_succeeds_twice() {
+    let image = valid_image(64, 64);
+
+    for attempt in 1..=2 {
+        let output = run_resize(image.path());
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "attempt {attempt} must exit 0.\nstderr:\n{}",
+            stderr_of(&output)
+        );
+    }
+}
+
 /// The other half of [F-R31], and the half nothing else covers: giving failures
 /// distinct non-zero exit codes means rewriting how `main` returns, and the way
 /// that goes wrong is the *success* path picking up a non-zero code.

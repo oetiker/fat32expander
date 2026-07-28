@@ -100,6 +100,32 @@ truncate -s 2G disk.img
 fat32expander resize disk.img
 ```
 
+### Exit Codes
+
+Failures are reported with distinct exit codes so a calling script can tell
+them apart without parsing messages. Codes are grouped by what the caller
+should do about the failure, not one per internal error, so they stay stable
+as the tool changes.
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success — including a resize that found nothing to do |
+| 1 | Unexpected internal failure |
+| 2 | Invalid command line (produced by the argument parser) |
+| 3 | Device could not be opened — check the path, permissions, and whether it is in use |
+| 4 | Device is mounted — unmount it first |
+| 5 | Not a usable FAT32 filesystem |
+| 6 | Already at maximum size *(reserved; a no-op resize exits 0)* |
+| 7 | Device is smaller than the filesystem claims — truncated image or wrong device |
+| 8 | Backup boot sector does not match the primary — re-run with `--force` to override |
+| 9 | An interrupted resize needs recovery and could not be recovered automatically |
+| 10 | I/O failure reading or writing the device |
+| 11 | Root privileges required — run as root or pass `--force` |
+
+`resize` is safe to re-run: a filesystem that is already at its maximum size
+exits 0 rather than reporting an error, so the tool can be called
+unconditionally from a provisioning script.
+
 ## How It Works
 
 ### FAT32 Layout

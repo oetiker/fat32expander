@@ -52,6 +52,11 @@ pub enum Error {
     #[error("Filesystem is already at maximum size for this device")]
     AlreadyMaxSize,
 
+    /// The operation needs root and the caller is not root. Typed rather than a
+    /// bare `anyhow::bail!` so it can carry its own exit code ([F-R31]).
+    #[error("Root privileges are required to modify block devices (or use --force)")]
+    RootRequired,
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
