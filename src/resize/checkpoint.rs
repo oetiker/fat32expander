@@ -106,6 +106,12 @@ impl ResizeCheckpoint {
     }
 
     /// Attach a shift-progress record naming the next cluster still to move.
+    ///
+    /// [F-R44] Test-only. The resize path assigns `shift_progress` directly as
+    /// it descends (`executor.rs`), so this builder exists purely to construct
+    /// fixtures; `#[cfg(test)]` says so rather than leaving it looking like
+    /// production API.
+    #[cfg(test)]
     pub fn with_shift_progress(mut self, next_cluster: u32) -> Self {
         self.shift_progress = Some(next_cluster);
         self

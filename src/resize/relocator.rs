@@ -8,10 +8,14 @@ use crate::fat32::{fat_entry, BootSector};
 /// Cluster numbers remain unchanged; only their physical sector positions move.
 #[derive(Debug, Clone)]
 pub struct ClusterMove {
-    /// Original cluster number
+    /// The cluster being moved. Relocation never renumbers, so this is both
+    /// where the data comes from and where it ends up; only the sectors differ.
+    ///
+    /// [F-R44] There used to be a `to_cluster` beside this, always assigned the
+    /// same value and never read. Removing it turns "cluster numbers do not
+    /// change" from a field two places had to keep in agreement into a property
+    /// of the type.
     pub from_cluster: u32,
-    /// New cluster number (same as from_cluster in new approach)
-    pub to_cluster: u32,
     /// Original sector (calculated from cluster)
     pub from_sector: u64,
     /// New sector (calculated from cluster)
@@ -122,7 +126,6 @@ pub fn plan_relocation(
         if old_sector != new_sector {
             moves.push(ClusterMove {
                 from_cluster: cluster,
-                to_cluster: cluster, // Same cluster number, different physical location
                 from_sector: old_sector,
                 to_sector: new_sector,
             });
@@ -397,9 +400,12 @@ mod tests {
             "one move per used cluster"
         );
 
+        // The `to_cluster` assertion that stood here was removed with the field
+        // itself when [F-R44]'s fix exposed it as never read in production.
+        // Developer-approved: "cluster numbers must not change" is no longer an
+        // assertion because `ClusterMove` can no longer express a change.
         for (mv, (cluster, from_sector, to_sector)) in plan.moves.iter().zip(expected) {
             assert_eq!(mv.from_cluster, cluster, "cluster order");
-            assert_eq!(mv.to_cluster, cluster, "cluster numbers must not change");
             assert_eq!(
                 mv.from_sector, from_sector,
                 "cluster {cluster} source sector"
@@ -844,13 +850,11 @@ mod tests {
     fn test_cluster_move() {
         let mv = ClusterMove {
             from_cluster: 5,
-            to_cluster: 5, // Same cluster number with new approach
             from_sector: 1000,
             to_sector: 2000,
         };
 
         assert_eq!(mv.from_cluster, 5);
-        assert_eq!(mv.to_cluster, 5);
         assert_eq!(mv.from_sector, 1000);
         assert_eq!(mv.to_sector, 2000);
     }
@@ -874,13 +878,11 @@ mod tests {
             moves: vec![
                 ClusterMove {
                     from_cluster: 3,
-                    to_cluster: 3,
                     from_sector: 200,
                     to_sector: 400,
                 },
                 ClusterMove {
                     from_cluster: 2,
-                    to_cluster: 2,
                     from_sector: 100,
                     to_sector: 300,
                 },

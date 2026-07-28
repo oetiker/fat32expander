@@ -1,6 +1,13 @@
-pub mod operations;
-pub mod structs;
-pub mod validation;
+//! FAT32 on-disk format: structures, parsing, validation and I/O.
+//!
+//! [F-R44] The three leaves below are private. Everything this module supports
+//! is named in the re-export lists, which are therefore the whole surface --
+//! `fat32::structs::BootSector` and its siblings are gone, leaving one path per
+//! item here. See the crate root for how this namespace differs from it.
+
+mod operations;
+mod structs;
+mod validation;
 
 // Re-export types from structs
 pub use structs::{fat_entry, BootSector, ClusterId, FSInfo, SectorNum};
