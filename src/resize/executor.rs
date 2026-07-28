@@ -433,7 +433,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
     let new_size_bytes = calculation.new_total_sectors as u64 * boot.bytes_per_sector() as u64;
 
     // Read FAT table
-    let mut fat = read_fat_table(&device, &boot, 0)?;
+    let fat = read_fat_table(&device, &boot, 0)?;
     operations.push(format!("Read FAT table ({} entries)", fat.len()));
 
     let mut clusters_relocated = 0;
@@ -451,15 +451,15 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
             calculation.fat_growth_sectors
         ));
 
+        // The boot sector as it will be committed once the resize completes.
+        // The relocator reads the new data-area start straight off it, so the
+        // plan cannot disagree with the geometry the filesystem ends up with.
+        let mut new_boot = boot.clone();
+        new_boot.set_total_sectors_32(calculation.new_total_sectors);
+        new_boot.set_fat_size_32(calculation.new_fat_size);
+
         // Plan cluster data shift
-        let plan = plan_relocation(
-            &device,
-            &boot,
-            &fat,
-            calculation.first_affected_cluster,
-            calculation.last_affected_cluster,
-            calculation.new_data_clusters,
-        )?;
+        let plan = plan_relocation(&boot, &new_boot, &fat, calculation.first_affected_cluster)?;
 
         if !plan.is_empty() {
             operations.push(format!(
@@ -490,15 +490,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
                     maybe_crash_at("after_checkpoint_start");
 
                     // Execute data shift
-                    let _relocations = execute_relocation(
-                        &device,
-                        &boot,
-                        &mut fat,
-                        &plan,
-                        calculation.new_fat_size,
-                        calculation.new_data_clusters,
-                        options.is_verbose(),
-                    )?;
+                    execute_relocation(&device, &boot, &plan, options.is_verbose())?;
                     clusters_relocated = plan.cluster_count();
                     operations.push(format!("Shifted {} clusters forward", clusters_relocated));
 

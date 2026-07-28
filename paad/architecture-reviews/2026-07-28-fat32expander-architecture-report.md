@@ -189,6 +189,10 @@ reproduced against crafted ones.
 - **Reproduced:** 256 MB image, `mkfs.fat -F 32 -s 4`, fat_size 1020 → 1023. A single clean `resize --force` — no fault injection — yields `fsck.fat`: `/FSCK0000.017 File size is 450489715 bytes, cluster chain length is 0`, a garbage volume label, 52 files instead of 20, and mismatched checksums. The verifier re-derived the arithmetic independently: reserved=32, num_fats=2, spc=4 ⇒ growth = 6 sectors, `ceil(6/4) = 2` clusters ⇒ shift = 8. Boot-implied `first_data_sector` = **2078**; relocator's = **2080**. Data lands **2 sectors past** where the committed boot sector points.
 - **Found by:** Integration & Data
 - **Verdict:** CONFIRMED — the two formulas are genuinely different expressions, and the divergence was reproduced both empirically and numerically. They agree only when `spc | growth`, which is why every CI geometry passes.
+- **Status:** Fixed
+- **Status reason:** `plan_relocation` now takes the boot sector as it will be committed (`new_boot`) and reads `new_boot.first_data_sector()` directly instead of deriving a shift from a rounded-up cluster count, so the plan cannot disagree with the geometry the filesystem ends up with. The ignored `_device`, `last_affected` and `_new_data_clusters` parameters were dropped. Regression covered by `plan_relocation_handles_growth_that_is_not_a_whole_cluster`, `execute_relocation_round_trips_with_unaligned_growth`, and the end-to-end `test_resize_with_unaligned_fat_growth_preserves_files` (256 MiB, `-s 4`, FAT 1020→1023 — the report's own reproduction). All three were confirmed to fail against the old rounding and pass against the fix.
+- **Status date:** 2026-07-28 00:00 UTC
+- **Status commit:** 4107955
 
 ### [F-R1] Resuming from phase `Started` re-runs a non-idempotent data shift over already-shifted data
 - **Category:** 19 (lack of idempotency)
@@ -235,6 +239,10 @@ reproduced against crafted ones.
 - **Explanation:** No test calls `plan_relocation` or `execute_relocation`; all four tests construct `ClusterMove`/`RelocationPlan` literals and read the fields back, so they would pass unchanged if the sector arithmetic were inverted.
 - **Evidence:** `src/resize/relocator.rs:187-256` — tests are `test_cluster_move` (`:191`), `test_relocation_plan_empty` (`:206`), `test_relocation_plan_with_moves` (`:219`), `test_verify_relocation_always_succeeds` (`:246`). Only the last calls a production function, and that function is a stub ([F-R20]). CLAUDE.md and TECHGUIDE both name the old-vs-new `first_data_sector` distinction as the project's critical insight — and [F-R2] lives in exactly this untested code.
 - **Found by:** Security & Code Quality, Coupling & Dependencies
+- **Status:** Fixed
+- **Status reason:** Six tests added that call `plan_relocation`/`execute_relocation` against a temp-file-backed `Device`: data-area start vs. the grown boot sector, per-cluster source/target sectors, in-use filtering, descending move order, byte-level round trip, and preservation under an overlapping shift in a single pass. The four pre-existing struct-literal tests were left in place. Verified to catch [F-R2] by reintroducing the old rounding and observing the failure.
+- **Status date:** 2026-07-28 00:00 UTC
+- **Status commit:** ff2c929
 
 ### [F-R4] `--force` is advertised for backup-boot-sector mismatch but is never plumbed into the library
 - **Category:** 24 (inconsistent API contracts)

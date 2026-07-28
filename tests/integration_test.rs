@@ -124,6 +124,128 @@ fn test_resize_with_fat_growth() {
     assert!(check_filesystem(image.path()), "Filesystem check failed");
 }
 
+/// Create a FAT32 test image with an explicit cluster size.
+fn create_fat32_image_with_cluster_size(size_mb: u32, sectors_per_cluster: u32) -> NamedTempFile {
+    let file = NamedTempFile::new().expect("Failed to create temp file");
+    let path = file.path();
+
+    Command::new("truncate")
+        .arg("-s")
+        .arg(format!("{}M", size_mb))
+        .arg(path)
+        .status()
+        .expect("Failed to truncate file");
+
+    let status = Command::new("mkfs.fat")
+        .arg("-F")
+        .arg("32")
+        .arg("-s")
+        .arg(sectors_per_cluster.to_string())
+        .arg(path)
+        .status()
+        .expect("Failed to run mkfs.fat");
+
+    assert!(status.success(), "mkfs.fat failed");
+
+    file
+}
+
+/// Copy a file into the image with mtools.
+fn mcopy_into(image: &std::path::Path, source: &std::path::Path, dest_name: &str) {
+    let status = Command::new("mcopy")
+        .arg("-i")
+        .arg(image)
+        .arg(source)
+        .arg(format!("::{}", dest_name))
+        .status()
+        .expect("Failed to run mcopy");
+    assert!(status.success(), "mcopy failed for {}", dest_name);
+}
+
+/// Read a file back out of the image with mtools.
+fn mcopy_out(image: &std::path::Path, name: &str) -> Vec<u8> {
+    let out = tempfile::NamedTempFile::new().unwrap();
+    let status = Command::new("mcopy")
+        .arg("-i")
+        .arg(image)
+        .arg("-n")
+        .arg(format!("::{}", name))
+        .arg(out.path())
+        .status()
+        .expect("Failed to run mcopy");
+    assert!(status.success(), "mcopy failed reading {}", name);
+    std::fs::read(out.path()).unwrap()
+}
+
+/// Extend an image file to an exact size in KiB.
+fn extend_image_kib(path: &std::path::Path, new_size_kib: u64) {
+    Command::new("truncate")
+        .arg("-s")
+        .arg(format!("{}K", new_size_kib))
+        .arg(path)
+        .status()
+        .expect("Failed to extend file");
+}
+
+/// A geometry where the total FAT growth is not a whole number of clusters.
+///
+/// 256 MiB at 4 sectors per cluster gives a FAT of 1020 sectors; growing the
+/// volume to 262400 KiB takes it to 1023, so the two FAT copies grow by 6
+/// sectors in total - not a multiple of the 4-sector cluster. Rounding that up
+/// to 2 whole clusters used to shift the data area 8 sectors instead of 6,
+/// leaving every file 2 sectors past where the committed boot sector points.
+///
+/// Most geometries grow the FAT by a multiple of the cluster size, which is why
+/// this went unnoticed; the increase here has to be small enough that the FAT
+/// gains only a few sectors.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn test_resize_with_unaligned_fat_growth_preserves_files() {
+    let image = create_fat32_image_with_cluster_size(256, 4);
+
+    let payloads: Vec<(String, Vec<u8>)> = (0..20)
+        .map(|i| {
+            let name = format!("FILE{:03}.BIN", i);
+            let content: Vec<u8> = (0..4096u32).map(|b| (b as u8) ^ (i as u8)).collect();
+            (name, content)
+        })
+        .collect();
+
+    for (name, content) in &payloads {
+        let src = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(src.path(), content).unwrap();
+        mcopy_into(image.path(), src.path(), name);
+    }
+
+    // 262400 KiB = 524800 sectors: FAT 1020 -> 1023, a 6-sector growth.
+    extend_image_kib(image.path(), 262_400);
+
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
+    let result = resize_fat32(options).expect("Resize failed");
+    // Guard the geometry: 2 FATs x 3 sectors = 6 sectors of growth against a
+    // 4-sector cluster. If mkfs.fat ever picks different numbers here, this test
+    // stops exercising the unaligned path and needs revisiting.
+    assert!(result.fat_grew, "this geometry must exercise FAT growth");
+    assert_eq!(result.calculation.old_fat_size, 1020);
+    assert_eq!(result.calculation.new_fat_size, 1023);
+
+    assert!(
+        check_filesystem(image.path()),
+        "dosfsck reported errors after an unaligned FAT growth"
+    );
+
+    for (name, content) in &payloads {
+        assert_eq!(
+            &mcopy_out(image.path(), name),
+            content,
+            "{} did not survive the resize",
+            name
+        );
+    }
+}
+
 /// The FSInfo free count is extrapolated from the executor's own copy of the
 /// data-cluster formula. Pin the relationship it must hold to, since that copy
 /// has no unit-level seam.

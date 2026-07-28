@@ -49,25 +49,23 @@ impl RelocationPlan {
 /// This function identifies which clusters are in use and need to be shifted.
 /// The actual shifting must be done from highest cluster to lowest to avoid
 /// overwriting data that hasn't been moved yet.
+///
+/// `new_boot` must be the boot sector as it will be committed at the end of the
+/// resize, with the new FAT size already set. Both the old and the new data-area
+/// start are read from the boot sectors themselves rather than recomputed, so the
+/// plan cannot disagree with what the filesystem will say about itself. Deriving
+/// the shift from a cluster count instead would round it up to a whole cluster
+/// and place every relocated cluster past its real home.
 pub fn plan_relocation(
-    _device: &Device,
     boot: &BootSector,
+    new_boot: &BootSector,
     fat: &[u32],
     first_affected: u32,
-    last_affected: u32,
-    _new_data_clusters: u32,
 ) -> Result<RelocationPlan> {
     // Calculate sector positions
     let old_first_data_sector = boot.first_data_sector();
+    let new_first_data_sector = new_boot.first_data_sector();
     let sectors_per_cluster = boot.sectors_per_cluster() as u64;
-
-    // Calculate new first data sector based on FAT growth
-    // The affected clusters (first_affected to last_affected) represent the data
-    // that will be overwritten by the expanded FAT tables. The shift amount equals
-    // the number of sectors these clusters occupy.
-    let affected_clusters = (last_affected - first_affected + 1) as u64;
-    let shift_sectors = affected_clusters * sectors_per_cluster;
-    let new_first_data_sector = old_first_data_sector + shift_sectors;
 
     let old_max_cluster = boot.data_clusters() + 2;
 
@@ -120,17 +118,12 @@ pub fn plan_relocation(
 /// The copying is done from highest cluster to lowest to avoid overwriting.
 ///
 /// Since cluster numbers don't change, no FAT chain or directory entry updates are needed!
-///
-/// Returns an empty vector (no cluster number changes) for API compatibility.
 pub fn execute_relocation(
     device: &Device,
     boot: &BootSector,
-    _fat: &mut [u32],
     plan: &RelocationPlan,
-    _new_fat_size: u32,
-    _new_data_clusters: u32,
     verbose: bool,
-) -> Result<Vec<(u32, u32)>> {
+) -> Result<()> {
     let sectors_per_cluster = boot.sectors_per_cluster() as u32;
 
     if verbose {
@@ -165,9 +158,8 @@ pub fn execute_relocation(
     // Sync after data movement
     device.sync()?;
 
-    // No cluster number changes, so return empty vector
     // The root cluster stays at cluster 2 (just at a different physical location)
-    Ok(Vec::new())
+    Ok(())
 }
 
 /// Verify that all clusters in the affected range are free after relocation
@@ -202,17 +194,17 @@ mod tests {
     /// Build a FAT32 boot sector with the given geometry.
     ///
     /// `root_entry_count` is left at zero, as FAT32 requires.
-    fn boot_sector(fat_size: u32) -> BootSector {
+    fn boot_sector_with(sectors_per_cluster: u8, total_sectors: u32, fat_size: u32) -> BootSector {
         let mut data = vec![0u8; BPS as usize];
         data[0] = 0xEB;
         data[1] = 0x58;
         data[2] = 0x90;
         data[11..13].copy_from_slice(&BPS.to_le_bytes());
-        data[13] = SPC;
+        data[13] = sectors_per_cluster;
         data[14..16].copy_from_slice(&RESERVED.to_le_bytes());
         data[16] = NUM_FATS;
         data[21] = 0xF8;
-        data[32..36].copy_from_slice(&TOTAL_SECTORS.to_le_bytes());
+        data[32..36].copy_from_slice(&total_sectors.to_le_bytes());
         data[36..40].copy_from_slice(&fat_size.to_le_bytes());
         data[44..48].copy_from_slice(&2u32.to_le_bytes());
         data[48] = 0x01;
@@ -220,6 +212,11 @@ mod tests {
         data[510] = 0x55;
         data[511] = 0xAA;
         BootSector::from_bytes(&data).unwrap()
+    }
+
+    /// The cluster-aligned geometry.
+    fn boot_sector(fat_size: u32) -> BootSector {
+        boot_sector_with(SPC, TOTAL_SECTORS, fat_size)
     }
 
     /// A FAT where every cluster in `in_use` is an end-of-chain marker and the
@@ -234,13 +231,18 @@ mod tests {
         fat
     }
 
-    /// A temp-file-backed device large enough to hold the whole test filesystem.
-    fn temp_device() -> (NamedTempFile, Device) {
+    /// A temp-file-backed device holding `sectors` zeroed sectors.
+    fn temp_device_of(sectors: u32) -> (NamedTempFile, Device) {
         let file = NamedTempFile::new().unwrap();
-        let bytes = TOTAL_SECTORS as usize * BPS as usize;
+        let bytes = sectors as usize * BPS as usize;
         std::fs::write(file.path(), vec![0u8; bytes]).unwrap();
         let device = Device::open(file.path()).unwrap();
         (file, device)
+    }
+
+    /// A device large enough to hold the whole cluster-aligned test filesystem.
+    fn temp_device() -> (NamedTempFile, Device) {
+        temp_device_of(TOTAL_SECTORS)
     }
 
     /// A recognisable fill byte per cluster, never zero.
@@ -248,10 +250,10 @@ mod tests {
         0x40 + cluster as u8
     }
 
-    fn aligned_plan(device: &Device, fat: &[u32]) -> RelocationPlan {
+    fn aligned_plan(fat: &[u32]) -> RelocationPlan {
         let old_boot = boot_sector(OLD_FAT_SIZE);
         let new_boot = boot_sector(NEW_FAT_SIZE);
-        plan_relocation(device, &old_boot, fat, 2, 2, new_boot.data_clusters()).unwrap()
+        plan_relocation(&old_boot, &new_boot, fat, 2).unwrap()
     }
 
     /// The relocator's idea of where the data area moves to must be the same as
@@ -261,10 +263,9 @@ mod tests {
     fn plan_relocation_new_data_start_matches_grown_boot_sector() {
         let old_boot = boot_sector(OLD_FAT_SIZE);
         let new_boot = boot_sector(NEW_FAT_SIZE);
-        let (_file, device) = temp_device();
         let fat = fat_with(&[2, 3, 5]);
 
-        let plan = aligned_plan(&device, &fat);
+        let plan = aligned_plan(&fat);
 
         assert_eq!(plan.old_first_data_sector, old_boot.first_data_sector());
         assert_eq!(plan.old_first_data_sector, 232);
@@ -282,10 +283,9 @@ mod tests {
     fn plan_relocation_maps_clusters_to_boot_derived_sectors() {
         let old_boot = boot_sector(OLD_FAT_SIZE);
         let new_boot = boot_sector(NEW_FAT_SIZE);
-        let (_file, device) = temp_device();
         let fat = fat_with(&[2, 3, 5]);
 
-        let plan = aligned_plan(&device, &fat);
+        let plan = aligned_plan(&fat);
 
         for mv in &plan.moves {
             assert_eq!(
@@ -305,10 +305,9 @@ mod tests {
 
     #[test]
     fn plan_relocation_moves_only_clusters_in_use() {
-        let (_file, device) = temp_device();
         let fat = fat_with(&[2, 3, 5]);
 
-        let plan = aligned_plan(&device, &fat);
+        let plan = aligned_plan(&fat);
 
         let mut moved: Vec<u32> = plan.moves.iter().map(|mv| mv.from_cluster).collect();
         moved.sort_unstable();
@@ -322,10 +321,9 @@ mod tests {
     /// source data.
     #[test]
     fn plan_relocation_orders_moves_highest_cluster_first() {
-        let (_file, device) = temp_device();
         let fat = fat_with(&[2, 3, 5]);
 
-        let plan = aligned_plan(&device, &fat);
+        let plan = aligned_plan(&fat);
 
         let moved: Vec<u32> = plan.moves.iter().map(|mv| mv.from_cluster).collect();
         assert_eq!(moved, vec![5, 3, 2]);
@@ -339,7 +337,7 @@ mod tests {
         let new_boot = boot_sector(NEW_FAT_SIZE);
         let (_file, device) = temp_device();
         let in_use = [2u32, 3, 5];
-        let mut fat = fat_with(&in_use);
+        let fat = fat_with(&in_use);
         let bytes_per_cluster = old_boot.bytes_per_cluster() as usize;
 
         for &cluster in &in_use {
@@ -349,17 +347,8 @@ mod tests {
                 .unwrap();
         }
 
-        let plan = aligned_plan(&device, &fat);
-        execute_relocation(
-            &device,
-            &old_boot,
-            &mut fat,
-            &plan,
-            NEW_FAT_SIZE,
-            new_boot.data_clusters(),
-            false,
-        )
-        .unwrap();
+        let plan = aligned_plan(&fat);
+        execute_relocation(&device, &old_boot, &plan, false).unwrap();
 
         for &cluster in &in_use {
             let got = device
@@ -383,7 +372,7 @@ mod tests {
         let new_boot = boot_sector(NEW_FAT_SIZE);
         let (_file, device) = temp_device();
         let in_use = [2u32, 3, 4, 5];
-        let mut fat = fat_with(&in_use);
+        let fat = fat_with(&in_use);
         let bytes_per_cluster = old_boot.bytes_per_cluster() as usize;
 
         for &cluster in &in_use {
@@ -400,17 +389,8 @@ mod tests {
             "test geometry must produce overlapping source and target ranges"
         );
 
-        let plan = aligned_plan(&device, &fat);
-        execute_relocation(
-            &device,
-            &old_boot,
-            &mut fat,
-            &plan,
-            NEW_FAT_SIZE,
-            new_boot.data_clusters(),
-            false,
-        )
-        .unwrap();
+        let plan = aligned_plan(&fat);
+        execute_relocation(&device, &old_boot, &plan, false).unwrap();
 
         for &cluster in &in_use {
             let got = device
@@ -420,6 +400,76 @@ mod tests {
                 got,
                 vec![fill_byte(cluster); bytes_per_cluster],
                 "cluster {} was corrupted by an overlapping move",
+                cluster
+            );
+        }
+    }
+
+    // A geometry where the total FAT growth is NOT a whole number of clusters:
+    // 2 FATs x 3 sectors = 6 sectors of growth against 4 sectors per cluster.
+    const MIS_SPC: u8 = 4;
+    const MIS_TOTAL_SECTORS: u32 = 524_288;
+    const MIS_OLD_FAT_SIZE: u32 = 1020;
+    const MIS_NEW_FAT_SIZE: u32 = 1023;
+
+    /// Rounding the FAT growth up to a whole cluster puts the data area two
+    /// sectors past where the committed boot sector says it starts, so every
+    /// relocated cluster lands somewhere nothing will look for it.
+    #[test]
+    fn plan_relocation_handles_growth_that_is_not_a_whole_cluster() {
+        let old_boot = boot_sector_with(MIS_SPC, MIS_TOTAL_SECTORS, MIS_OLD_FAT_SIZE);
+        let new_boot = boot_sector_with(MIS_SPC, MIS_TOTAL_SECTORS, MIS_NEW_FAT_SIZE);
+        let fat = fat_with(&[2, 3, 5]);
+
+        let plan = plan_relocation(&old_boot, &new_boot, &fat, 2).unwrap();
+
+        assert_eq!(plan.old_first_data_sector, 2072);
+        assert_eq!(
+            plan.new_first_data_sector,
+            new_boot.first_data_sector(),
+            "new data start must follow the boot sector, not a rounded-up cluster count"
+        );
+        assert_eq!(plan.new_first_data_sector, 2078);
+
+        for mv in &plan.moves {
+            assert_eq!(
+                mv.to_sector,
+                new_boot.cluster_to_sector(mv.from_cluster),
+                "cluster {} target sector",
+                mv.from_cluster
+            );
+        }
+    }
+
+    /// The same geometry, end to end: the bytes must be readable at the address
+    /// the grown boot sector derives for each cluster.
+    #[test]
+    fn execute_relocation_round_trips_with_unaligned_growth() {
+        let old_boot = boot_sector_with(MIS_SPC, MIS_TOTAL_SECTORS, MIS_OLD_FAT_SIZE);
+        let new_boot = boot_sector_with(MIS_SPC, MIS_TOTAL_SECTORS, MIS_NEW_FAT_SIZE);
+        let (_file, device) = temp_device_of(4096);
+        let in_use = [2u32, 3, 5];
+        let fat = fat_with(&in_use);
+        let bytes_per_cluster = old_boot.bytes_per_cluster() as usize;
+
+        for &cluster in &in_use {
+            let data = vec![fill_byte(cluster); bytes_per_cluster];
+            device
+                .write_sectors(old_boot.cluster_to_sector(cluster), &data)
+                .unwrap();
+        }
+
+        let plan = plan_relocation(&old_boot, &new_boot, &fat, 2).unwrap();
+        execute_relocation(&device, &old_boot, &plan, false).unwrap();
+
+        for &cluster in &in_use {
+            let got = device
+                .read_sectors(new_boot.cluster_to_sector(cluster), MIS_SPC as u32)
+                .unwrap();
+            assert_eq!(
+                got,
+                vec![fill_byte(cluster); bytes_per_cluster],
+                "cluster {} did not land where the new boot sector points",
                 cluster
             );
         }
