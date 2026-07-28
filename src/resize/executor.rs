@@ -6,7 +6,9 @@ use crate::fat32::{
     BootSector, FSInfo,
 };
 use crate::resize::calculator::{affected_cluster_range, calculate_new_size, SizeCalculation};
-use crate::resize::relocator::{execute_relocation, plan_relocation, verify_relocation};
+use crate::resize::relocator::{
+    execute_relocation, plan_relocation, verify_relocation, ShiftProgress,
+};
 use crate::system::check_not_mounted;
 
 // ===== Fault Injection for Testing =====
@@ -51,6 +53,25 @@ const CHECKPOINT_MAGIC: &[u8; 8] = b"FAT32RSZ";
 /// Current checkpoint version
 const CHECKPOINT_VERSION: u8 = 1;
 
+/// Magic bytes for the shift-progress record.
+///
+/// The record is appended *after* the version-1 checkpoint body rather than
+/// folded into it, so the first 32 bytes stay byte-for-byte what version 1
+/// always was. A build that predates the record ignores the tail and still
+/// reads the checkpoint; a build that expects it and finds none refuses to
+/// resume a data shift instead of guessing how far the previous pass got.
+const PROGRESS_MAGIC: &[u8; 4] = b"PRG1";
+
+/// Offset of the shift-progress record within the checkpoint sector
+const PROGRESS_OFFSET: usize = 32;
+
+/// magic (4) + next_cluster (4) + CRC32 (4)
+const PROGRESS_SIZE: usize = 12;
+
+/// Record shift progress at most this often, in moves. The effective interval
+/// is also capped by the shift distance in clusters - see [`ShiftProgress`].
+const PROGRESS_RECORD_EVERY: u32 = 1024;
+
 /// Resize phase values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -90,6 +111,12 @@ pub struct ResizeCheckpoint {
     pub old_fat_size: u32,
     /// New FAT size in sectors
     pub new_fat_size: u32,
+    /// Highest cluster still to be moved by the data shift.
+    ///
+    /// `None` means no progress record was found, which is not the same as
+    /// "nothing moved yet": a shift may have run to an unknown point. Only a
+    /// recorded `Some` makes a phase-`Started` resume safe.
+    pub shift_progress: Option<u32>,
 }
 
 impl ResizeCheckpoint {
@@ -110,7 +137,14 @@ impl ResizeCheckpoint {
             new_total_sectors,
             old_fat_size,
             new_fat_size,
+            shift_progress: None,
         }
+    }
+
+    /// Attach a shift-progress record naming the next cluster still to move.
+    pub fn with_shift_progress(mut self, next_cluster: u32) -> Self {
+        self.shift_progress = Some(next_cluster);
+        self
     }
 
     /// Serialize checkpoint to bytes with specified sector size
@@ -146,7 +180,46 @@ impl ResizeCheckpoint {
         let crc = crc32fast::hash(&data[0..Self::DATA_SIZE]);
         data[28..32].copy_from_slice(&crc.to_le_bytes());
 
+        // Shift-progress record, appended after the version-1 body so that
+        // body's layout and CRC are untouched.
+        if let Some(next_cluster) = self.shift_progress {
+            if sector_size >= PROGRESS_OFFSET + PROGRESS_SIZE {
+                let p = PROGRESS_OFFSET;
+                data[p..p + 4].copy_from_slice(PROGRESS_MAGIC);
+                data[p + 4..p + 8].copy_from_slice(&next_cluster.to_le_bytes());
+                let crc = crc32fast::hash(&data[p..p + 8]);
+                data[p + 8..p + 12].copy_from_slice(&crc.to_le_bytes());
+            }
+        }
+
         data
+    }
+
+    /// Parse the optional shift-progress record trailing the checkpoint body.
+    ///
+    /// A record whose magic is absent means "no progress was recorded"; a
+    /// record whose magic is present but whose CRC fails is damage, and is
+    /// reported rather than silently treated as absent.
+    fn parse_shift_progress(data: &[u8]) -> Result<Option<u32>> {
+        let p = PROGRESS_OFFSET;
+        if data.len() < p + PROGRESS_SIZE {
+            return Ok(None);
+        }
+        if &data[p..p + 4] != PROGRESS_MAGIC {
+            return Ok(None);
+        }
+
+        let stored = u32::from_le_bytes([data[p + 8], data[p + 9], data[p + 10], data[p + 11]]);
+        if stored != crc32fast::hash(&data[p..p + 8]) {
+            return Err(Error::CheckpointCorrupted);
+        }
+
+        Ok(Some(u32::from_le_bytes([
+            data[p + 4],
+            data[p + 5],
+            data[p + 6],
+            data[p + 7],
+        ])))
     }
 
     /// Parse checkpoint from bytes (sector size independent - only first 32 bytes matter)
@@ -191,6 +264,7 @@ impl ResizeCheckpoint {
             new_total_sectors,
             old_fat_size,
             new_fat_size,
+            shift_progress: Self::parse_shift_progress(data)?,
         }))
     }
 }
@@ -466,21 +540,76 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
             if !options.is_dry_run() {
                 // === PHASE 0: Data shift (safe - source preserved) ===
                 if starting_phase == ResizePhase::Started {
+                    // How far a previous pass got. A fresh run has moved
+                    // nothing, so it resumes from the highest cluster in the
+                    // plan; a resume must read the recorded position, because
+                    // restarting the shift from the top would re-read source
+                    // sectors the previous pass overwrote.
+                    let resume_from = match incomplete_resize.as_ref() {
+                        None => plan.highest_cluster(),
+                        Some(cp) => cp.shift_progress.ok_or_else(|| {
+                            Error::Relocation(
+                                "interrupted data shift left no progress record, so the point \
+                                 it reached is unknown; resuming would copy already-shifted \
+                                 data over itself. The filesystem is intact but must be \
+                                 recovered from backup or repaired by hand."
+                                    .to_string(),
+                            )
+                        })?,
+                    };
+
+                    // Redoing a move is only safe while its source is intact,
+                    // and `old_home(c)` survives until the pass descends
+                    // `shift_clusters` below it. Recording at least that often
+                    // keeps every replayed move readable.
+                    //
+                    // A shift shorter than one cluster overlaps a cluster with
+                    // itself, so no move may ever be replayed. A single pass is
+                    // still safe - each cluster is read whole before it is
+                    // written - so the run proceeds, but nothing is recorded:
+                    // a later resume then finds no progress record and refuses
+                    // rather than corrupting.
+                    let shift_clusters = plan.shift_clusters(&boot);
+                    let resumable = shift_clusters > 0;
+                    let record_every = if resumable {
+                        PROGRESS_RECORD_EVERY.min(shift_clusters)
+                    } else {
+                        u32::MAX
+                    };
+
                     // Write initial checkpoint
-                    let checkpoint = ResizeCheckpoint::new(
+                    let mut checkpoint = ResizeCheckpoint::new(
                         ResizePhase::Started,
                         calculation.old_total_sectors,
                         calculation.new_total_sectors,
                         calculation.old_fat_size,
                         calculation.new_fat_size,
                     );
+                    if resumable {
+                        checkpoint.shift_progress = Some(resume_from);
+                    }
                     write_checkpoint(&device, &checkpoint)?;
                     operations.push("Wrote checkpoint (phase 0: started)".to_string());
 
                     maybe_crash_at("after_checkpoint_start");
 
-                    // Execute data shift
-                    execute_relocation(&device, &boot, &plan, options.is_verbose())?;
+                    // Execute data shift, recording how far it has got as it
+                    // descends so a crash here can be resumed rather than
+                    // replayed from the beginning.
+                    let mut record = |next_cluster: u32| -> Result<()> {
+                        if !resumable {
+                            return Ok(());
+                        }
+                        let mut cp = checkpoint.clone();
+                        cp.shift_progress = Some(next_cluster);
+                        write_checkpoint(&device, &cp)
+                    };
+                    let mut progress = ShiftProgress {
+                        resume_from,
+                        record_every,
+                        record: &mut record,
+                    };
+                    execute_relocation(&device, &boot, &plan, &mut progress, options.is_verbose())?;
                     clusters_relocated = plan.cluster_count();
                     operations.push(format!("Shifted {} clusters forward", clusters_relocated));
 
@@ -1045,6 +1174,94 @@ mod tests {
         assert_eq!(ResizePhase::from_u8(2), Some(ResizePhase::FatWritten));
         assert_eq!(ResizePhase::from_u8(3), None);
         assert_eq!(ResizePhase::from_u8(255), None);
+    }
+
+    /// The progress record has to survive the same round trip as the rest.
+    #[test]
+    fn checkpoint_round_trips_a_shift_progress_record() {
+        let checkpoint = test_checkpoint(ResizePhase::Started).with_shift_progress(4321);
+        let parsed = ResizeCheckpoint::from_bytes(&checkpoint.to_bytes(512))
+            .unwrap()
+            .unwrap();
+
+        assert_checkpoint_eq(&parsed, &checkpoint);
+        assert_eq!(parsed.shift_progress, Some(4321));
+    }
+
+    /// Appending the progress record must not disturb the version-1 body. A
+    /// build that predates the record has to keep reading these checkpoints,
+    /// which is the whole reason the record lives past byte 32 instead of
+    /// inside the body.
+    #[test]
+    fn progress_record_leaves_the_version_1_body_untouched() {
+        let plain = test_checkpoint(ResizePhase::FatWritten);
+        let with_progress = plain.clone().with_shift_progress(4321);
+
+        assert_eq!(
+            plain.to_bytes(512)[0..32],
+            with_progress.to_bytes(512)[0..32],
+            "the version-1 body must be byte-identical with and without progress"
+        );
+    }
+
+    /// A checkpoint carrying no progress record must report `None` rather than
+    /// a plausible cluster number. `None` is what makes the executor refuse a
+    /// phase-Started resume instead of guessing where the shift stopped.
+    #[test]
+    fn checkpoint_without_a_progress_record_reports_none() {
+        let bytes = test_checkpoint(ResizePhase::Started).to_bytes(512);
+
+        assert_eq!(&bytes[32..44], &[0u8; 12], "no record should be written");
+        assert_eq!(
+            ResizeCheckpoint::from_bytes(&bytes)
+                .unwrap()
+                .unwrap()
+                .shift_progress,
+            None
+        );
+    }
+
+    /// A damaged progress record is corruption, not absence. Reading it as
+    /// absent would be safe; reading it as a wrong cluster number would not,
+    /// so the CRC has to be enforced.
+    #[test]
+    fn checkpoint_rejects_a_corrupted_progress_record() {
+        let good = test_checkpoint(ResizePhase::Started)
+            .with_shift_progress(4321)
+            .to_bytes(512);
+
+        for offset in PROGRESS_OFFSET + 4..PROGRESS_OFFSET + PROGRESS_SIZE {
+            let mut corrupt = good.clone();
+            corrupt[offset] ^= 0x01;
+
+            assert!(
+                matches!(
+                    ResizeCheckpoint::from_bytes(&corrupt),
+                    Err(Error::CheckpointCorrupted)
+                ),
+                "flipping byte {} of the progress record should have been rejected",
+                offset
+            );
+        }
+    }
+
+    /// A sector too small to hold the record still yields a usable checkpoint;
+    /// the progress simply cannot be stored, and recovery treats that as
+    /// unknown rather than failing outright.
+    #[test]
+    fn progress_record_is_omitted_when_the_sector_cannot_hold_it() {
+        let bytes = test_checkpoint(ResizePhase::Started)
+            .with_shift_progress(4321)
+            .to_bytes(40);
+
+        assert_eq!(bytes.len(), 40);
+        assert_eq!(
+            ResizeCheckpoint::from_bytes(&bytes)
+                .unwrap()
+                .unwrap()
+                .shift_progress,
+            None
+        );
     }
 
     /// A temp-file-backed device of `sectors` zeroed 512-byte sectors.
