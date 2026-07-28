@@ -434,7 +434,7 @@ reproduced against crafted ones.
 - **Status reason:** `Device::check_bounds` now gates both `read_sectors` and `write_sectors` against `total_sectors`, raising the new `Error::SectorOutOfBounds { path, sector, count, total_sectors }`, which the CLI maps to `exit::INTERNAL` -- an out-of-range sector means the tool's own arithmetic was wrong, not that the device misbehaved. The addition is `checked_add`, so a start sector derived from on-disk values cannot wrap into range. `write_sectors` rounds its buffer length up, so a multi-sector run straddling the end is rejected whole rather than by its first sector. Covered by `writing_past_the_end_of_the_device_is_rejected_and_does_not_extend_it`, `a_multi_sector_write_straddling_the_end_is_rejected` (which also asserts a run ending exactly at the last sector is still allowed) and `a_wrapping_sector_range_is_rejected`. The full QEMU suite passing confirms the guard rejects nothing a real resize legitimately does.
 - **Interaction with [F-R30]:** the guard intercepted the read that [F-R30]'s safety-net test used to provoke an I/O failure, so that test would have stopped exercising [F-R30]'s guarantee (path + sector + errno on a real I/O error) while still appearing to pass on a different error. Its fixture was changed -- open at 8 sectors, then shorten the file behind the device's back -- so sector 4 is in bounds but backed by nothing, and the failure is again a genuine `DeviceIo`. All three of its assertions are byte-identical to before.
 - **Status date:** 2026-07-28 00:00 UTC
-- **Status commit:** PLACEHOLDER
+- **Status commit:** 8ced202
 
 ### [F-R31] All failure modes collapse to exit code 1
 - **Category:** 24 (inconsistent API contracts)
