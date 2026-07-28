@@ -80,11 +80,10 @@ pub fn calculate_new_size(boot: &BootSector, device_sectors: u64) -> Result<Size
         boot.bytes_per_sector(),
     )?;
 
-    // Calculate new data clusters
-    let new_data_sectors = new_total_sectors
-        - boot.reserved_sectors() as u32
-        - (boot.num_fats() as u32 * new_fat_size);
-    let new_data_clusters = new_data_sectors / boot.sectors_per_cluster() as u32;
+    // Calculate new data clusters, from the layout the volume will actually have
+    let new_data_clusters = boot
+        .with_geometry(new_total_sectors, new_fat_size)
+        .data_clusters();
 
     // Verify we still have FAT32 (>= 65525 clusters)
     if new_data_clusters < 65525 {
@@ -99,27 +98,8 @@ pub fn calculate_new_size(boot: &BootSector, device_sectors: u64) -> Result<Size
     let fat_growth_sectors = new_fat_size.saturating_sub(old_fat_size);
 
     // Calculate which clusters would be affected by FAT growth
-    let (first_affected_cluster, last_affected_cluster) = if fat_needs_growth {
-        // FAT growth affects the data area right after the current FAT tables
-        // The first data sector moves forward by (fat_growth_sectors * num_fats)
-        let growth_per_fat = fat_growth_sectors;
-        let total_growth = growth_per_fat * boot.num_fats() as u32;
-
-        // These are the clusters that currently occupy the space where
-        // the new FAT sectors will go
-        let sectors_per_cluster = boot.sectors_per_cluster() as u32;
-
-        // Number of clusters that will be overwritten
-        let affected_clusters = total_growth.div_ceil(sectors_per_cluster);
-
-        // First affected cluster is cluster 2 (the first data cluster)
-        let first = 2u32;
-        let last = first + affected_clusters - 1;
-
-        (first, last)
-    } else {
-        (0, 0)
-    };
+    let (first_affected_cluster, last_affected_cluster) =
+        affected_cluster_range(boot, old_fat_size, new_fat_size);
 
     // Calculate free clusters (will be updated based on actual FAT contents)
     // This is an estimate; actual value depends on current usage
@@ -138,6 +118,33 @@ pub fn calculate_new_size(boot: &BootSector, device_sectors: u64) -> Result<Size
         first_affected_cluster,
         last_affected_cluster,
     })
+}
+
+/// The range of clusters that currently sit where the grown FAT tables will go
+///
+/// The data area begins at cluster 2, so growing the FAT by `total_growth`
+/// sectors overwrites the clusters spanning those sectors - rounded up, since a
+/// partially overwritten cluster is still lost. Returns `(0, 0)` when the FAT
+/// does not grow.
+///
+/// This is the count of clusters *overwritten*. It is deliberately not the
+/// distance the data area moves: that distance is `num_fats * fat growth`
+/// exactly, and is read off the boot sector by the relocator rather than
+/// recomputed here.
+pub(crate) fn affected_cluster_range(
+    boot: &BootSector,
+    old_fat_size: u32,
+    new_fat_size: u32,
+) -> (u32, u32) {
+    if new_fat_size <= old_fat_size {
+        return (0, 0);
+    }
+
+    let total_growth = (new_fat_size - old_fat_size) * boot.num_fats() as u32;
+    let affected_clusters = total_growth.div_ceil(boot.sectors_per_cluster() as u32);
+
+    let first = 2u32;
+    (first, first + affected_clusters - 1)
 }
 
 /// Calculate the required FAT size in sectors

@@ -5,7 +5,7 @@ use crate::fat32::{
     read_fat_table, read_fsinfo, write_backup_boot_sector, write_boot_sector, write_fsinfo,
     BootSector, FSInfo,
 };
-use crate::resize::calculator::{calculate_new_size, SizeCalculation};
+use crate::resize::calculator::{affected_cluster_range, calculate_new_size, SizeCalculation};
 use crate::resize::relocator::{execute_relocation, plan_relocation, verify_relocation};
 use crate::system::check_not_mounted;
 
@@ -389,32 +389,24 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
     let device_sectors = device.total_sectors();
     let calculation = if let Some(ref checkpoint) = incomplete_resize {
         // Use checkpoint values for consistency
+        let (first_affected_cluster, last_affected_cluster) =
+            affected_cluster_range(&boot, checkpoint.old_fat_size, checkpoint.new_fat_size);
+
         SizeCalculation {
             old_total_sectors: checkpoint.old_total_sectors,
             new_total_sectors: checkpoint.new_total_sectors,
             old_fat_size: checkpoint.old_fat_size,
             new_fat_size: checkpoint.new_fat_size,
-            new_data_clusters: calculate_data_clusters_from_params(
-                checkpoint.new_total_sectors,
-                boot.reserved_sectors(),
-                boot.num_fats(),
-                checkpoint.new_fat_size,
-                boot.sectors_per_cluster(),
-            ),
+            new_data_clusters: boot
+                .with_geometry(checkpoint.new_total_sectors, checkpoint.new_fat_size)
+                .data_clusters(),
             new_free_clusters: 0, // Will be recalculated
             fat_needs_growth: checkpoint.new_fat_size > checkpoint.old_fat_size,
             fat_growth_sectors: checkpoint
                 .new_fat_size
                 .saturating_sub(checkpoint.old_fat_size),
-            first_affected_cluster: 2,
-            // Note: formula matches calculator.rs: last = first + affected_clusters - 1
-            last_affected_cluster: 2
-                + (checkpoint
-                    .new_fat_size
-                    .saturating_sub(checkpoint.old_fat_size)
-                    * boot.num_fats() as u32)
-                    .div_ceil(boot.sectors_per_cluster() as u32)
-                - 1,
+            first_affected_cluster,
+            last_affected_cluster,
         }
     } else {
         calculate_new_size(&boot, device_sectors)?
@@ -454,9 +446,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         // The boot sector as it will be committed once the resize completes.
         // The relocator reads the new data-area start straight off it, so the
         // plan cannot disagree with the geometry the filesystem ends up with.
-        let mut new_boot = boot.clone();
-        new_boot.set_total_sectors_32(calculation.new_total_sectors);
-        new_boot.set_fat_size_32(calculation.new_fat_size);
+        let new_boot = boot.with_geometry(calculation.new_total_sectors, calculation.new_fat_size);
 
         // Plan cluster data shift
         let plan = plan_relocation(&boot, &new_boot, &fat, calculation.first_affected_cluster)?;
@@ -567,8 +557,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         // === PHASE 2: Metadata update (restore boot sector) ===
 
         // Update boot sector with new values and restore signature
-        boot.set_total_sectors_32(calculation.new_total_sectors);
-        boot.set_fat_size_32(calculation.new_fat_size);
+        boot = boot.with_geometry(calculation.new_total_sectors, calculation.new_fat_size);
         boot.restore_signature(); // Restore 0xAA55 signature
 
         write_boot_sector(&device, &boot)?;
@@ -580,10 +569,9 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
 
         // Update FSInfo with new free cluster count
         let old_free = fsinfo.free_count();
-        let old_data_clusters = (calculation.old_total_sectors
-            - boot.reserved_sectors() as u32
-            - (boot.num_fats() as u32 * calculation.old_fat_size))
-            / boot.sectors_per_cluster() as u32;
+        let old_data_clusters = boot
+            .with_geometry(calculation.old_total_sectors, calculation.old_fat_size)
+            .data_clusters();
         let additional_clusters = calculation
             .new_data_clusters
             .saturating_sub(old_data_clusters);
@@ -630,20 +618,6 @@ fn print_verbose_resize_info(boot: &BootSector, calculation: &SizeCalculation) {
     eprintln!("  FAT size: {} sectors", calculation.new_fat_size);
     eprintln!("  Data clusters: {}", calculation.new_data_clusters);
     eprintln!("  FAT needs growth: {}", calculation.fat_needs_growth);
-}
-
-/// Helper to calculate data clusters from parameters
-fn calculate_data_clusters_from_params(
-    total_sectors: u32,
-    reserved_sectors: u16,
-    num_fats: u8,
-    fat_size: u32,
-    sectors_per_cluster: u8,
-) -> u32 {
-    let data_sectors = total_sectors
-        .saturating_sub(reserved_sectors as u32)
-        .saturating_sub(num_fats as u32 * fat_size);
-    data_sectors / sectors_per_cluster as u32
 }
 
 /// Initialize new FAT sectors with free entries (zeros)
@@ -858,29 +832,50 @@ mod tests {
         BootSector::from_bytes(&data).unwrap()
     }
 
-    /// The executor's local data-cluster arithmetic must agree with the
-    /// canonical accessor on `BootSector`; the FSInfo free count is derived
-    /// from it.
+    /// `with_geometry(..).data_clusters()` is now the single data-cluster path,
+    /// and must produce the layout the FAT32 spec calls for. The FSInfo free
+    /// count and the resize plan are both derived from it.
+    ///
+    /// Expected values are computed here independently of the accessor:
+    /// `(total_sectors - reserved - num_fats * fat_size) / sectors_per_cluster`,
+    /// with 32 reserved sectors, 2 FATs and 8 sectors per cluster.
     #[test]
-    fn test_data_cluster_formula_agrees_with_boot_sector_accessor() {
+    fn test_data_clusters_for_a_projected_geometry() {
+        let base = test_boot_sector(1_000_000, 1000);
+
         for (total_sectors, fat_size) in [(1_000_000u32, 1000u32), (4_000_000, 3903), (65_536, 64)]
         {
-            let boot = test_boot_sector(total_sectors, fat_size);
+            let expected = (total_sectors - 32 - 2 * fat_size) / 8;
 
             assert_eq!(
-                calculate_data_clusters_from_params(
-                    boot.total_sectors(),
-                    boot.reserved_sectors(),
-                    boot.num_fats(),
-                    boot.fat_size(),
-                    boot.sectors_per_cluster(),
-                ),
-                boot.data_clusters(),
-                "formulas diverge at total_sectors={} fat_size={}",
+                base.with_geometry(total_sectors, fat_size).data_clusters(),
+                expected,
+                "wrong cluster count at total_sectors={} fat_size={}",
                 total_sectors,
                 fat_size
             );
         }
+    }
+
+    /// `with_geometry` must change only the two geometry fields, leaving the
+    /// rest of the sector - signature included - byte-for-byte intact.
+    #[test]
+    fn test_with_geometry_preserves_the_rest_of_the_sector() {
+        let base = test_boot_sector(1_000_000, 1000);
+        let projected = base.with_geometry(4_000_000, 3903);
+
+        assert_eq!(projected.total_sectors_32(), 4_000_000);
+        assert_eq!(projected.fat_size_32(), 3903);
+        assert_eq!(projected.reserved_sectors(), base.reserved_sectors());
+        assert_eq!(projected.num_fats(), base.num_fats());
+        assert_eq!(projected.sectors_per_cluster(), base.sectors_per_cluster());
+        assert_eq!(projected.root_cluster(), base.root_cluster());
+        assert!(projected.is_signature_valid());
+
+        let mut expected = base.as_bytes().to_vec();
+        expected[32..36].copy_from_slice(&4_000_000u32.to_le_bytes());
+        expected[36..40].copy_from_slice(&3903u32.to_le_bytes());
+        assert_eq!(projected.as_bytes(), expected.as_slice());
     }
 
     #[test]

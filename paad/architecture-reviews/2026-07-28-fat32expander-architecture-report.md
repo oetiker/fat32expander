@@ -288,6 +288,10 @@ reproduced against crafted ones.
 - **Evidence:** `src/resize/executor.rs:410` `// Note: formula matches calculator.rs: last = first + affected_clusters - 1`; `:591-594` `(calculation.old_total_sectors - boot.reserved_sectors() as u32 - (boot.num_fats() as u32 * calculation.old_fat_size)) / boot.sectors_per_cluster() as u32` (no `root_dir_sectors` term); plus `:651-654` `calculate_data_clusters_from_params`, `calculator.rs:84-87`, and the canonical `structs.rs:391-404`.
 - **Found by:** Structure & Boundaries, Coupling & Dependencies, Integration & Data (3 specialists)
 - **Note:** [F-R2] is a direct consequence of this class of divergence. Cross-references [F-R45].
+- **Status:** Fixed
+- **Status reason:** Both duplicated formulas now have a single home. `BootSector::with_geometry(total_sectors, fat_size)` returns the boot sector as it would look under a different geometry, so every layout question is answered by the canonical accessors; the three data-cluster copies (`calculator.rs:84-87`, the inline FSInfo copy at `executor.rs:591-594` which omitted `root_dir_sectors`, and `calculate_data_clusters_from_params`) are replaced by `with_geometry(..).data_clusters()`, and the last of those functions is deleted. The affected-cluster formula, duplicated between `calculator.rs` and the checkpoint-resume branch at `executor.rs:409-417` (with the comment admitting the copies had to be hand-synced), is now `calculator::affected_cluster_range`, called from both. The commit path at `executor.rs:566-567` also goes through `with_geometry`, so the projected and committed boot sectors are built by the same code. Covered by `test_data_clusters_for_a_projected_geometry` and `test_with_geometry_preserves_the_rest_of_the_sector`; the former computes its expected values independently rather than comparing two implementations against each other.
+- **Status date:** 2026-07-28 00:00 UTC
+- **Status commit:** PENDING13
 
 ### [F-R14] `resize_fat32` is a ~307-line function doing everything
 - **Category:** 2 (god object)
@@ -435,6 +439,10 @@ reproduced against crafted ones.
 - **Explanation:** The relocator's three entry points take a `&Device`, a mutable FAT slice, `new_fat_size` and `new_data_clusters` that are all discarded, so the signatures advertise data dependencies the implementations do not have.
 - **Evidence:** `src/resize/relocator.rs:52-58, 125-133, 178-185` — `plan_relocation(_device: &Device, …, _new_data_clusters: u32)`; `execute_relocation(device, boot, _fat: &mut [u32], plan, _new_fat_size: u32, _new_data_clusters: u32, verbose)`; `:168-170` `// No cluster number changes, so return empty vector … Ok(Vec::new())`. The executor still constructs and threads these values through at `:455-462` and `:493-501`.
 - **Found by:** Coupling & Dependencies, Structure & Boundaries
+- **Status:** Partially fixed
+- **Status reason:** Resolved for two of the three entry points as a side effect of the [F-R2] fix: `plan_relocation` no longer takes `_device` or `_new_data_clusters`, and `execute_relocation` no longer takes `_fat`, `_new_fat_size` or `_new_data_clusters` and returns `()` instead of an always-empty `Vec`. `verify_relocation(_fat, _first_affected, _last_affected)` still ignores all three parameters — that remainder is inseparable from [F-R20] (the function is a do-nothing stub) and should be fixed with it.
+- **Status date:** 2026-07-28 00:00 UTC
+- **Status commit:** 960a851
 
 ### [F-R39] `read_boot_sector` and `read_boot_sector_for_recovery` are ~20-line near-verbatim copies
 - **Category:** 9 (shotgun surgery)

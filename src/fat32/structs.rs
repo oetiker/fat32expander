@@ -372,6 +372,20 @@ impl BootSector {
         }
     }
 
+    /// This boot sector as it would look with a different volume geometry
+    ///
+    /// Code that needs to reason about a layout other than the current one -
+    /// the post-resize layout, or the pre-resize one after the fields have been
+    /// updated - should derive a boot sector here and ask it, rather than
+    /// recomputing the layout arithmetic. Every such copy is a chance for the
+    /// copy and the on-disk truth to disagree.
+    pub fn with_geometry(&self, total_sectors: u32, fat_size: u32) -> Self {
+        let mut updated = self.clone();
+        updated.set_total_sectors_32(total_sectors);
+        updated.set_fat_size_32(fat_size);
+        updated
+    }
+
     /// First sector of the FAT area
     pub fn first_fat_sector(&self) -> u64 {
         self.reserved_sectors() as u64
