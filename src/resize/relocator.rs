@@ -100,7 +100,7 @@ pub fn plan_relocation(
     }
 
     // Sort by cluster number descending (for safe copying from end to start)
-    moves.sort_by(|a, b| b.from_cluster.cmp(&a.from_cluster));
+    moves.sort_by_key(|m| std::cmp::Reverse(m.from_cluster));
 
     let total_bytes = moves.len() as u64 * boot.bytes_per_cluster() as u64;
 
