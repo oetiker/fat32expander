@@ -7,8 +7,9 @@
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::fat32::{
-    boot_sectors_match, read_backup_boot_sector, read_boot_sector_for_recovery, read_fat_table,
-    read_fsinfo, write_backup_boot_sector, write_boot_sector, write_fsinfo, BootSector, FSInfo,
+    boot_sectors_match, open_fat32_device, read_backup_boot_sector, read_boot_sector_for_recovery,
+    read_fat_table, read_fsinfo, write_backup_boot_sector, write_boot_sector, write_fsinfo,
+    BootSector, FSInfo,
 };
 use crate::resize::calculator::{affected_cluster_range, calculate_new_size, SizeCalculation};
 use crate::resize::checkpoint::{
@@ -28,12 +29,9 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
     check_not_mounted(options.device_path())?;
     operations.push("Verified device is not mounted".to_string());
 
-    // Open device
-    let mut device = if options.is_dry_run() {
-        Device::open_readonly(options.device_path())?
-    } else {
-        Device::open(options.device_path())?
-    };
+    // Open device. The sector size is established here, before any
+    // sector-addressed I/O is possible ([F-R23]).
+    let device = open_fat32_device(options.device_path(), !options.is_dry_run())?;
     operations.push(format!(
         "Opened device: {}",
         options.device_path().display()
@@ -41,8 +39,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
 
     // Read boot sector - use recovery mode to allow invalidated signature
     // from an interrupted resize operation
-    // This also bootstraps the device sector size from the boot sector
-    let mut boot = read_boot_sector_for_recovery(&mut device)?;
+    let mut boot = read_boot_sector_for_recovery(&device)?;
     operations.push(format!(
         "Read boot sector ({}-byte sectors)",
         boot.bytes_per_sector()

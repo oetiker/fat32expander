@@ -22,9 +22,32 @@ impl std::fmt::Debug for Device {
     }
 }
 
+/// How many leading bytes are handed to a sector-size probe.
+///
+/// Enough to cover the largest sector size FAT32 permits, so a probe can read
+/// a complete boot sector whatever size it turns out to declare.
+pub const PROBE_BYTES: usize = 4096;
+
 impl Device {
-    /// Internal helper to open a device with specified mode
-    fn open_impl<P: AsRef<Path>>(path: P, writable: bool) -> Result<Self> {
+    /// Open a device and establish its geometry in a single step.
+    ///
+    /// [F-R23]: a `Device` used to open with a hardcoded 512-byte sector size
+    /// and acquire the real one later, as a side effect of reading the boot
+    /// sector ([F-R40]). Between those two moments every sector-addressed read
+    /// and write was silently misaddressed on any filesystem that was not
+    /// 512-byte-sectored, and nothing reported an error. There is now no such
+    /// window: `sector_size` is determined before `Self` exists.
+    ///
+    /// The device layer sits below `fat32` and must not parse FAT structures,
+    /// so the caller supplies the knowledge: `sector_size_from` receives up to
+    /// [`PROBE_BYTES`] leading bytes and returns the sector size the format
+    /// declares. The file is opened once -- the probe reads through the same
+    /// handle the returned `Device` keeps.
+    pub fn open_with<P, F>(path: P, writable: bool, sector_size_from: F) -> Result<Self>
+    where
+        P: AsRef<Path>,
+        F: FnOnce(&[u8]) -> Result<u32>,
+    {
         let path_buf = path.as_ref().to_path_buf();
         let path_display = path_buf.display().to_string();
 
@@ -33,42 +56,63 @@ impl Device {
             .write(writable)
             .open(&path_buf)
             .map_err(|source| Error::DeviceOpen {
-                path: path_display,
+                path: path_display.clone(),
                 source,
             })?;
 
-        // Get device size
-        let metadata = file.metadata()?;
-        let size = if metadata.is_file() {
-            // Regular file (image)
-            metadata.len()
-        } else {
-            // Block device - use seek to end to get size
-            let mut f = file.try_clone()?;
-            f.seek(SeekFrom::End(0))?
-        };
+        let size = Self::size_of(&file)?;
 
-        // Default to 512-byte sectors (most common)
-        // We'll update this after reading the boot sector
-        let sector_size = 512u32;
-        let total_sectors = size / sector_size as u64;
+        // Probe with whatever the device actually holds: a device shorter than
+        // PROBE_BYTES is not automatically invalid, but one too short to hold a
+        // boot sector at all is the probe's business to reject.
+        let probe_len = size.min(PROBE_BYTES as u64) as usize;
+        let mut probe = vec![0u8; probe_len];
+        file.read_exact_at(&mut probe, 0)
+            .map_err(|source| Error::DeviceIo {
+                op: "read",
+                path: path_display,
+                offset: 0,
+                sector: 0,
+                len: probe_len,
+                source,
+            })?;
+
+        let sector_size = sector_size_from(&probe)?;
+        if sector_size == 0 {
+            return Err(Error::UnsupportedSectorSize(sector_size));
+        }
 
         Ok(Self {
             file,
             path: path_buf,
             sector_size,
-            total_sectors,
+            total_sectors: size / sector_size as u64,
         })
     }
 
-    /// Open a device or image file for read/write access
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::open_impl(path, true)
+    /// Open for read/write with a sector size the caller already knows.
+    pub fn open_with_sector_size<P: AsRef<Path>>(path: P, sector_size: u32) -> Result<Self> {
+        Self::open_with(path, true, |_| Ok(sector_size))
     }
 
-    /// Open a device in read-only mode (for dry-run)
-    pub fn open_readonly<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::open_impl(path, false)
+    /// Open read-only (for dry-run) with a sector size the caller already knows.
+    pub fn open_readonly_with_sector_size<P: AsRef<Path>>(
+        path: P,
+        sector_size: u32,
+    ) -> Result<Self> {
+        Self::open_with(path, false, |_| Ok(sector_size))
+    }
+
+    /// Size in bytes of an open device, whether image file or block device.
+    fn size_of(file: &File) -> Result<u64> {
+        let metadata = file.metadata()?;
+        if metadata.is_file() {
+            Ok(metadata.len())
+        } else {
+            // Block device - use seek to end to get size
+            let mut f = file.try_clone()?;
+            Ok(f.seek(SeekFrom::End(0))?)
+        }
     }
 
     /// Get the device path
@@ -81,15 +125,6 @@ impl Device {
         self.sector_size
     }
 
-    /// Update sector size (called after reading boot sector)
-    pub fn set_sector_size(&mut self, size: u32) {
-        self.sector_size = size;
-        // Recalculate total sectors with new size
-        if let Ok(file_size) = self.file_size() {
-            self.total_sectors = file_size / size as u64;
-        }
-    }
-
     /// Get total number of sectors
     pub fn total_sectors(&self) -> u64 {
         self.total_sectors
@@ -97,13 +132,7 @@ impl Device {
 
     /// Get total device size in bytes
     fn file_size(&self) -> Result<u64> {
-        let metadata = self.file.metadata()?;
-        if metadata.is_file() {
-            Ok(metadata.len())
-        } else {
-            let mut f = self.file.try_clone()?;
-            Ok(f.seek(SeekFrom::End(0))?)
-        }
+        Self::size_of(&self.file)
     }
 
     /// Attach this device's identity to a failed I/O call.
@@ -206,7 +235,7 @@ mod tests {
         let zeros = vec![0u8; 1024 * 1024];
         std::fs::write(file.path(), &zeros).unwrap();
 
-        let device = Device::open(file.path()).unwrap();
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
         assert_eq!(device.sector_size(), 512);
         assert_eq!(device.total_sectors(), 2048); // 1MB / 512 = 2048 sectors
     }
@@ -217,7 +246,7 @@ mod tests {
         let zeros = vec![0u8; 1024 * 1024];
         std::fs::write(file.path(), &zeros).unwrap();
 
-        let device = Device::open(file.path()).unwrap();
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
 
         // Write test pattern to sector 10
         let test_data = vec![0xAB; 512];
@@ -239,7 +268,8 @@ mod tests {
     #[test]
     fn opening_a_missing_path_fails_and_names_the_path() {
         let missing = "/nonexistent/fat32expander/safety/net/device.img";
-        let err = Device::open(missing).expect_err("a missing path must not open");
+        let err =
+            Device::open_with_sector_size(missing, 512).expect_err("a missing path must not open");
 
         assert!(
             err.to_string().contains(missing),
@@ -254,7 +284,8 @@ mod tests {
     fn opening_a_directory_fails_and_names_the_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().display().to_string();
-        let err = Device::open(dir.path()).expect_err("a directory must not open as a device");
+        let err = Device::open_with_sector_size(dir.path(), 512)
+            .expect_err("a directory must not open as a device");
 
         assert!(
             err.to_string().contains(&path),
@@ -270,7 +301,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         std::fs::write(file.path(), vec![0u8; 4 * 512]).unwrap();
 
-        let device = Device::open(file.path()).unwrap();
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
         assert_eq!(device.total_sectors(), 4);
 
         // Sector 4 is one past the last valid sector (0..=3).
@@ -289,7 +320,7 @@ mod tests {
         std::fs::write(file.path(), vec![0u8; 4 * 512]).unwrap();
         let path = file.path().display().to_string();
 
-        let device = Device::open(file.path()).unwrap();
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
         let err = device
             .read_sector(4)
             .expect_err("reading past the end must fail");
@@ -324,7 +355,7 @@ mod tests {
         std::fs::write(file.path(), vec![0u8; 512]).unwrap();
         let path = file.path().display().to_string();
 
-        let device = Device::open(file.path()).unwrap();
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
         let err = device
             .read_bytes_at(0, 4096)
             .expect_err("reading more than the file holds must fail");
@@ -361,9 +392,10 @@ mod tests {
 
         // Read-only access must still work -- the fix must not turn a
         // permission distinction into a blanket refusal.
-        Device::open_readonly(file.path()).expect("a readable file must open read-only");
+        Device::open_readonly_with_sector_size(file.path(), 512)
+            .expect("a readable file must open read-only");
 
-        let err = Device::open(file.path())
+        let err = Device::open_with_sector_size(file.path(), 512)
             .expect_err("a write-open of a read-only file must not succeed");
         assert!(
             err.to_string().contains(&path),
@@ -380,8 +412,9 @@ mod tests {
         use std::error::Error as _;
         use std::os::unix::fs::PermissionsExt;
 
-        let missing = Device::open("/nonexistent/fat32expander/errno/device.img")
-            .expect_err("a missing path must not open");
+        let missing =
+            Device::open_with_sector_size("/nonexistent/fat32expander/errno/device.img", 512)
+                .expect_err("a missing path must not open");
         let kind = missing
             .source()
             .and_then(|s| s.downcast_ref::<std::io::Error>())
@@ -401,8 +434,8 @@ mod tests {
         std::fs::write(file.path(), vec![0u8; 1024]).unwrap();
         std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o444)).unwrap();
 
-        let denied =
-            Device::open(file.path()).expect_err("a read-only file must not open for write");
+        let denied = Device::open_with_sector_size(file.path(), 512)
+            .expect_err("a read-only file must not open for write");
         let kind = denied
             .source()
             .and_then(|s| s.downcast_ref::<std::io::Error>())
@@ -437,16 +470,17 @@ mod tests {
         let len = 1024 * 1024u64;
         std::fs::write(file.path(), vec![0u8; len as usize]).unwrap();
 
-        let mut device = Device::open(file.path()).unwrap();
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
         assert_eq!(
             device.total_sectors(),
             len / device.sector_size() as u64,
             "geometry must be self-consistent at open"
         );
 
-        // Learning the filesystem's real sector size must re-derive the count.
+        // The sector size now arrives at construction, so each size is a fresh
+        // open rather than a mutation of an existing device.
         for size in [1024u32, 2048, 4096, 512] {
-            device.set_sector_size(size);
+            let device = Device::open_with_sector_size(file.path(), size).unwrap();
             assert_eq!(device.sector_size(), size);
             assert_eq!(
                 device.total_sectors(),
@@ -466,8 +500,7 @@ mod tests {
         let len = 64 * 4096usize;
         std::fs::write(file.path(), vec![0u8; len]).unwrap();
 
-        let mut device = Device::open(file.path()).unwrap();
-        device.set_sector_size(4096);
+        let device = Device::open_with_sector_size(file.path(), 4096).unwrap();
 
         let marker = vec![0xC7u8; 4096];
         device.write_sector(3, &marker).unwrap();
@@ -498,8 +531,7 @@ mod tests {
         let len = 32 * 4096usize;
         std::fs::write(file.path(), vec![0u8; len]).unwrap();
 
-        let mut device = Device::open(file.path()).unwrap();
-        device.set_sector_size(4096);
+        let device = Device::open_with_sector_size(file.path(), 4096).unwrap();
 
         let last = device.total_sectors() - 1;
         assert_eq!(last, 31);
@@ -537,7 +569,7 @@ mod tests {
         let len = 1024 * 1024u64 + 4096;
         std::fs::write(file.path(), vec![0u8; len as usize]).unwrap();
 
-        let device = Device::open(file.path()).unwrap();
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
         let via_device = device.size_bytes().unwrap();
         let via_system = crate::system::get_block_device_size(file.path()).unwrap();
 
@@ -555,7 +587,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         std::fs::write(file.path(), vec![0u8; 1024 * 1024]).unwrap();
 
-        let device = Device::open(file.path()).unwrap();
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
 
         assert!(
             device.write_sector(0, &vec![0xAB; 511]).is_err(),

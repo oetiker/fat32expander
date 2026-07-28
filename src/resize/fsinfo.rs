@@ -4,17 +4,17 @@
 //! nothing to do with resizing one, and bundling them meant a read-only
 //! query shared a file with the code that rewrites the boot sector.
 
-use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::fat32::{
-    boot_sectors_match, read_backup_boot_sector, read_boot_sector, read_fsinfo, BootSector,
+    boot_sectors_match, open_fat32_device, read_backup_boot_sector, read_boot_sector, read_fsinfo,
+    BootSector,
 };
 
 /// Get information about a FAT32 filesystem without modifying it
 pub fn get_fs_info(device_path: impl AsRef<std::path::Path>) -> Result<FSInfoReport> {
     let device_path = device_path.as_ref();
-    let mut device = Device::open_readonly(device_path)?;
-    let boot = read_boot_sector(&mut device)?;
+    let device = open_fat32_device(device_path, false)?;
+    let boot = read_boot_sector(&device)?;
 
     let backup_sector = boot.backup_boot_sector();
     let backup_boot = read_backup_boot_sector(&device, backup_sector)?;

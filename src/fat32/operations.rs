@@ -4,6 +4,7 @@ use crate::fat32::structs::{fat_entry, BootSector, FSInfo};
 use crate::fat32::validation::{
     validate_boot_sector, validate_boot_sector_for_recovery, validate_fsinfo,
 };
+use std::path::Path;
 
 /// Maximum sector size supported by FAT32 (4096 bytes)
 const MAX_SECTOR_SIZE: usize = 4096;
@@ -11,29 +12,38 @@ const MAX_SECTOR_SIZE: usize = 4096;
 /// Valid FAT32 sector sizes
 const VALID_SECTOR_SIZES: &[u16] = &[512, 1024, 2048, 4096];
 
-/// Read and parse the boot sector from a device, bootstrapping the sector size
+/// Determine the sector size a FAT32 boot sector declares.
 ///
-/// This reads enough bytes to cover the maximum sector size (4096), then
-/// parses the boot sector to determine the actual sector size. The device's
-/// sector size is then updated for subsequent operations.
-pub fn read_boot_sector(device: &mut Device) -> Result<BootSector> {
-    // Read max sector size bytes to ensure we have the complete boot sector
-    let data = device.read_bytes_at(0, MAX_SECTOR_SIZE)?;
-
-    // Parse the boot sector (validates minimum 512 bytes)
-    let boot = BootSector::from_bytes(&data)?;
-
-    // Validate the sector size is a valid FAT32 size
+/// This is the probe [`Device::open_with`] needs: it turns leading bytes into
+/// the sector size the device must be addressed with, so the geometry is known
+/// before any sector-addressed I/O is possible ([F-R23]). It deliberately
+/// validates nothing beyond the sector-size field -- a device whose boot sector
+/// is otherwise damaged still has to be *addressable* for recovery to read it.
+pub fn bootstrap_sector_size(leading_bytes: &[u8]) -> Result<u32> {
+    let boot = BootSector::from_bytes(leading_bytes)?;
     let sector_size = boot.bytes_per_sector();
     if !VALID_SECTOR_SIZES.contains(&sector_size) {
         return Err(Error::UnsupportedSectorSize(sector_size as u32));
     }
+    Ok(sector_size as u32)
+}
 
-    // Update device to use the actual sector size
-    device.set_sector_size(sector_size as u32);
+/// Open a device for FAT32 access, with its geometry already established.
+///
+/// [F-R23]/[F-R40]: opening and learning the sector size used to be two steps,
+/// with the second performed as a side effect of a function named `read_...`.
+/// They are one step now, and this is it.
+pub fn open_fat32_device<P: AsRef<Path>>(path: P, writable: bool) -> Result<Device> {
+    Device::open_with(path, writable, bootstrap_sector_size)
+}
 
-    // Re-parse with the correct sector size (trimmed to actual size)
-    let boot = BootSector::from_bytes(&data[..sector_size as usize])?;
+/// Read and parse the boot sector from a device
+///
+/// The device already addresses sectors at the size its boot sector declares --
+/// [`open_fat32_device`] established that before the device existed. This is a
+/// pure read: it does not reconfigure the device ([F-R40]).
+pub fn read_boot_sector(device: &Device) -> Result<BootSector> {
+    let boot = read_boot_sector_unvalidated(device)?;
     validate_boot_sector(&boot)?;
     Ok(boot)
 }
@@ -42,7 +52,14 @@ pub fn read_boot_sector(device: &mut Device) -> Result<BootSector> {
 ///
 /// This is used when trying to recover from an interrupted resize operation
 /// where the boot sector signature was intentionally invalidated.
-pub fn read_boot_sector_for_recovery(device: &mut Device) -> Result<BootSector> {
+pub fn read_boot_sector_for_recovery(device: &Device) -> Result<BootSector> {
+    let boot = read_boot_sector_unvalidated(device)?;
+    validate_boot_sector_for_recovery(&boot)?;
+    Ok(boot)
+}
+
+/// The parsing both readers share, without either one's validation policy.
+fn read_boot_sector_unvalidated(device: &Device) -> Result<BootSector> {
     // Read max sector size bytes to ensure we have the complete boot sector
     let data = device.read_bytes_at(0, MAX_SECTOR_SIZE)?;
 
@@ -55,13 +72,8 @@ pub fn read_boot_sector_for_recovery(device: &mut Device) -> Result<BootSector> 
         return Err(Error::UnsupportedSectorSize(sector_size as u32));
     }
 
-    // Update device to use the actual sector size
-    device.set_sector_size(sector_size as u32);
-
     // Re-parse with the correct sector size (trimmed to actual size)
-    let boot = BootSector::from_bytes(&data[..sector_size as usize])?;
-    validate_boot_sector_for_recovery(&boot)?;
-    Ok(boot)
+    BootSector::from_bytes(&data[..sector_size as usize])
 }
 
 /// Read and parse the backup boot sector

@@ -426,12 +426,11 @@ fn mkfs_produced_filesystems_validate_across_sector_sizes() {
 #[test]
 #[ignore] // Requires mkfs.fat
 fn fat_table_reads_back_in_full_for_a_valid_image() {
-    use fat32expander::fat32::{fat_entry, read_boot_sector, read_fat_table};
-    use fat32expander::Device;
+    use fat32expander::fat32::{fat_entry, open_fat32_device, read_boot_sector, read_fat_table};
 
     let image = create_fat32_image(128);
-    let mut device = Device::open_readonly(image.path()).expect("open failed");
-    let boot = read_boot_sector(&mut device).expect("read_boot_sector failed");
+    let device = open_fat32_device(image.path(), false).expect("open failed");
+    let boot = read_boot_sector(&device).expect("read_boot_sector failed");
 
     let expected_entries = (boot.fat_size() as usize * boot.bytes_per_sector() as usize) / 4;
     let fat = read_fat_table(&device, &boot, 0).expect("read_fat_table failed");
@@ -530,8 +529,8 @@ fn invalidated_boot_sector_without_a_checkpoint_is_not_recoverable() {
 //
 // The unit tests in `device.rs` and `checkpoint.rs` pin the arithmetic. These
 // pin it against filesystems `mkfs.fat` actually produced, at a sector size
-// that is not the 512 `Device::open` hardcodes ([F-R23]) and that only the
-// boot-sector reader's side effect ([F-R40]) currently supplies.
+// that is not the 512 `Device::open` used to hardcode ([F-R23]) and that only
+// the boot-sector reader's side effect ([F-R40]) used to supply.
 
 /// [F-R23]/[F-R40]: after the boot sector has been read, the device must
 /// address sectors the way the filesystem does. The last sector -- where the
@@ -540,8 +539,7 @@ fn invalidated_boot_sector_without_a_checkpoint_is_not_recoverable() {
 #[test]
 #[ignore] // Requires mkfs.fat
 fn device_geometry_matches_a_4096_byte_sector_filesystem() {
-    use fat32expander::device::Device;
-    use fat32expander::fat32::read_boot_sector;
+    use fat32expander::fat32::{open_fat32_device, read_boot_sector};
 
     // Sized so each case clears FAT32's 65525-cluster floor and pushes the
     // sector count past 65535, or mkfs writes a FAT16-shaped boot sector.
@@ -550,8 +548,8 @@ fn device_geometry_matches_a_4096_byte_sector_filesystem() {
         let len = std::fs::metadata(image.path()).unwrap().len();
         let label = format!("size={size_mb}MB sector_size={sector_size}");
 
-        let mut device = Device::open(image.path()).expect("open failed");
-        let boot = read_boot_sector(&mut device).expect("read_boot_sector failed");
+        let device = open_fat32_device(image.path(), false).expect("open failed");
+        let boot = read_boot_sector(&device).expect("read_boot_sector failed");
 
         assert_eq!(
             boot.bytes_per_sector() as u32,
@@ -595,16 +593,15 @@ fn device_geometry_matches_a_4096_byte_sector_filesystem() {
 #[test]
 #[ignore] // Requires mkfs.fat
 fn read_boot_sector_returns_the_same_answer_on_repeated_calls() {
-    use fat32expander::device::Device;
-    use fat32expander::fat32::read_boot_sector;
+    use fat32expander::fat32::{open_fat32_device, read_boot_sector};
 
     for (size_mb, sector_size) in [(128u32, 512u32), (512, 4096)] {
         let image = create_fat32_image_with_sector_size(size_mb, sector_size, 1);
         let label = format!("size={size_mb}MB sector_size={sector_size}");
 
-        let mut device = Device::open(image.path()).expect("open failed");
-        let first = read_boot_sector(&mut device).expect("first read failed");
-        let second = read_boot_sector(&mut device).expect("second read failed");
+        let device = open_fat32_device(image.path(), false).expect("open failed");
+        let first = read_boot_sector(&device).expect("first read failed");
+        let second = read_boot_sector(&device).expect("second read failed");
 
         assert_eq!(
             first.bytes_per_sector(),

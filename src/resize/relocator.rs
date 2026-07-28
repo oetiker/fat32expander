@@ -313,7 +313,7 @@ mod tests {
         let file = NamedTempFile::new().unwrap();
         let bytes = sectors as usize * BPS as usize;
         std::fs::write(file.path(), vec![0u8; bytes]).unwrap();
-        let device = Device::open(file.path()).unwrap();
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
         (file, device)
     }
 

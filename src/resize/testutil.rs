@@ -75,7 +75,6 @@ pub(crate) fn temp_device_with_sector_size(
         vec![0u8; sectors as usize * sector_size as usize],
     )
     .unwrap();
-    let mut device = Device::open(file.path()).unwrap();
-    device.set_sector_size(sector_size);
+    let device = Device::open_with_sector_size(file.path(), sector_size).unwrap();
     (file, device)
 }
