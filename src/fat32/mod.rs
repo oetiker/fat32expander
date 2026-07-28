@@ -13,11 +13,16 @@ mod validation;
 pub use structs::{fat_entry, BootSector, ClusterId, FSInfo, SectorNum};
 
 // Re-export operations
+//
+// [F-R34] Seven entry-level and cluster-level helpers were removed from here
+// and from `operations.rs`: they were leftovers from the pre-refactor
+// cluster-renumbering design, which the current data-shift approach does not
+// need, and being `pub` in a library exempted them from the dead-code lint.
+// `count_free_clusters` was deliberately kept -- see the note on it.
 pub use operations::{
-    bootstrap_sector_size, count_free_clusters, find_free_cluster, open_fat32_device,
-    read_backup_boot_sector, read_boot_sector, read_boot_sector_for_recovery, read_cluster,
-    read_fat_entry, read_fat_table, read_fsinfo, write_backup_boot_sector, write_boot_sector,
-    write_cluster, write_fat_entries, write_fat_entry, write_fat_entry_with_size, write_fsinfo,
+    bootstrap_sector_size, count_free_clusters, open_fat32_device, read_backup_boot_sector,
+    read_boot_sector, read_boot_sector_for_recovery, read_fat_table, read_fsinfo,
+    write_backup_boot_sector, write_boot_sector, write_fsinfo,
 };
 
 // Re-export validation

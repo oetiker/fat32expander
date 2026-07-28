@@ -141,167 +141,19 @@ pub fn read_fat_table(device: &Device, boot: &BootSector, fat_number: u8) -> Res
     Ok(entries)
 }
 
-/// Write FAT entries starting at a specific index (for one FAT copy)
-pub fn write_fat_entries(
-    device: &Device,
-    boot: &BootSector,
-    fat_number: u8,
-    start_entry: u32,
-    entries: &[u32],
-) -> Result<()> {
-    let bytes_per_sector = boot.bytes_per_sector() as usize;
-    let entries_per_sector = bytes_per_sector / 4;
-
-    let fat_start = boot.first_fat_sector() + (fat_number as u64 * boot.fat_size() as u64);
-
-    // Calculate which sectors we need to write
-    let start_sector = start_entry as usize / entries_per_sector;
-    let end_entry = start_entry as usize + entries.len();
-    let end_sector = end_entry.div_ceil(entries_per_sector);
-
-    // Process sector by sector
-    for sector_idx in start_sector..end_sector {
-        let sector = fat_start + sector_idx as u64;
-
-        // Read existing sector
-        let mut sector_data = device.read_sector(sector)?;
-
-        // Calculate which entries in this sector to update
-        let sector_start_entry = sector_idx * entries_per_sector;
-        let sector_end_entry = sector_start_entry + entries_per_sector;
-
-        for entry_idx in sector_start_entry..sector_end_entry {
-            if entry_idx >= start_entry as usize && entry_idx < end_entry {
-                let entry_value = entries[entry_idx - start_entry as usize];
-                let offset = (entry_idx - sector_start_entry) * 4;
-                sector_data[offset..offset + 4].copy_from_slice(&entry_value.to_le_bytes());
-            }
-        }
-
-        // Write back
-        device.write_sector(sector, &sector_data)?;
-    }
-
-    Ok(())
-}
-
-/// Read a single FAT entry
-pub fn read_fat_entry(device: &Device, boot: &BootSector, cluster: u32) -> Result<u32> {
-    let bytes_per_sector = boot.bytes_per_sector() as usize;
-    let entries_per_sector = bytes_per_sector / 4;
-
-    let fat_start = boot.first_fat_sector();
-    let sector = fat_start + (cluster as u64 / entries_per_sector as u64);
-    let offset = (cluster as usize % entries_per_sector) * 4;
-
-    let sector_data = device.read_sector(sector)?;
-    let entry = u32::from_le_bytes([
-        sector_data[offset],
-        sector_data[offset + 1],
-        sector_data[offset + 2],
-        sector_data[offset + 3],
-    ]);
-
-    Ok(entry)
-}
-
-/// Write a single FAT entry to all FAT copies
-pub fn write_fat_entry(device: &Device, boot: &BootSector, cluster: u32, value: u32) -> Result<()> {
-    write_fat_entry_with_size(device, boot, cluster, value, boot.fat_size())
-}
-
-/// Write a single FAT entry to all FAT copies, using a specified FAT size
-///
-/// This variant is needed during resize when the boot sector still has the old
-/// FAT size, but we need to write to clusters in the expanded area.
-pub fn write_fat_entry_with_size(
-    device: &Device,
-    boot: &BootSector,
-    cluster: u32,
-    value: u32,
-    fat_size: u32,
-) -> Result<()> {
-    let bytes_per_sector = boot.bytes_per_sector() as usize;
-    let entries_per_sector = bytes_per_sector / 4;
-
-    for fat_num in 0..boot.num_fats() {
-        let fat_start = boot.first_fat_sector() + (fat_num as u64 * fat_size as u64);
-        let sector = fat_start + (cluster as u64 / entries_per_sector as u64);
-        let offset = (cluster as usize % entries_per_sector) * 4;
-
-        // Read sector (may be zeros for new sectors)
-        let mut sector_data = device.read_sector(sector)?;
-
-        // Preserve upper 4 bits of existing entry
-        let existing = u32::from_le_bytes([
-            sector_data[offset],
-            sector_data[offset + 1],
-            sector_data[offset + 2],
-            sector_data[offset + 3],
-        ]);
-        let preserved_bits = existing & 0xF0000000;
-        let new_value = (value & 0x0FFFFFFF) | preserved_bits;
-
-        // Update entry
-        sector_data[offset..offset + 4].copy_from_slice(&new_value.to_le_bytes());
-
-        // Write back
-        device.write_sector(sector, &sector_data)?;
-    }
-
-    Ok(())
-}
-
-/// Read a cluster's data
-pub fn read_cluster(device: &Device, boot: &BootSector, cluster: u32) -> Result<Vec<u8>> {
-    let first_sector = boot.cluster_to_sector(cluster);
-    let sectors_per_cluster = boot.sectors_per_cluster() as u32;
-    device.read_sectors(first_sector, sectors_per_cluster)
-}
-
-/// Write a cluster's data
-pub fn write_cluster(device: &Device, boot: &BootSector, cluster: u32, data: &[u8]) -> Result<()> {
-    let first_sector = boot.cluster_to_sector(cluster);
-    let expected_size = boot.bytes_per_cluster() as usize;
-
-    if data.len() != expected_size {
-        return Err(Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "Cluster data size {} does not match expected {}",
-                data.len(),
-                expected_size
-            ),
-        )));
-    }
-
-    device.write_sectors(first_sector, data)
-}
-
-/// Find a free cluster starting from a given hint
-pub fn find_free_cluster(
-    _device: &Device,
-    boot: &BootSector,
-    fat: &[u32],
-    start: u32,
-) -> Option<u32> {
-    // Clusters are numbered from 2. A layout that does not fit has no clusters
-    // to search, so there is no free one to return.
-    let max_cluster = boot.data_clusters()?.checked_add(2)?;
-
-    // Search from start to end
-    for cluster in start..max_cluster {
-        if cluster < fat.len() as u32 && fat_entry::is_free(fat[cluster as usize]) {
-            return Some(cluster);
-        }
-    }
-
-    // Wrap around and search from beginning
-    (2..start)
-        .find(|&cluster| cluster < fat.len() as u32 && fat_entry::is_free(fat[cluster as usize]))
-}
-
 /// Count free clusters in the FAT
+///
+/// [F-R34] Kept by explicit decision while its seven dead neighbours were
+/// deleted. It has no production caller today -- only its own unit test -- but
+/// it is the function [F-R45] names as the way to reconcile the FSInfo free
+/// count against the FAT, which is the authoritative source. Deleting it would
+/// have foreclosed that fix, and unlike the helpers removed alongside it this
+/// is a coherent operation on a FAT a library consumer can already read via
+/// [`read_fat_table`], rather than a fragment of the abandoned
+/// cluster-renumbering design.
+///
+/// Being re-exported keeps it exempt from the dead-code lint, so it will not
+/// announce itself if [F-R45] is never done.
 pub fn count_free_clusters(fat: &[u32], max_cluster: u32) -> u32 {
     let end = std::cmp::min(fat.len(), (max_cluster + 2) as usize);
     fat[2..end]
@@ -331,28 +183,9 @@ mod tests {
         assert_eq!(count_free_clusters(&fat, 5), 2); // Entries 4 and 5 are free
     }
 
-    #[test]
-    fn test_find_free_cluster() {
-        let fat = [
-            0x0FFFFFF8, // Entry 0: Media type
-            0x0FFFFFFF, // Entry 1: Reserved
-            0x00000003, // Entry 2: Used
-            0x0FFFFFFF, // Entry 3: Used
-            0x00000000, // Entry 4: Free
-            0x00000000, // Entry 5: Free
-        ];
-
-        // Create a mock boot sector (not actually used in this simplified test)
-        // In real code, we'd need a proper Device
-
-        // Test the function logic without device
-        let result = fat
-            .iter()
-            .enumerate()
-            .skip(2) // Skip entries 0 and 1
-            .find(|(_, &e)| fat_entry::is_free(e))
-            .map(|(i, _)| i as u32);
-
-        assert_eq!(result, Some(4));
-    }
+    // [F-R34] `test_find_free_cluster` was deleted with `find_free_cluster`.
+    // It never called the function: it reimplemented the search inline with
+    // iterators and asserted on that, so it would have kept passing after the
+    // deletion while covering nothing. Keeping it would have left a test whose
+    // name claims coverage the suite does not have.
 }
