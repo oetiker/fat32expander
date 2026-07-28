@@ -52,9 +52,6 @@ pub enum Error {
     #[error("Filesystem is already at maximum size for this device")]
     AlreadyMaxSize,
 
-    #[error("Cannot shrink filesystem (not supported)")]
-    ShrinkNotSupported,
-
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -105,20 +102,8 @@ pub enum Error {
     #[error("Relocation failed: {0}")]
     Relocation(String),
 
-    #[error("Verification failed: {0}")]
-    Verification(String),
-
-    #[error("Cluster {0} is in use and would be overwritten by FAT growth")]
-    ClusterInUse(u32),
-
-    #[error("Failed to find free cluster for relocation")]
-    NoFreeCluster,
-
     #[error("Device sector size {0} is not supported (expected 512 or 4096)")]
     UnsupportedSectorSize(u32),
-
-    #[error("FAT table entry is corrupted at cluster {0}")]
-    CorruptedFAT(u32),
 
     #[error("Resize checkpoint is corrupted (CRC mismatch)")]
     CheckpointCorrupted,

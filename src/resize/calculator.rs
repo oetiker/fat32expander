@@ -69,9 +69,16 @@ pub fn calculate_new_size(boot: &BootSector, device_sectors: u64) -> Result<Size
         device_sectors as u32
     };
 
-    // Check for shrink (not supported)
+    // The device is smaller than the filesystem says it is. This is not a
+    // shrink request: the only caller passes the device's actual size and the
+    // tool offers no way to ask for a smaller one, so reaching here means a
+    // truncated image, the wrong device, or a corrupt `total_sectors` field
+    // ([F-R33]).
     if new_total_sectors < old_total_sectors {
-        return Err(Error::ShrinkNotSupported);
+        return Err(Error::DeviceTooSmall {
+            current: new_total_sectors as u64,
+            minimum: old_total_sectors as u64,
+        });
     }
 
     // Check if already at max size
@@ -318,9 +325,41 @@ mod tests {
     fn test_calculate_new_size_no_shrink() {
         let boot = create_test_boot_sector(2_000_000, 2000);
 
-        // Try to shrink - should fail
+        // A device smaller than the filesystem must fail. [F-R33]: this is not
+        // a user asking to shrink -- the only caller passes the device's actual
+        // size, and there is no shrink command -- so it is reported as the
+        // device being too small, and the message names both numbers.
         let result = calculate_new_size(&boot, 1_000_000);
-        assert!(matches!(result, Err(Error::ShrinkNotSupported)));
+        assert!(
+            matches!(
+                result,
+                Err(Error::DeviceTooSmall {
+                    current: 1_000_000,
+                    minimum: 2_000_000
+                })
+            ),
+            "expected DeviceTooSmall carrying both sizes, got: {result:?}"
+        );
+    }
+
+    /// [F-R33]: the message must tell the user what is actually wrong. "Cannot
+    /// shrink filesystem (not supported)" describes an operation this tool does
+    /// not offer and the user did not request; a truncated image or the wrong
+    /// device is what really produces this.
+    #[test]
+    fn a_device_smaller_than_the_filesystem_reports_both_sizes() {
+        let boot = create_test_boot_sector(2_000_000, 2000);
+        let err = calculate_new_size(&boot, 1_000_000).expect_err("must fail");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("1000000") && msg.contains("2000000"),
+            "the message must name the device size and the size needed, got: {msg}"
+        );
+        assert!(
+            !msg.contains("shrink"),
+            "the user did not ask to shrink, got: {msg}"
+        );
     }
 
     #[test]
