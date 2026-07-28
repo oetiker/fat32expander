@@ -3,8 +3,19 @@ use thiserror::Error;
 /// All errors that can occur during FAT32 resize operations
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("Device '{0}' not found or cannot be opened")]
-    DeviceNotFound(String),
+    /// A device could not be opened. The underlying `io::Error` is kept as the
+    /// source rather than discarded: "not found", "permission denied" and
+    /// "busy" are different problems with different fixes, and a non-root user
+    /// hitting EACCES after `--force` is the common case ([F-R29]).
+    ///
+    /// The errno is deliberately not interpolated into the message -- callers
+    /// render the source chain, and interpolating would print it twice.
+    #[error("Cannot open device '{path}'")]
+    DeviceOpen {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("Device '{0}' is currently mounted at '{1}'")]
     DeviceMounted(String, String),

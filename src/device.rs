@@ -32,7 +32,10 @@ impl Device {
             .read(true)
             .write(writable)
             .open(&path_buf)
-            .map_err(|_| Error::DeviceNotFound(path_display))?;
+            .map_err(|source| Error::DeviceOpen {
+                path: path_display,
+                source,
+            })?;
 
         // Get device size
         let metadata = file.metadata()?;
@@ -284,6 +287,49 @@ mod tests {
         assert!(
             err.to_string().contains(&path),
             "the error must name the path it refers to, got: {err}"
+        );
+    }
+
+    /// [F-R29]: the errno must survive the open failure. A missing file and an
+    /// unreadable one are different problems with different fixes, and
+    /// collapsing both into "not found" sends the user looking for the wrong
+    /// one.
+    #[test]
+    fn open_failures_preserve_the_underlying_errno() {
+        use std::error::Error as _;
+        use std::os::unix::fs::PermissionsExt;
+
+        let missing = Device::open("/nonexistent/fat32expander/errno/device.img")
+            .expect_err("a missing path must not open");
+        let kind = missing
+            .source()
+            .and_then(|s| s.downcast_ref::<std::io::Error>())
+            .map(|io| io.kind());
+        assert_eq!(
+            kind,
+            Some(std::io::ErrorKind::NotFound),
+            "a missing device must carry ENOENT as its source, got {missing:?}"
+        );
+
+        if crate::system::check_root() {
+            eprintln!("skipping the permission half: running as root");
+            return;
+        }
+
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![0u8; 1024]).unwrap();
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let denied =
+            Device::open(file.path()).expect_err("a read-only file must not open for write");
+        let kind = denied
+            .source()
+            .and_then(|s| s.downcast_ref::<std::io::Error>())
+            .map(|io| io.kind());
+        assert_eq!(
+            kind,
+            Some(std::io::ErrorKind::PermissionDenied),
+            "a permission failure must carry EACCES as its source, got {denied:?}"
         );
     }
 
