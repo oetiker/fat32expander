@@ -155,8 +155,39 @@ impl Device {
         }
     }
 
+    /// Reject sector-addressed I/O that would fall outside the device.
+    ///
+    /// [F-R28]: `total_sectors` was carried around and never consulted. On an
+    /// image file -- the mode every integration and QEMU test uses -- a write
+    /// past the end silently extends the file rather than failing, so a bad
+    /// sector computation grew the image instead of being caught. This is the
+    /// check that turns that into an error.
+    ///
+    /// The addition is checked: `start_sector` is derived from on-disk values
+    /// on some paths, and a wrapping sum would compare small and pass.
+    fn check_bounds(&self, start_sector: u64, count: u64) -> Result<()> {
+        let end = start_sector
+            .checked_add(count)
+            .ok_or_else(|| self.bounds_err(start_sector, count))?;
+        if end > self.total_sectors {
+            return Err(self.bounds_err(start_sector, count));
+        }
+        Ok(())
+    }
+
+    fn bounds_err(&self, sector: u64, count: u64) -> Error {
+        Error::SectorOutOfBounds {
+            path: self.path.display().to_string(),
+            sector,
+            count,
+            total_sectors: self.total_sectors,
+        }
+    }
+
     /// Read sectors starting at the given sector number
     pub fn read_sectors(&self, start_sector: u64, count: u32) -> Result<Vec<u8>> {
+        self.check_bounds(start_sector, count as u64)?;
+
         let offset = start_sector * self.sector_size as u64;
         let size = count as usize * self.sector_size as usize;
         let mut buffer = vec![0u8; size];
@@ -174,6 +205,10 @@ impl Device {
 
     /// Write sectors starting at the given sector number
     pub fn write_sectors(&self, start_sector: u64, data: &[u8]) -> Result<()> {
+        // Round up: a trailing partial sector still occupies one.
+        let sectors = data.len().div_ceil(self.sector_size as usize) as u64;
+        self.check_bounds(start_sector, sectors)?;
+
         let offset = start_sector * self.sector_size as u64;
         self.file
             .write_all_at(data, offset)
@@ -318,11 +353,25 @@ mod tests {
     /// whole buffer") is throwing away context the type already has.
     #[test]
     fn sector_io_failures_name_the_device_and_the_sector() {
+        // The device must believe sector 4 exists, or [F-R28]'s bounds check
+        // rejects the read before any I/O is attempted and there is no
+        // io::Error to preserve. Opening at 8 sectors and then shortening the
+        // file behind the device's back leaves sector 4 in bounds but backed
+        // by nothing, which is a genuine I/O failure -- the case this test is
+        // about.
         let file = NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), vec![0u8; 4 * 512]).unwrap();
+        std::fs::write(file.path(), vec![0u8; 8 * 512]).unwrap();
         let path = file.path().display().to_string();
 
         let device = Device::open_with_sector_size(file.path(), 512).unwrap();
+        assert_eq!(device.total_sectors(), 8);
+        std::fs::File::options()
+            .write(true)
+            .open(file.path())
+            .unwrap()
+            .set_len(4 * 512)
+            .unwrap();
+
         let err = device
             .read_sector(4)
             .expect_err("reading past the end must fail");
@@ -579,6 +628,92 @@ mod tests {
         assert_eq!(
             via_system, via_device,
             "the two sizing paths must not disagree"
+        );
+    }
+
+    /// [F-R28]: a write past the end of an image file used to silently extend
+    /// it, so a bad sector computation grew the device instead of failing.
+    #[test]
+    fn writing_past_the_end_of_the_device_is_rejected_and_does_not_extend_it() {
+        let file = NamedTempFile::new().unwrap();
+        let len = 4 * 512usize;
+        std::fs::write(file.path(), vec![0u8; len]).unwrap();
+        let path = file.path().display().to_string();
+
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
+        assert_eq!(device.total_sectors(), 4);
+
+        // Sector 4 is one past the last valid sector (0..=3).
+        let err = device
+            .write_sector(4, &vec![0xAB; 512])
+            .expect_err("a write past the end must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains(&path), "the error must name the device: {msg}");
+        assert!(
+            msg.contains('4'),
+            "the error must name the offending sector: {msg}"
+        );
+
+        assert_eq!(
+            std::fs::metadata(file.path()).unwrap().len() as usize,
+            len,
+            "the rejected write must not have extended the device"
+        );
+    }
+
+    /// A multi-sector write straddling the end must be rejected whole -- a
+    /// guard that only checked the starting sector would let it through and
+    /// extend the device by the overhang.
+    #[test]
+    fn a_multi_sector_write_straddling_the_end_is_rejected() {
+        let file = NamedTempFile::new().unwrap();
+        let len = 4 * 512usize;
+        std::fs::write(file.path(), vec![0u8; len]).unwrap();
+
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
+
+        // Starts inside (sector 3) but runs two sectors past the end.
+        assert!(
+            device.write_sectors(3, &vec![0xAB; 3 * 512]).is_err(),
+            "a write straddling the end must be rejected"
+        );
+        assert_eq!(
+            std::fs::metadata(file.path()).unwrap().len() as usize,
+            len,
+            "the rejected write must not have extended the device"
+        );
+
+        // The same read must be refused rather than reported as a short read.
+        assert!(
+            device.read_sectors(3, 3).is_err(),
+            "a read straddling the end must be rejected"
+        );
+
+        // ...while a run that exactly reaches the end is still allowed.
+        device
+            .write_sectors(2, &vec![0xCD; 2 * 512])
+            .expect("a write ending exactly at the last sector must be allowed");
+        assert_eq!(device.read_sectors(2, 2).unwrap(), vec![0xCD; 2 * 512]);
+    }
+
+    /// The bounds arithmetic must not wrap: a huge starting sector plus a count
+    /// can sum to something small, which an unchecked comparison would accept.
+    #[test]
+    fn a_wrapping_sector_range_is_rejected() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![0u8; 4 * 512]).unwrap();
+
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
+
+        assert!(
+            device.read_sectors(u64::MAX, 4).is_err(),
+            "a wrapping range must be rejected, not wrapped into bounds"
+        );
+        assert!(
+            device
+                .write_sectors(u64::MAX - 1, &vec![0xAB; 4 * 512])
+                .is_err(),
+            "a wrapping range must be rejected, not wrapped into bounds"
         );
     }
 

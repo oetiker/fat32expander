@@ -101,6 +101,23 @@ pub enum Error {
         actual: usize,
     },
 
+    /// Sector-addressed I/O was asked to touch a sector the device does not
+    /// have. [F-R28]: nothing used to check this, and on an image file a write
+    /// past the end silently extends the file instead of failing -- which is
+    /// how [F-R2]'s misaddressed writes stayed invisible through every test.
+    ///
+    /// Reaching here means the caller's sector arithmetic is wrong, so it is an
+    /// internal fault rather than an I/O condition.
+    #[error(
+        "Sector {sector}+{count} is outside device '{path}', which has {total_sectors} sector(s)"
+    )]
+    SectorOutOfBounds {
+        path: String,
+        sector: u64,
+        count: u64,
+        total_sectors: u64,
+    },
+
     #[error("Calculation error: {0}")]
     Calculation(String),
 

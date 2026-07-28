@@ -275,6 +275,10 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
 
         Error::RootRequired => exit::ROOT_REQUIRED,
 
+        // An out-of-range sector means our own arithmetic was wrong, not that
+        // the device misbehaved ([F-R28]).
+        Error::SectorOutOfBounds { .. } => exit::INTERNAL,
+
         Error::Calculation(_) | Error::Relocation(_) => exit::INTERNAL,
     }
 }
