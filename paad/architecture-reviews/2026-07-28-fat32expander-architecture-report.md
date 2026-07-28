@@ -239,6 +239,10 @@ reproduced against crafted ones.
 - **Explanation:** Crash-recovery entry depends on `format!("{:?}", e)` containing a literal produced by an unrelated `format!` in the validator; rewording either string silently turns recovery off and leaves users with an unrecoverable filesystem.
 - **Evidence:** `src/main.rs:182-183`, excerpt: `let err_msg = format!("{:?}", e); if err_msg.contains("Invalid boot signature: 0x0000") {`; producing side `src/fat32/validation.rs:24-27` `Error::BootSectorValidation(format!("Invalid boot signature: {:#06X} (expected 0xAA55)", sig))`. `Error::InvalidatedFilesystem` exists (`error.rs:62-63`) but is constructed only inside the executor and never surfaced by `get_fs_info`. Root cause: `get_fs_info` calls the strict `read_boot_sector` (`executor.rs:711`) while `resize_fat32` calls `read_boot_sector_for_recovery` (`:342`), so the CLI must reverse-engineer the reason.
 - **Found by:** Structure & Boundaries, Coupling & Dependencies, Error Handling & Observability, Integration & Data (4 specialists)
+- **Note (2026-07-28, fix session):** Validated as still present and fully covered by safety-net tests (commit `5fe2168`), but **not fixed** — a design decision is outstanding. Two approaches were scoped:
+  - *Typed variant:* add `Error::BootSectorInvalidated`, returned by `validate_boot_sector_impl` when `sig == 0x0000 && !allow_invalidated`, and matched in `main.rs` instead of the substring. Small, localised, no API change. Note that reusing the existing `Error::InvalidatedFilesystem` is **wrong**: the executor constructs it at `executor.rs:314,321` to mean recovery has already *failed*, while the CLI needs "this might be recoverable, try" — one variant for both would move F-R5's conflation from strings into the type system, where it would look correct.
+  - *Recovery-aware query:* have `get_fs_info` report the invalidated state as data so the CLI never interprets a failure. This **conflicts with an existing assertion**: `invalidated_boot_sector_without_a_checkpoint_is_not_recoverable` (`tests/integration_test.rs`) asserts `get_fs_info(...).is_err()` on an invalidated boot sector, and a recovery-aware query would succeed instead. That is a behaviour change requiring an explicit decision, not a test edit.
+  - Also discovered while writing the safety net: the CLI's recovery dispatch is **narrower than this entry describes**. `read_boot_sector` checks the declared sector size before validation reaches the signature, so a badly-mangled boot sector fails with `UnsupportedSectorSize` and never reaches the recovery decision at all. Only a boot sector plausible in every respect *except* its signature gets there. A fix should not assume "invalidated" and "unreadable" are the only two cases.
 
 ### [F-R9] The crash-recovery test suite is never executed by CI
 - **Category:** 32 (missing test coverage for critical paths)
@@ -424,6 +428,7 @@ reproduced against crafted ones.
 - **Explanation:** Every error path goes through `anyhow`/`bail!`, so "already at maximum size", "device mounted", "checkpoint corrupted" and "not FAT32" are indistinguishable to a calling script.
 - **Evidence:** `src/main.rs:122` `fn main() -> Result<()>` with `anyhow::Result`; failures at `:147, :163, :174, :191, :233` all via `bail!`/`?`. No `std::process::exit` with a mapped code anywhere in the crate, despite `error.rs` defining 19 variants.
 - **Found by:** Integration & Data
+- **Note (2026-07-28, fix session):** Validated as still present; safety-net tests written and committed in `5fe2168` (distinct_failure_modes_stay_non_zero_and_distinguishable, failures_name_the_device_they_refer_to). Not fixed — deferred with the rest of the error-contract batch.
 
 ### [F-R33] Six error variants are never constructed
 - **Category:** 29 ("utility" dumping ground) / 31 (dead code)
@@ -432,6 +437,7 @@ reproduced against crafted ones.
 - **Evidence:** `src/error.rs:24-57` — verified by grep rather than by trusting a count: zero construction sites for `DeviceTooSmall` (`:27`), `Relocation` (`:42`), `Verification` (`:45`), `ClusterInUse` (`:48`), `NoFreeCluster` (`:51`), `CorruptedFAT` (`:57`). Excerpt: `#[error("Cluster {0} is in use and would be overwritten by FAT growth")] ClusterInUse(u32)`.
 - **Found by:** Error Handling & Observability, Security & Code Quality, Structure & Boundaries (3 specialists)
 - **Note (2026-07-28):** Still open, but now five variants rather than six — the [F-R1] fix constructs `Relocation` for the two cases where an interrupted data shift cannot be resumed safely. `DeviceTooSmall`, `Verification`, `ClusterInUse`, `NoFreeCluster` and `CorruptedFAT` remain unconstructed. Note that `Verification` was the variant a real `verify_relocation` would have used; [F-R20] deleted that stub rather than implementing it, so this variant is now dead by decision rather than by oversight.
+- **Note (2026-07-28, fix session):** Validated: five variants remain unconstructed (`DeviceTooSmall`, `Verification`, `ClusterInUse`, `NoFreeCluster`, `CorruptedFAT`). No flaw-specific safety net was written, deliberately — if this resolves by *deleting* them the compiler is the safety net, but if it resolves by *constructing* any of them that is new behaviour needing its own red/green tests. That construct-vs-delete choice is per variant and unmade.
 
 ### [F-R34] Seven public FAT-manipulation functions are never called
 - **Category:** 29 ("utility" dumping ground) / 31 (dead code)
@@ -546,12 +552,14 @@ reproduced against crafted ones.
 - **Impact:** Low
 - **Evidence:** `src/device.rs:31-35` (`open_impl`), excerpt: `.map_err(|_| Error::DeviceNotFound(path_display))?` — EACCES, EBUSY, EROFS and EIO all print "Device 'X' not found or cannot be opened". Exactly the path a non-root user hits after `--force` (`main.rs:146-149`).
 - **Found by:** Error Handling & Observability
+- **Note (2026-07-28, fix session):** Validated as still present; safety-net tests written and committed in `5fe2168` (opening_a_missing_path_fails_and_names_the_path, opening_a_directory_fails_and_names_the_path, failures_name_the_device_they_refer_to). Not fixed — deferred with the rest of the error-contract batch.
 
 ### [F-R30] Sector I/O errors carry neither path nor sector though `Device` holds both
 - **Category:** 20 (weak error handling strategy) / 34
 - **Impact:** Low
 - **Evidence:** `src/error.rs:35-36` `Io(#[from] std::io::Error)` propagates bare, so a short read of the backup boot sector surfaces as "IO error: failed to fill whole buffer" with no sector or device. `Device` stores `path: PathBuf` (`device.rs:10`), used only in the `Debug` impl (`:18`).
 - **Found by:** Error Handling & Observability
+- **Note (2026-07-28, fix session):** Validated as still present; safety-net tests written and committed in `5fe2168` (reading_past_the_end_of_the_device_fails, writing_a_sector_of_the_wrong_length_is_rejected). Not fixed — deferred with the rest of the error-contract batch.
 
 ### [F-R43] Surfacing one more filesystem field requires four coordinated edits
 - **Category:** 9 (shotgun surgery)
