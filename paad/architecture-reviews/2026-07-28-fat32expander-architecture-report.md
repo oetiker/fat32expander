@@ -215,6 +215,10 @@ reproduced against crafted ones.
 - **Explanation:** The guide's recovery table and "Idempotent Operations" section assert a property [F-R1] shows is false; the premise holds only while the shift distance exceeds the highest in-use cluster's offset.
 - **Evidence:** `TECHGUIDE.md:579` `| After data shift | Started | Valid (0xAA55) | Re-run data shift (idempotent) |`; `:596-600` "Source data is **copied**, not moved (original preserved)". The harness that appears to validate this — `scripts/qemu/test-crash-recovery.sh:139-140` `INITIAL_SIZE_MB=64` / `FINAL_SIZE_MB=128` with 20×2KB files plus one 50KB file — applies a ~2034-cluster shift against ~250 used clusters, so the ranges never overlap and the non-idempotency is structurally unreachable.
 - **Found by:** Integration & Data
+- **Status:** Fixed
+- **Status reason:** Both halves addressed. The unreachable test came first, in the safety-net commit (`ff2c929`'s successor `9d778ef`): the crash-recovery harness now writes ~4MB instead of ~90KB, putting the highest in-use cluster near 8100 against a 2046-sector shift, and `assert_overlapping_shift` fails the suite outright if the source and destination ranges ever stop overlapping — turning the silent precondition into a checked one. That restored geometry immediately reproduced [F-R1]. The documentation followed: TECHGUIDE's "Idempotent Operations" section is now "Resumable, Not Idempotent", stating plainly that a second pass corrupts data, showing the concrete sector-level example, and recording that the "copied, not moved" premise holds only while `k` exceeds the highest used cluster. The recovery table's "Re-run data shift (idempotent)" row now reads "Resume shift from recorded progress", matching the mechanism [F-R1] introduced.
+- **Status date:** 2026-07-28 09:55 UTC
+- **Status commit:** (recorded in the follow-up docs commit)
 
 ### [F-R7] Unchecked arithmetic on corruption-controlled values; validation's only cross-field check is computed from the wrapped result
 - **Category:** 30 (security as an afterthought)

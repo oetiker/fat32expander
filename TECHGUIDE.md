@@ -576,28 +576,59 @@ Recovery behavior depends on the checkpoint phase:
 | Crash Point | Phase | Boot Sector | Recovery Action |
 |-------------|-------|-------------|-----------------|
 | After checkpoint write | Started | Valid (0xAA55) | Re-run entire resize |
-| After data shift | Started | Valid (0xAA55) | Re-run data shift (idempotent) |
+| After data shift | Started | Valid (0xAA55) | Resume shift from recorded progress |
 | After phase 1 checkpoint | DataCopied | Valid (0xAA55) | Skip data shift, continue |
 | After boot invalidation | DataCopied | Invalid (0x0000) | Skip data shift, continue |
 | After FAT write | DataCopied | Invalid (0x0000) | Continue from FAT sync |
 | After phase 2 checkpoint | FatWritten | Invalid (0x0000) | Just restore boot sector |
 
-### Idempotent Operations
+### Resumable, Not Idempotent
 
-The data shift operation is designed to be **idempotent** - running it multiple times produces the same result:
+The data shift is **not** idempotent. Running it twice over the same device
+corrupts data, so recovery resumes it from a recorded position rather than
+replaying it.
+
+Clusters are copied highest-first, so the destination of cluster `c` is the old
+home of cluster `c + k`, where `k` is the shift distance in clusters. With
+`k = 2` and clusters 2, 3, 4 occupying sectors 100, 101, 102:
 
 ```
-Original:  [FAT][Cluster2 @ sector 100][Cluster3 @ sector 101]...
-After 1x:  [FAT][...][Cluster2 @ sector 200][Cluster3 @ sector 201]...
-After 2x:  [FAT][...][Cluster2 @ sector 200][Cluster3 @ sector 201]...  (same)
+Start:     100=c2  101=c3  102=c4
+After 1x:  100=c2  101=c3  102=c2  103=c3  104=c4   <- correct
+Restart:   moving c4 reads sector 102, which now holds c2, and writes that
+           to 104. c4 is destroyed.
 ```
 
-This works because:
-1. Source data is **copied**, not moved (original preserved)
-2. We always read from the **old** sector position
-3. We always write to the **new** sector position
+A first pass is safe because `c + k` has already been moved by the time `c` is
+written. That same overlap is what makes a restart unsafe: `old_home(c)` is
+overwritten by the move of `c - k`, which happens *later* in the descending
+pass.
 
-If a crash happens during data shift and we restart, re-running the shift just copies the same data again.
+The claim this section used to make - that source data is copied rather than
+moved, so the original is preserved - holds only while the old and new data
+ranges are disjoint, i.e. while `k` exceeds the highest used cluster. On any
+filesystem with more than `k` clusters in use it is false. The crash-recovery
+suite could not detect this because its geometry kept the ranges disjoint; see
+`assert_overlapping_shift` in `scripts/qemu/test-crash-recovery.sh`, which now
+fails the suite if that ever becomes true again.
+
+Recovery therefore records progress:
+
+1. Before each batch of at most `min(1024, k)` moves, the checkpoint records the
+   next cluster still to move.
+2. The preceding batch is synced before that record advances, so the record
+   never runs ahead of the data.
+3. A resume skips every move above the recorded cluster.
+
+Replaying up to `k` moves is harmless - `old_home(c)` survives until the pass
+descends `k` clusters below it - which is why progress need not be recorded
+after every single move.
+
+If a checkpoint carries no progress record the position is unknown, and the
+resume is **refused** rather than guessed. The same applies to a shift shorter
+than one cluster (`k == 0`), where a cluster's destination overlaps its own
+source and no move may ever be replayed; such a resize still runs, it simply
+cannot be resumed.
 
 ### Testing Crash Recovery
 
