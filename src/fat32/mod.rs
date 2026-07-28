@@ -10,7 +10,15 @@ mod structs;
 mod validation;
 
 // Re-export types from structs
-pub use structs::{fat_entry, BootSector, ClusterId, FSInfo, SectorNum};
+//
+// [F-R35] `ClusterId` and `SectorNum` were removed. They were ~117 lines of
+// type-safety machinery with zero constructors and zero consumers, and adopting
+// them would have meant rewriting them first: `SectorNum::offset` and
+// `to_byte_offset` used bare `+`/`*`, which would have put unchecked arithmetic
+// back into the paths [F-R7] and [F-R28] had just hardened, and
+// `ClusterId::index`'s `saturating_sub(2)` mapped clusters 0 and 1 silently to
+// index 0 -- hiding exactly the bug [F-R36] is about rather than catching it.
+pub use structs::{fat_entry, BootSector, FSInfo};
 
 // Re-export operations
 //
