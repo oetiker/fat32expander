@@ -827,6 +827,106 @@ mod tests {
         assert_eq!(boot.cluster_to_sector(1000), 15_658 + 998 * 8);
     }
 
+    /// [F-R36]'s safety net: every legitimate cluster must keep mapping to the
+    /// same sector once `cluster_to_sector` starts checking its arithmetic.
+    ///
+    /// The risk a checked conversion introduces is not a wrong answer but a
+    /// *refused* one -- rejecting a cluster the filesystem legitimately holds.
+    /// So the case that matters is the last valid cluster of each geometry, and
+    /// the expectations are spelled out as literals worked out by hand rather
+    /// than recomputed from `first_data_sector`, which the fix also touches.
+    #[test]
+    fn cluster_to_sector_is_exact_from_the_first_to_the_last_valid_cluster() {
+        /// One geometry and the cluster→sector answers it must produce.
+        struct ClusterCase {
+            bytes_per_sector: u16,
+            sectors_per_cluster: u8,
+            total_sectors: u32,
+            fat_size: u32,
+            /// Where the data area starts, i.e. cluster 2's first sector.
+            first_data_sector: u64,
+            /// The highest cluster this geometry can address.
+            last_cluster: u32,
+            /// That cluster's first sector.
+            last_cluster_sector: u64,
+        }
+
+        // Reserved sectors and FAT count are 32 and 2 throughout, so the data
+        // area starts at 32 + 2 * fat_size.
+        const RESERVED: u16 = 32;
+        const NUM_FATS: u8 = 2;
+
+        let cases = [
+            ClusterCase {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 8,
+                total_sectors: 2_000_000,
+                fat_size: 7813,
+                first_data_sector: 15_658,
+                last_cluster: 248_043,
+                last_cluster_sector: 1_999_986,
+            },
+            ClusterCase {
+                bytes_per_sector: 4096,
+                sectors_per_cluster: 1,
+                total_sectors: 1_000_000,
+                fat_size: 1000,
+                first_data_sector: 2_032,
+                last_cluster: 997_969,
+                last_cluster_sector: 999_999,
+            },
+            ClusterCase {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 1,
+                total_sectors: 70_000,
+                fat_size: 550,
+                first_data_sector: 1_132,
+                last_cluster: 68_869,
+                last_cluster_sector: 69_999,
+            },
+        ];
+
+        for case in cases {
+            let bps = case.bytes_per_sector;
+            let spc = case.sectors_per_cluster;
+            let boot = boot_sector_with(
+                bps,
+                spc,
+                RESERVED,
+                NUM_FATS,
+                case.total_sectors,
+                case.fat_size,
+            );
+
+            assert_eq!(
+                boot.first_data_sector(),
+                case.first_data_sector,
+                "first_data_sector for bps={bps} spc={spc}"
+            );
+            assert_eq!(
+                boot.data_clusters(),
+                Some(case.last_cluster - 1),
+                "data_clusters for bps={bps} spc={spc}"
+            );
+
+            assert_eq!(
+                boot.cluster_to_sector(2),
+                case.first_data_sector,
+                "cluster 2 must start the data area for bps={bps} spc={spc}"
+            );
+            assert_eq!(
+                boot.cluster_to_sector(case.last_cluster),
+                case.last_cluster_sector,
+                "last valid cluster {} for bps={bps} spc={spc}",
+                case.last_cluster
+            );
+            assert!(
+                case.last_cluster_sector + spc as u64 <= case.total_sectors as u64,
+                "the last cluster must fit inside the volume for bps={bps} spc={spc}"
+            );
+        }
+    }
+
     #[test]
     fn test_fat_entry_helpers() {
         assert!(fat_entry::is_free(0x00000000));

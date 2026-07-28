@@ -367,6 +367,47 @@ mod tests {
         assert_eq!(plan.new_first_data_sector, 240);
     }
 
+    /// [F-R36]'s safety net for the relocator half.
+    ///
+    /// `plan_relocation_maps_clusters_to_boot_derived_sectors` checks the plan
+    /// against `cluster_to_sector`, but [F-R36] changes both that function and
+    /// the `cluster - 2` arithmetic in `plan_relocation` -- so a fix that moved
+    /// them together in the same wrong direction would still satisfy it. These
+    /// expectations are literals derived by hand from the fixture geometry
+    /// (reserved 32 + 2 FATs, so the data area starts at 32+200=232 before and
+    /// 32+208=240 after, and each cluster is 8 sectors), and so cannot move with
+    /// the code under test.
+    #[test]
+    fn plan_relocation_maps_clusters_to_independently_computed_sectors() {
+        let fat = fat_with(&[2, 3, 5]);
+
+        let plan = aligned_plan(&fat);
+
+        // Highest cluster first, which is the order the shift must run in.
+        let expected: [(u32, u64, u64); 3] = [
+            // (cluster, source sector, target sector)
+            (5, 232 + 3 * 8, 240 + 3 * 8),
+            (3, 232 + 8, 240 + 8),
+            (2, 232, 240),
+        ];
+
+        assert_eq!(
+            plan.moves.len(),
+            expected.len(),
+            "one move per used cluster"
+        );
+
+        for (mv, (cluster, from_sector, to_sector)) in plan.moves.iter().zip(expected) {
+            assert_eq!(mv.from_cluster, cluster, "cluster order");
+            assert_eq!(mv.to_cluster, cluster, "cluster numbers must not change");
+            assert_eq!(
+                mv.from_sector, from_sector,
+                "cluster {cluster} source sector"
+            );
+            assert_eq!(mv.to_sector, to_sector, "cluster {cluster} target sector");
+        }
+    }
+
     /// Every move must address the sectors the boot sector derives for that
     /// cluster - the old boot sector for the source, the new one for the target.
     #[test]
