@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::time::{Duration, UNIX_EPOCH};
 
-use fat32expander::{check_root, get_fs_info, resize_fat32, ResizeOptions};
+use fat32expander::{check_root, get_fs_info, resize_fat32, FSInfo, FSInfoReport, ResizeOptions};
 
 const BUILD_TIMESTAMP: u64 = const_parse_u64(env!("BUILD_TIMESTAMP"));
 const GIT_HASH: &str = env!("GIT_HASH");
@@ -119,6 +119,91 @@ enum Commands {
     },
 }
 
+/// Render a filesystem report for a human reader.
+///
+/// [F-R42] moved this out of the library. `FSInfoReport` is data; section
+/// headers, indentation and "Yes"/"NO" strings are terminal presentation, and a
+/// library type carrying a `Display` impl full of them put rendering on the
+/// wrong side of the boundary. Scripts consuming the library now get the fields
+/// without having to parse prose.
+fn render_fs_info(info: &FSInfoReport) -> String {
+    let mut out = String::new();
+
+    out.push_str("FAT32 Filesystem Information\n");
+    out.push_str("============================\n");
+    out.push_str(&format!("Device: {}\n", info.device_path.display()));
+
+    out.push_str("\nGeometry:\n");
+    out.push_str(&format!("  Bytes per sector: {}\n", info.bytes_per_sector));
+    out.push_str(&format!(
+        "  Sectors per cluster: {}\n",
+        info.sectors_per_cluster
+    ));
+    out.push_str(&format!(
+        "  Bytes per cluster: {}\n",
+        info.bytes_per_sector as u32 * info.sectors_per_cluster as u32
+    ));
+
+    out.push_str("\nLayout:\n");
+    out.push_str(&format!("  Reserved sectors: {}\n", info.reserved_sectors));
+    out.push_str(&format!("  Number of FATs: {}\n", info.num_fats));
+    out.push_str(&format!(
+        "  FAT size (sectors): {}\n",
+        info.fat_size_sectors
+    ));
+    out.push_str(&format!("  Total sectors: {}\n", info.total_sectors));
+    out.push_str(&format!("  Data clusters: {}\n", info.data_clusters));
+
+    out.push_str("\nSpecial sectors:\n");
+    out.push_str(&format!(
+        "  Root directory cluster: {}\n",
+        info.root_cluster
+    ));
+    out.push_str(&format!("  FSInfo sector: {}\n", info.fsinfo_sector));
+    out.push_str(&format!(
+        "  Backup boot sector: {}\n",
+        info.backup_boot_sector
+    ));
+    out.push_str(&format!(
+        "  Backup matches primary: {}\n",
+        if info.backup_matches { "Yes" } else { "NO" }
+    ));
+
+    out.push_str("\nUsage:\n");
+    if info.free_clusters == FSInfo::UNKNOWN_FREE {
+        out.push_str("  Free clusters: Unknown\n");
+    } else {
+        let free_bytes = info.free_clusters as u64
+            * info.bytes_per_sector as u64
+            * info.sectors_per_cluster as u64;
+        out.push_str(&format!(
+            "  Free clusters: {} ({} bytes)\n",
+            info.free_clusters, free_bytes
+        ));
+    }
+
+    out.push_str("\nSize:\n");
+    out.push_str(&format!(
+        "  Current size: {} bytes ({:.2} MB)\n",
+        info.current_size_bytes,
+        info.current_size_bytes as f64 / (1024.0 * 1024.0)
+    ));
+    out.push_str(&format!("  Device sectors: {}\n", info.device_sectors));
+    out.push_str(&format!(
+        "  Can grow: {}\n",
+        if info.can_grow { "Yes" } else { "No" }
+    ));
+    if let Some(max_size) = info.max_new_size_bytes {
+        out.push_str(&format!(
+            "  Max new size: {} bytes ({:.2} MB)\n",
+            max_size,
+            max_size as f64 / (1024.0 * 1024.0)
+        ));
+    }
+
+    out
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -126,7 +211,7 @@ fn main() -> Result<()> {
         Commands::Info { device } => {
             let info = get_fs_info(&device)
                 .with_context(|| format!("Failed to read filesystem info from {}", device))?;
-            println!("{}", info);
+            println!("{}", render_fs_info(&info));
         }
 
         Commands::Version => {
@@ -154,7 +239,7 @@ fn main() -> Result<()> {
                 Ok(info) => {
                     if verbose {
                         println!("Current filesystem state:");
-                        println!("{}", info);
+                        println!("{}", render_fs_info(&info));
                         println!();
                     }
 

@@ -21,6 +21,26 @@
 use fat32expander::get_fs_info;
 use tempfile::NamedTempFile;
 
+/// Render a filesystem report the way a user sees it.
+///
+/// [F-R42] moved rendering off `FSInfoReport` and onto the CLI, so these
+/// assertions now run against the binary's actual output instead of a library
+/// `Display` impl. The facts asserted are unchanged -- only where the string
+/// comes from moved, and it moved closer to what a user actually reads.
+fn rendered_report(path: &std::path::Path) -> String {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fat32expander"))
+        .arg("info")
+        .arg(path)
+        .output()
+        .expect("failed to run fat32expander");
+    assert!(
+        output.status.success(),
+        "info command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 // Geometry of the fixture. Chosen so the volume is unambiguously FAT32
 // (data clusters well above the 65525 floor) while staying small enough for a
 // temp file, and so that every field has a distinct value -- a report that
@@ -38,7 +58,8 @@ const FREE_CLUSTERS: u32 = 12_345;
 
 /// Data clusters, derived here rather than read back from the code under test.
 const EXPECTED_DATA_CLUSTERS: u32 =
-    (TOTAL_SECTORS - RESERVED_SECTORS as u32 - (NUM_FATS as u32 * FAT_SIZE)) / SECTORS_PER_CLUSTER as u32;
+    (TOTAL_SECTORS - RESERVED_SECTORS as u32 - (NUM_FATS as u32 * FAT_SIZE))
+        / SECTORS_PER_CLUSTER as u32;
 
 fn boot_sector_bytes() -> [u8; 512] {
     let mut data = [0u8; 512];
@@ -157,15 +178,13 @@ fn report_fields_match_a_known_geometry() {
 /// The rendered report must carry the facts a user reads it for.
 ///
 /// Asserted as *content*, not layout, so cosmetic formatting changes are free.
-/// Note for the fix loop: [F-R42] observes that this rendering arguably belongs
-/// on the CLI side of the boundary. Moving it off `FSInfoReport` would break
-/// this test's `to_string()` call -- that is a public API change, not a
-/// mechanical one, and needs an explicit decision rather than a test edit.
+/// [F-R42] moved this rendering onto the CLI, so the string now comes from the
+/// binary rather than from a library `Display` impl. The facts asserted below
+/// are unchanged from when they were written against `FSInfoReport::to_string`.
 #[test]
 fn display_output_reports_every_key_fact() {
     let image = growable_image();
-    let info = get_fs_info(image.path()).expect("fixture must be valid");
-    let rendered = info.to_string();
+    let rendered = rendered_report(image.path());
 
     for (label, needle) in [
         ("device path", image.path().display().to_string()),
@@ -205,7 +224,10 @@ fn a_filesystem_filling_its_device_reports_no_headroom() {
     let image = fixture_image(TOTAL_SECTORS as u64, FREE_CLUSTERS, true);
     let info = get_fs_info(image.path()).expect("fixture must be valid");
 
-    assert!(!info.can_grow, "a filesystem filling its device cannot grow");
+    assert!(
+        !info.can_grow,
+        "a filesystem filling its device cannot grow"
+    );
     assert_eq!(
         info.max_new_size_bytes, None,
         "there is no larger size to offer"
@@ -214,7 +236,7 @@ fn a_filesystem_filling_its_device_reports_no_headroom() {
         info.current_size_bytes,
         TOTAL_SECTORS as u64 * BYTES_PER_SECTOR as u64
     );
-    assert!(info.to_string().contains("Can grow: No"));
+    assert!(rendered_report(image.path()).contains("Can grow: No"));
 }
 
 /// A mismatched backup boot sector is reported as a fact, not raised as an
@@ -227,7 +249,7 @@ fn a_mismatched_backup_boot_sector_is_reported_not_raised() {
 
     assert!(!info.backup_matches, "the mismatch must be reported");
     assert!(
-        info.to_string().contains("Backup matches primary: NO"),
+        rendered_report(image.path()).contains("Backup matches primary: NO"),
         "the rendered report must surface the mismatch"
     );
 }
@@ -240,7 +262,7 @@ fn an_unknown_free_count_is_reported_as_unknown() {
     let info = get_fs_info(image.path()).expect("fixture must be valid");
 
     assert_eq!(info.free_clusters, 0xFFFF_FFFF);
-    let rendered = info.to_string();
+    let rendered = rendered_report(image.path());
     assert!(
         rendered.contains("Free clusters: Unknown"),
         "an unknown free count must render as Unknown.\nrendered:\n{rendered}"
