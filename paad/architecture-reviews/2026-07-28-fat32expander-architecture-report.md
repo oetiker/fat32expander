@@ -642,7 +642,7 @@ reproduced against crafted ones.
 - **Status reason:** `system::block_device_size_of(&File)` now performs the `BLKGETSIZE64` ioctl on an already-open descriptor, and `Device::size_of` calls it for every non-regular file, so the canonical block-device sizing path is what the tool actually runs. Taking an open `File` rather than a path keeps the single `open()` that [F-R23] established -- re-opening by path here would have added a TOCTOU window next to [F-R27]. `get_block_device_size(path)` remains as a thin wrapper over it, so its existing test is unchanged. The `unsafe` block also gained a SAFETY argument, which closes half of [F-R47]; the `geteuid` block still lacks one, so [F-R47] stands.
 - **Caveat on coverage:** the ioctl's *success* path is still untested -- nothing in the suite operates on a real block device (the QEMU harness runs the tool against a regular file and uses loop devices only to mount and verify). What is covered is the fallback: `device_open_and_get_block_device_size_agree_on_the_same_path` drives a regular file through `block_device_size_of`, where the ioctl returns -1 and `seek_size` answers, and asserts the result matches `Device`'s own sizing.
 - **Status date:** 2026-07-28 00:00 UTC
-- **Status commit:** PLACEHOLDER
+- **Status commit:** 7799c9b
 
 ### [F-R49] Filesystem-type-string validation is an empty `if` body
 - **Category:** 20 (weak error handling strategy)
