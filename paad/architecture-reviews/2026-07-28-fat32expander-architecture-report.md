@@ -218,7 +218,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** Both halves addressed. The unreachable test came first, in the safety-net commit (`ff2c929`'s successor `9d778ef`): the crash-recovery harness now writes ~4MB instead of ~90KB, putting the highest in-use cluster near 8100 against a 2046-sector shift, and `assert_overlapping_shift` fails the suite outright if the source and destination ranges ever stop overlapping — turning the silent precondition into a checked one. That restored geometry immediately reproduced [F-R1]. The documentation followed: TECHGUIDE's "Idempotent Operations" section is now "Resumable, Not Idempotent", stating plainly that a second pass corrupts data, showing the concrete sector-level example, and recording that the "copied, not moved" premise holds only while `k` exceeds the highest used cluster. The recovery table's "Re-run data shift (idempotent)" row now reads "Resume shift from recorded progress", matching the mechanism [F-R1] introduced.
 - **Status date:** 2026-07-28 09:55 UTC
-- **Status commit:** (recorded in the follow-up docs commit)
+- **Status commit:** a816370
 
 ### [F-R7] Unchecked arithmetic on corruption-controlled values; validation's only cross-field check is computed from the wrapped result
 - **Category:** 30 (security as an afterthought)
@@ -245,7 +245,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** `.github/workflows/tests.yml` gained a "Run crash recovery tests" step that invokes `./scripts/qemu/test-crash-recovery.sh` after the QEMU step, with pass/fail reported into the job summary. No `fault-injection` build step was needed in the workflow — the script already builds its own binary with that feature (`:57-58`), and the Alpine setup and musl target CI needs are steps that already existed. The script was deliberately *not* moved into `scripts/qemu/tests/`: it drives its VM differently from the nine discovered suites, and restructuring a working crash-safety harness carried more risk than the duplication saves. Instead the glob at `test-qemu.sh:404` now carries a comment stating that discovery covers `tests/` only, that this suite is invoked separately by CI, and that adding a suite outside `tests/` without a matching workflow step means it never runs anywhere — which is precisely how this flaw arose. Verified by running the new step's exact command and summary parsing locally (exit 0, 6 crash points parsed) and confirming `test-qemu.sh` still discovers its 9 tests.
 - **Status date:** 2026-07-28 09:55 UTC
-- **Status commit:** (recorded in the follow-up docs commit)
+- **Status commit:** b0f04c7
 
 ### [F-R10] Relocation sector math is untested; the unit tests only assert on hand-built structs
 - **Category:** 32 (missing test coverage for critical paths)
@@ -362,7 +362,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** `verify_relocation` is deleted, along with its call site, its `resize/mod.rs` re-export and the `"Verified data shift"` audit entry it justified. The audit trail no longer claims a check that never ran. Implementing a real verification was considered and rejected: a read-back comparison would double read I/O on the slowest phase and could not catch a misdirected write — it would re-read from the same wrong place and pass — while the structural invariants worth asserting are already guaranteed by `plan_relocation` deriving its geometry from the boot sector that will be committed ([F-R2]'s fix). What the stub pretended to check is now genuinely covered: relocation correctness by the unit tests in `relocator.rs`, and end-to-end integrity by the crash-recovery suite that [F-R9] wired into CI. Its own test, `test_verify_relocation_always_succeeds`, is deleted with it — it asserted the do-nothing behaviour, so it pinned the flaw rather than guarding against it.
 - **Status date:** 2026-07-28 09:55 UTC
-- **Status commit:** (recorded in the follow-up docs commit)
+- **Status commit:** 614ba58
 
 ### [F-R21] No logging facade and no durable log; raw `eprintln!` inside library business logic
 - **Category:** 21 (no observability plan)
@@ -461,7 +461,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** Resolved for two of the three entry points as a side effect of the [F-R2] fix: `plan_relocation` no longer takes `_device` or `_new_data_clusters`, and `execute_relocation` no longer takes `_fat`, `_new_fat_size` or `_new_data_clusters` and returns `()` instead of an always-empty `Vec`. The remaining entry point, `verify_relocation(_fat, _first_affected, _last_affected)`, was deleted outright with [F-R20] — it was a do-nothing stub, so the three ignored parameters went with it. No relocator entry point now declares a dependency it does not use.
 - **Status date:** 2026-07-28 09:55 UTC (completed; partial fix 2026-07-28 00:00 UTC)
-- **Status commit:** 960a851, completed in the [F-R20] fix commit
+- **Status commit:** 960a851, completed in 614ba58
 
 ### [F-R39] `read_boot_sector` and `read_boot_sector_for_recovery` are ~20-line near-verbatim copies
 - **Category:** 9 (shotgun surgery)
