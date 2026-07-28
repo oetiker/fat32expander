@@ -525,3 +525,164 @@ fn invalidated_boot_sector_without_a_checkpoint_is_not_recoverable() {
         "resize must refuse an invalidated filesystem with no checkpoint"
     );
 }
+
+// ===== Group A safety net: device geometry on real filesystems =====
+//
+// The unit tests in `device.rs` and `checkpoint.rs` pin the arithmetic. These
+// pin it against filesystems `mkfs.fat` actually produced, at a sector size
+// that is not the 512 `Device::open` hardcodes ([F-R23]) and that only the
+// boot-sector reader's side effect ([F-R40]) currently supplies.
+
+/// [F-R23]/[F-R40]: after the boot sector has been read, the device must
+/// address sectors the way the filesystem does. The last sector -- where the
+/// checkpoint goes -- must be readable at that geometry, and the sector count
+/// must match the file's real size.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn device_geometry_matches_a_4096_byte_sector_filesystem() {
+    use fat32expander::device::Device;
+    use fat32expander::fat32::read_boot_sector;
+
+    // Sized so each case clears FAT32's 65525-cluster floor and pushes the
+    // sector count past 65535, or mkfs writes a FAT16-shaped boot sector.
+    for (size_mb, sector_size) in [(128u32, 512u32), (512, 1024), (512, 2048), (512, 4096)] {
+        let image = create_fat32_image_with_sector_size(size_mb, sector_size, 1);
+        let len = std::fs::metadata(image.path()).unwrap().len();
+        let label = format!("size={size_mb}MB sector_size={sector_size}");
+
+        let mut device = Device::open(image.path()).expect("open failed");
+        let boot = read_boot_sector(&mut device).expect("read_boot_sector failed");
+
+        assert_eq!(
+            boot.bytes_per_sector() as u32,
+            sector_size,
+            "mkfs geometry {label}"
+        );
+        assert_eq!(
+            device.sector_size(),
+            sector_size,
+            "device must address sectors as the filesystem does, {label}"
+        );
+        assert_eq!(
+            device.total_sectors(),
+            len / sector_size as u64,
+            "total_sectors must match the real device size, {label}"
+        );
+
+        // The checkpoint sector must be reachable at this geometry.
+        let last = device.total_sectors() - 1;
+        let data = device
+            .read_sector(last)
+            .unwrap_or_else(|e| panic!("last sector must be readable, {label}: {e}"));
+        assert_eq!(
+            data.len(),
+            sector_size as usize,
+            "short sector read {label}"
+        );
+
+        // And reading one past it must not silently succeed.
+        assert!(
+            device.read_sector(last + 1).is_err(),
+            "reading past the last sector must fail, {label}"
+        );
+    }
+}
+
+/// [F-R40]: `read_boot_sector` is named as a reader but reconfigures the
+/// device. Whether or not it keeps doing so, calling it twice must yield the
+/// same boot sector -- a reader whose answer depends on how often it has been
+/// called is not one.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn read_boot_sector_returns_the_same_answer_on_repeated_calls() {
+    use fat32expander::device::Device;
+    use fat32expander::fat32::read_boot_sector;
+
+    for (size_mb, sector_size) in [(128u32, 512u32), (512, 4096)] {
+        let image = create_fat32_image_with_sector_size(size_mb, sector_size, 1);
+        let label = format!("size={size_mb}MB sector_size={sector_size}");
+
+        let mut device = Device::open(image.path()).expect("open failed");
+        let first = read_boot_sector(&mut device).expect("first read failed");
+        let second = read_boot_sector(&mut device).expect("second read failed");
+
+        assert_eq!(
+            first.bytes_per_sector(),
+            second.bytes_per_sector(),
+            "bytes_per_sector drifted between calls, {label}"
+        );
+        assert_eq!(
+            first.total_sectors(),
+            second.total_sectors(),
+            "total_sectors drifted between calls, {label}"
+        );
+        assert_eq!(
+            first.fat_size(),
+            second.fat_size(),
+            "fat_size drifted between calls, {label}"
+        );
+        assert_eq!(
+            first.reserved_sectors(),
+            second.reserved_sectors(),
+            "reserved_sectors drifted between calls, {label}"
+        );
+        assert_eq!(
+            first.root_cluster(),
+            second.root_cluster(),
+            "root_cluster drifted between calls, {label}"
+        );
+        assert_eq!(
+            device.sector_size(),
+            sector_size,
+            "the device must still address sectors correctly, {label}"
+        );
+    }
+}
+
+/// The end-to-end net for the whole group: a real resize, with FAT growth and
+/// a file to preserve, on a filesystem whose sector size is not 512. Every
+/// Group A fix changes how the device establishes or bounds its geometry, and
+/// this is the case where a mistake in any of them shows up as corruption
+/// rather than as a failing assertion.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn resize_preserves_files_on_a_4096_byte_sector_filesystem() {
+    let image = create_fat32_image_with_sector_size(512, 4096, 1);
+
+    let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let source = NamedTempFile::new().unwrap();
+    std::fs::write(source.path(), &payload).unwrap();
+    mcopy_into(image.path(), source.path(), "PAYLOAD.BIN");
+
+    // 512 MB -> 1024 MB doubles the cluster count, forcing the FAT to grow
+    // (128 -> 256 sectors at this geometry) and so a data shift.
+    extend_image(image.path(), 1024);
+
+    let info_before = get_fs_info(image.path()).expect("info before failed");
+    assert_eq!(info_before.boot().bytes_per_sector(), 4096);
+    assert!(info_before.can_grow());
+
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
+    let result = resize_fat32(options).expect("resize failed");
+    assert!(result.new_size_bytes > result.old_size_bytes);
+
+    assert!(
+        check_filesystem(image.path()),
+        "dosfsck failed after resizing a 4096-byte-sector filesystem"
+    );
+
+    let info_after = get_fs_info(image.path()).expect("info after failed");
+    assert_eq!(
+        info_after.boot().bytes_per_sector(),
+        4096,
+        "the sector size must not have been rewritten"
+    );
+
+    assert_eq!(
+        mcopy_out(image.path(), "PAYLOAD.BIN"),
+        payload,
+        "the file must survive the resize byte for byte"
+    );
+}

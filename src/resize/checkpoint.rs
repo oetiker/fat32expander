@@ -298,7 +298,10 @@ pub(crate) fn check_for_incomplete_resize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resize::testutil::{temp_device, test_boot_sector};
+    use crate::resize::testutil::{
+        temp_device, temp_device_with_sector_size, test_boot_sector,
+        test_boot_sector_with_sector_size,
+    };
 
     // ===== Checkpoint safety net =====
     //
@@ -586,6 +589,69 @@ mod tests {
 
         clear_checkpoint(&device).unwrap();
         assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+    }
+
+    /// [F-R23]'s cited consequence: `write_checkpoint`, `read_checkpoint` and
+    /// `clear_checkpoint` all address `device.total_sectors() - 1`, so the
+    /// checkpoint's location depends on the device's sector size being right.
+    /// On a 4096-byte-sector filesystem opened with the hardcoded 512 default,
+    /// that sector index is eight times too large.
+    ///
+    /// Whatever establishes the geometry, the checkpoint must land in the last
+    /// sector of the device *as the filesystem measures sectors*, and must
+    /// round-trip from there. [F-R28]'s bounds check must not reject it.
+    #[test]
+    fn checkpoint_round_trips_at_a_non_default_sector_size() {
+        let (file, device) = temp_device_with_sector_size(4000, 4096);
+        let boot = test_boot_sector_with_sector_size(2000, 100, 4096);
+        let checkpoint = test_checkpoint(ResizePhase::FatWritten);
+
+        assert_eq!(device.sector_size(), 4096);
+        assert_eq!(device.total_sectors(), 4000);
+
+        assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+
+        write_checkpoint(&device, &checkpoint).unwrap();
+
+        // The record must be at byte 3999 * 4096, not 3999 * 512.
+        let expected_offset = 3999u64 * 4096;
+        assert_eq!(
+            &device.read_bytes_at(expected_offset, 8).unwrap()[..],
+            CHECKPOINT_MAGIC,
+            "checkpoint must land in the last 4096-byte sector"
+        );
+
+        assert_checkpoint_eq(
+            &read_checkpoint(&device, &boot).unwrap().unwrap(),
+            &checkpoint,
+        );
+
+        // Writing it must not have grown the device.
+        assert_eq!(
+            std::fs::metadata(file.path()).unwrap().len(),
+            4000 * 4096,
+            "the checkpoint write must stay inside the device"
+        );
+
+        clear_checkpoint(&device).unwrap();
+        assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+    }
+
+    /// Crash detection reads the same last sector. It must find a checkpoint
+    /// written at a non-default sector size, or an interrupted resize of a
+    /// 4096-byte-sector filesystem is unrecoverable.
+    #[test]
+    fn crash_detection_finds_a_checkpoint_at_a_non_default_sector_size() {
+        let (_file, device) = temp_device_with_sector_size(4000, 4096);
+        let boot = test_boot_sector_with_sector_size(2000, 100, 4096);
+        let checkpoint = test_checkpoint(ResizePhase::DataCopied);
+
+        write_checkpoint(&device, &checkpoint).unwrap();
+
+        let found = check_for_incomplete_resize(&device, &boot)
+            .unwrap()
+            .expect("an interrupted resize must be detected");
+        assert_checkpoint_eq(&found, &checkpoint);
     }
 
     /// Once the filesystem covers the whole device there is no room for a

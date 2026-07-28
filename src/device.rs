@@ -414,6 +414,140 @@ mod tests {
         );
     }
 
+    // ===== Group A safety net: device geometry =====
+    //
+    // [F-R23] opens every `Device` with a hardcoded 512-byte sector size and
+    // derives `total_sectors` from it; the real size arrives later, as a side
+    // effect of reading the boot sector ([F-R40]). The fixes move that
+    // determination to construction. What must survive, however the geometry
+    // gets established, is the relationship between the three numbers: sector
+    // size, total sectors, and the byte offset a sector index addresses.
+    //
+    // These tests assert that relationship, not the API that establishes it.
+    // If `set_sector_size` disappears, they follow it to whatever replaces it;
+    // the expected values do not move.
+
+    /// The size in bytes of a device is fixed by the file behind it. Whatever
+    /// sector size a `Device` ends up believing in, `total_sectors` must be
+    /// that byte count divided by it -- otherwise the last sector, where the
+    /// checkpoint lives, is not where anyone thinks it is.
+    #[test]
+    fn total_sectors_always_matches_the_device_size_divided_by_the_sector_size() {
+        let file = NamedTempFile::new().unwrap();
+        let len = 1024 * 1024u64;
+        std::fs::write(file.path(), vec![0u8; len as usize]).unwrap();
+
+        let mut device = Device::open(file.path()).unwrap();
+        assert_eq!(
+            device.total_sectors(),
+            len / device.sector_size() as u64,
+            "geometry must be self-consistent at open"
+        );
+
+        // Learning the filesystem's real sector size must re-derive the count.
+        for size in [1024u32, 2048, 4096, 512] {
+            device.set_sector_size(size);
+            assert_eq!(device.sector_size(), size);
+            assert_eq!(
+                device.total_sectors(),
+                len / size as u64,
+                "total_sectors must be re-derived for a {size}-byte sector"
+            );
+        }
+    }
+
+    /// [F-R23]'s concrete consequence: a sector index means a byte offset, and
+    /// the multiplier is the sector size. If a `Device` addresses sectors with
+    /// one sector size while the filesystem was written with another, every
+    /// read and write silently lands in the wrong place.
+    #[test]
+    fn a_sector_index_addresses_sector_size_times_index_bytes() {
+        let file = NamedTempFile::new().unwrap();
+        let len = 64 * 4096usize;
+        std::fs::write(file.path(), vec![0u8; len]).unwrap();
+
+        let mut device = Device::open(file.path()).unwrap();
+        device.set_sector_size(4096);
+
+        let marker = vec![0xC7u8; 4096];
+        device.write_sector(3, &marker).unwrap();
+
+        // Read the same bytes back byte-addressed: sector 3 of a 4096-byte
+        // sector device is bytes 12288..16384, not 1536..2048.
+        assert_eq!(
+            device.read_bytes_at(3 * 4096, 4096).unwrap(),
+            marker,
+            "sector 3 must live at byte 12288 on a 4096-byte-sector device"
+        );
+        assert_eq!(
+            device.read_bytes_at(2 * 4096, 4096).unwrap(),
+            vec![0u8; 4096],
+            "the preceding sector must be untouched"
+        );
+        assert_eq!(device.read_sector(3).unwrap(), marker);
+    }
+
+    /// The checkpoint is written to `total_sectors() - 1`. That write is
+    /// legitimate and must stay legitimate: [F-R28] adds a bounds check to
+    /// `read_sectors`/`write_sectors`, and an off-by-one there would break
+    /// crash recovery on every resize. The last sector must remain both
+    /// writable and readable, and writing it must not extend the device.
+    #[test]
+    fn the_last_sector_is_readable_writable_and_does_not_grow_the_device() {
+        let file = NamedTempFile::new().unwrap();
+        let len = 32 * 4096usize;
+        std::fs::write(file.path(), vec![0u8; len]).unwrap();
+
+        let mut device = Device::open(file.path()).unwrap();
+        device.set_sector_size(4096);
+
+        let last = device.total_sectors() - 1;
+        assert_eq!(last, 31);
+
+        let marker = vec![0x5Au8; 4096];
+        device
+            .write_sector(last, &marker)
+            .expect("the last sector must be writable");
+        assert_eq!(
+            device.read_sector(last).unwrap(),
+            marker,
+            "the last sector must read back what was written"
+        );
+
+        assert_eq!(
+            std::fs::metadata(file.path()).unwrap().len() as usize,
+            len,
+            "writing within the device must not extend it"
+        );
+        assert_eq!(
+            device.total_sectors(),
+            32,
+            "the geometry must not have moved"
+        );
+    }
+
+    /// [F-R48]: `get_block_device_size` is the only correct way to size a block
+    /// device, and it is dead -- `open_impl` uses `seek(End)` instead. Wiring
+    /// the ioctl in must not change the answer for the case both paths already
+    /// handle. A regular file is the only device type this suite can create, so
+    /// it is where the two must be pinned to agree.
+    #[test]
+    fn device_open_and_get_block_device_size_agree_on_the_same_path() {
+        let file = NamedTempFile::new().unwrap();
+        let len = 1024 * 1024u64 + 4096;
+        std::fs::write(file.path(), vec![0u8; len as usize]).unwrap();
+
+        let device = Device::open(file.path()).unwrap();
+        let via_device = device.size_bytes().unwrap();
+        let via_system = crate::system::get_block_device_size(file.path()).unwrap();
+
+        assert_eq!(via_device, len, "Device must report the true byte size");
+        assert_eq!(
+            via_system, via_device,
+            "the two sizing paths must not disagree"
+        );
+    }
+
     /// The sector-length guard is the only bounds check the device layer has
     /// today. [F-R30] rewraps this error; it must keep rejecting the write.
     #[test]
