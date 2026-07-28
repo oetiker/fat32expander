@@ -477,7 +477,7 @@ reproduced against crafted ones.
 - **Test deleted with the code:** `test_find_free_cluster` went with `find_free_cluster`, and it is worth recording *why* it was safe to delete: it never called the function. It reimplemented the search inline with iterators and asserted on that, so it would have kept passing after the deletion while covering nothing — a test whose name claimed coverage the suite did not have. A note in its place records this. The suite therefore goes 129 → 128 by exactly this one test, with no other case lost.
 - **Interaction with [F-R30]:** deleting `write_cluster` removes one of the two synthetic `io::Error` construction sites that [F-R30]'s residual note flagged (`operations.rs`, alongside `system.rs:13`) — the conflation of an argument error with an I/O error. One site remains.
 - **Status date:** 2026-07-28 21:20 UTC
-- **Status commit:** (recorded in the following commit)
+- **Status commit:** 9194c71
 
 ### [F-R35] `ClusterId`/`SectorNum` newtypes are entirely unused
 - **Category:** 13 (inconsistent boundaries) / 29
