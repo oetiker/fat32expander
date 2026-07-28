@@ -506,6 +506,10 @@ reproduced against crafted ones.
 - **Explanation:** Any change to the sector-size bootstrap must be made twice or the recovery path diverges from the normal path.
 - **Evidence:** `src/fat32/operations.rs:21-36` and `:47-62` are byte-identical modulo comments, diverging only at `:37` `validate_boot_sector(&boot)?;` vs `:63` `validate_boot_sector_for_recovery(&boot)?;`. `validation.rs:5-17` already solves this exact split correctly via one parameterized `validate_boot_sector_impl(boot, allow_invalidated)` — the right pattern exists in the codebase.
 - **Found by:** Structure & Boundaries
+- **Status:** Fixed
+- **Status reason:** Resolved as a side effect of the [F-R23]/[F-R40] fix, which had to touch both readers anyway. The shared bootstrap now lives once in `read_boot_sector_unvalidated`; `read_boot_sector` and `read_boot_sector_for_recovery` are four lines each and differ only in which validator they call -- the same parameterized-shared-impl shape this finding's evidence pointed at in `validate_boot_sector_impl`. The sector-size bootstrap itself moved further out still, into `bootstrap_sector_size`, so it now exists in exactly one place for both readers and the device opener. Not separately tested: the existing readers' tests plus `read_boot_sector_returns_the_same_answer_on_repeated_calls` cover both paths through the shared helper.
+- **Status date:** 2026-07-28 00:00 UTC
+- **Status commit:** 7d278d9
 
 ### [F-R40] `read_boot_sector*` mutates device geometry as a side effect
 - **Category:** 12 (hidden side effects)
