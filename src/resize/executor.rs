@@ -810,6 +810,7 @@ impl std::fmt::Display for FSInfoReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::NamedTempFile;
 
     /// Build a FAT32 boot sector with a standard geometry.
     fn test_boot_sector(total_sectors: u32, fat_size: u32) -> BootSector {
@@ -876,6 +877,276 @@ mod tests {
         expected[32..36].copy_from_slice(&4_000_000u32.to_le_bytes());
         expected[36..40].copy_from_slice(&3903u32.to_le_bytes());
         assert_eq!(projected.as_bytes(), expected.as_slice());
+    }
+
+    // ===== Checkpoint safety net =====
+    //
+    // The checkpoint is the only durable record of an interrupted resize, and
+    // its layout is spelled out as bare byte offsets in `to_bytes` and again in
+    // `from_bytes`. Nothing exercised either side before these tests, so a
+    // mismatch between the two would have corrupted crash recovery silently.
+    // Any change to the record - a new field, a version bump - has to keep
+    // these passing.
+
+    /// A checkpoint carrying values that are distinct from one another, so a
+    /// field written to or read from the wrong offset cannot go unnoticed.
+    fn test_checkpoint(phase: ResizePhase) -> ResizeCheckpoint {
+        ResizeCheckpoint::new(phase, 0x1111_2222, 0x3333_4444, 0x5555_6666, 0x7777_8888)
+    }
+
+    fn assert_checkpoint_eq(actual: &ResizeCheckpoint, expected: &ResizeCheckpoint) {
+        assert_eq!(actual.phase, expected.phase);
+        assert_eq!(actual.old_total_sectors, expected.old_total_sectors);
+        assert_eq!(actual.new_total_sectors, expected.new_total_sectors);
+        assert_eq!(actual.old_fat_size, expected.old_fat_size);
+        assert_eq!(actual.new_fat_size, expected.new_fat_size);
+    }
+
+    /// Every phase and every field must survive a serialize/parse round trip.
+    #[test]
+    fn checkpoint_round_trips_every_phase_and_field() {
+        for phase in [
+            ResizePhase::Started,
+            ResizePhase::DataCopied,
+            ResizePhase::FatWritten,
+        ] {
+            let checkpoint = test_checkpoint(phase);
+            let bytes = checkpoint.to_bytes(512);
+
+            let parsed = ResizeCheckpoint::from_bytes(&bytes)
+                .unwrap_or_else(|e| panic!("phase {:?} failed to parse: {:?}", phase, e))
+                .unwrap_or_else(|| panic!("phase {:?} parsed as absent", phase));
+
+            assert_checkpoint_eq(&parsed, &checkpoint);
+        }
+    }
+
+    /// Field values must land at the offsets the parser reads them from. This
+    /// asserts the on-disk layout directly rather than comparing the two
+    /// implementations against each other, so a matching pair of wrong offsets
+    /// is still caught.
+    #[test]
+    fn checkpoint_writes_the_documented_byte_layout() {
+        let bytes = test_checkpoint(ResizePhase::DataCopied).to_bytes(512);
+
+        assert_eq!(&bytes[0..8], CHECKPOINT_MAGIC);
+        assert_eq!(bytes[8], CHECKPOINT_VERSION);
+        assert_eq!(bytes[9], ResizePhase::DataCopied as u8);
+        assert_eq!(&bytes[10..12], &[0, 0], "padding must stay zeroed");
+        assert_eq!(&bytes[12..16], &0x1111_2222u32.to_le_bytes());
+        assert_eq!(&bytes[16..20], &0x3333_4444u32.to_le_bytes());
+        assert_eq!(&bytes[20..24], &0x5555_6666u32.to_le_bytes());
+        assert_eq!(&bytes[24..28], &0x7777_8888u32.to_le_bytes());
+        assert_eq!(
+            &bytes[28..32],
+            &crc32fast::hash(&bytes[0..28]).to_le_bytes()
+        );
+    }
+
+    /// A corrupted record must be reported, never parsed into a plausible
+    /// resume plan. Each data byte is covered, so a field left outside the CRC
+    /// range would be caught.
+    #[test]
+    fn checkpoint_rejects_corruption_in_any_covered_byte() {
+        let good = test_checkpoint(ResizePhase::FatWritten).to_bytes(512);
+
+        for offset in 0..ResizeCheckpoint::DATA_SIZE {
+            let mut corrupt = good.clone();
+            corrupt[offset] ^= 0x01;
+
+            match ResizeCheckpoint::from_bytes(&corrupt) {
+                // Magic and version are checked before the CRC; a sector that
+                // fails those is foreign data, not a damaged checkpoint.
+                Ok(None) if offset < 9 => {}
+                Err(Error::CheckpointCorrupted) => {}
+                other => panic!(
+                    "flipping byte {} should have been rejected, got {:?}",
+                    offset, other
+                ),
+            }
+        }
+    }
+
+    /// A phase byte outside the known range is corruption, not a newer format:
+    /// resuming would compare it with `<=` against the real phases and skip
+    /// work that never ran.
+    #[test]
+    fn checkpoint_rejects_an_unknown_phase_byte() {
+        let mut bytes = test_checkpoint(ResizePhase::Started).to_bytes(512);
+        bytes[9] = 3;
+        // Re-stamp the CRC so the phase check is what rejects it, not the CRC.
+        let crc = crc32fast::hash(&bytes[0..ResizeCheckpoint::DATA_SIZE]);
+        bytes[28..32].copy_from_slice(&crc.to_le_bytes());
+
+        assert!(matches!(
+            ResizeCheckpoint::from_bytes(&bytes),
+            Err(Error::CheckpointCorrupted)
+        ));
+    }
+
+    /// A sector that is not one of our checkpoints means "no resize in
+    /// progress" - it must not raise an error, or an ordinary resize over
+    /// arbitrary trailing data would refuse to run.
+    #[test]
+    fn checkpoint_reads_foreign_sectors_as_absent() {
+        let mut wrong_magic = test_checkpoint(ResizePhase::Started).to_bytes(512);
+        wrong_magic[0] = b'X';
+
+        let mut wrong_version = test_checkpoint(ResizePhase::Started).to_bytes(512);
+        wrong_version[8] = CHECKPOINT_VERSION.wrapping_add(1);
+
+        for (label, data) in [
+            ("all zeroes", vec![0u8; 512]),
+            ("arbitrary data", vec![0xA5u8; 512]),
+            ("truncated", vec![0u8; 31]),
+            ("wrong magic", wrong_magic),
+            ("wrong version", wrong_version),
+        ] {
+            let parsed = ResizeCheckpoint::from_bytes(&data)
+                .unwrap_or_else(|e| panic!("{} returned an error: {:?}", label, e));
+            assert!(parsed.is_none(), "{} parsed as a checkpoint", label);
+        }
+    }
+
+    /// The record occupies a whole sector but its content is sector-size
+    /// independent, so a checkpoint written on one geometry stays readable if
+    /// the sector size is re-derived differently on the recovery run.
+    #[test]
+    fn checkpoint_content_is_independent_of_sector_size() {
+        let checkpoint = test_checkpoint(ResizePhase::DataCopied);
+
+        let small = checkpoint.to_bytes(512);
+        let large = checkpoint.to_bytes(4096);
+
+        assert_eq!(small.len(), 512);
+        assert_eq!(large.len(), 4096);
+        assert_eq!(small[0..32], large[0..32]);
+        assert!(
+            large[32..].iter().all(|&b| b == 0),
+            "trailing sector space must stay zeroed"
+        );
+
+        assert_checkpoint_eq(
+            &ResizeCheckpoint::from_bytes(&large).unwrap().unwrap(),
+            &checkpoint,
+        );
+    }
+
+    /// `Started <= DataCopied <= FatWritten` is what the resume branches in
+    /// `resize_fat32` compare against to decide which work to skip. Reordering
+    /// the variants would silently re-run or skip a phase.
+    #[test]
+    fn resize_phases_order_from_earliest_to_latest() {
+        assert!(ResizePhase::Started < ResizePhase::DataCopied);
+        assert!(ResizePhase::DataCopied < ResizePhase::FatWritten);
+
+        assert_eq!(ResizePhase::from_u8(0), Some(ResizePhase::Started));
+        assert_eq!(ResizePhase::from_u8(1), Some(ResizePhase::DataCopied));
+        assert_eq!(ResizePhase::from_u8(2), Some(ResizePhase::FatWritten));
+        assert_eq!(ResizePhase::from_u8(3), None);
+        assert_eq!(ResizePhase::from_u8(255), None);
+    }
+
+    /// A temp-file-backed device of `sectors` zeroed 512-byte sectors.
+    fn temp_device(sectors: u64) -> (NamedTempFile, Device) {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![0u8; sectors as usize * 512]).unwrap();
+        let device = Device::open(file.path()).unwrap();
+        (file, device)
+    }
+
+    /// The checkpoint lives in the device's last sector - deliberately, so
+    /// forward-shifted cluster data starting at `old_total_sectors` cannot
+    /// overwrite it. Writing it anywhere else would put it in the path of the
+    /// data shift.
+    #[test]
+    fn checkpoint_round_trips_through_the_devices_last_sector() {
+        let (_file, device) = temp_device(4000);
+        // Filesystem still describes the pre-grow size, so the checkpoint
+        // sector sits in the newly added space.
+        let boot = test_boot_sector(2000, 100);
+        let checkpoint = test_checkpoint(ResizePhase::DataCopied);
+
+        assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+
+        write_checkpoint(&device, &checkpoint).unwrap();
+
+        let last = device.total_sectors() - 1;
+        assert_eq!(
+            &device.read_sector(last).unwrap()[0..8],
+            CHECKPOINT_MAGIC,
+            "checkpoint must be written to the last sector"
+        );
+
+        assert_checkpoint_eq(
+            &read_checkpoint(&device, &boot).unwrap().unwrap(),
+            &checkpoint,
+        );
+
+        clear_checkpoint(&device).unwrap();
+        assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+    }
+
+    /// Once the filesystem covers the whole device there is no room for a
+    /// checkpoint, so recovery must report none rather than reading whatever
+    /// user data occupies the last sector.
+    #[test]
+    fn checkpoint_is_not_read_once_the_filesystem_fills_the_device() {
+        let (_file, device) = temp_device(2000);
+
+        // Plant a valid checkpoint in the last sector.
+        write_checkpoint(&device, &test_checkpoint(ResizePhase::Started)).unwrap();
+
+        let boot = test_boot_sector(2000, 100);
+        assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+    }
+
+    /// An invalidated boot sector means the resize was interrupted inside the
+    /// danger zone. Recovery is only possible with a checkpoint, so its absence
+    /// must surface as `InvalidatedFilesystem` rather than as "nothing to do".
+    #[test]
+    fn incomplete_resize_needs_a_checkpoint_when_the_signature_is_invalid() {
+        let (_file, device) = temp_device(4000);
+        let mut boot = test_boot_sector(2000, 100);
+        boot.invalidate_signature();
+
+        assert!(matches!(
+            check_for_incomplete_resize(&device, &boot),
+            Err(Error::InvalidatedFilesystem)
+        ));
+
+        let checkpoint = test_checkpoint(ResizePhase::DataCopied);
+        write_checkpoint(&device, &checkpoint).unwrap();
+
+        assert_checkpoint_eq(
+            &check_for_incomplete_resize(&device, &boot)
+                .unwrap()
+                .unwrap(),
+            &checkpoint,
+        );
+    }
+
+    /// A valid signature with a checkpoint present is the phase-0 crash case:
+    /// the data shift may have been interrupted before anything was
+    /// invalidated, and recovery must still find the record.
+    #[test]
+    fn incomplete_resize_finds_a_checkpoint_behind_a_valid_signature() {
+        let (_file, device) = temp_device(4000);
+        let boot = test_boot_sector(2000, 100);
+
+        assert!(check_for_incomplete_resize(&device, &boot)
+            .unwrap()
+            .is_none());
+
+        let checkpoint = test_checkpoint(ResizePhase::Started);
+        write_checkpoint(&device, &checkpoint).unwrap();
+
+        assert_checkpoint_eq(
+            &check_for_incomplete_resize(&device, &boot)
+                .unwrap()
+                .unwrap(),
+            &checkpoint,
+        );
     }
 
     #[test]
