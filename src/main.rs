@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::time::{Duration, UNIX_EPOCH};
 
-use fat32expander::{check_root, get_fs_info, resize_fat32, FSInfo, FSInfoReport, ResizeOptions};
+use fat32expander::{
+    check_root, get_fs_info, resize_fat32, Error, FSInfo, FSInfoReport, ResizeOptions,
+};
 
 const BUILD_TIMESTAMP: u64 = const_parse_u64(env!("BUILD_TIMESTAMP"));
 const GIT_HASH: &str = env!("GIT_HASH");
@@ -278,9 +280,18 @@ fn main() -> Result<()> {
                     (true, info.current_size_bytes(), new_size)
                 }
                 Err(e) => {
-                    // Check if this might be an invalidated boot sector from a crash
-                    let err_msg = format!("{:?}", e);
-                    if err_msg.contains("Invalid boot signature: 0x0000") {
+                    // A zeroed boot signature is the marker this tool writes
+                    // across the unsafe window, so it means "our own resize was
+                    // interrupted" -- not "this filesystem is damaged".
+                    //
+                    // The gate is deliberately this narrow. A boot sector
+                    // damaged beyond its signature fails earlier (on its
+                    // declared sector size) and never arrives here, which is
+                    // correct: this tool guards against its own process dying,
+                    // not against arbitrary corruption, and driving the resize
+                    // machinery over a filesystem it never touched would be
+                    // worse than refusing.
+                    if matches!(e, Error::BootSectorInvalidated) {
                         eprintln!("Warning: Boot sector appears to be invalidated.");
                         eprintln!("         This may indicate an interrupted resize operation.");
                         eprintln!("         Attempting recovery...");

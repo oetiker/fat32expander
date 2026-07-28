@@ -15,10 +15,18 @@ pub fn validate_boot_sector_for_recovery(boot: &BootSector) -> Result<()> {
 }
 
 fn validate_boot_sector_impl(boot: &BootSector, allow_invalidated: bool) -> Result<()> {
-    // Check boot signature (must be 0xAA55, or 0x0000 if recovery mode)
+    // Check boot signature (must be 0xAA55, or 0x0000 if recovery mode).
+    //
+    // A zeroed signature is this tool's own in-progress marker, so it gets its
+    // own error variant rather than a formatted message: the CLI's decision to
+    // attempt crash recovery keys on it, and keying on message text made
+    // rewording either side silently disable recovery ([F-R5]).
     let sig = boot.boot_signature();
     if sig != 0xAA55 {
-        if allow_invalidated && sig == 0x0000 {
+        if sig == 0x0000 {
+            if !allow_invalidated {
+                return Err(Error::BootSectorInvalidated);
+            }
             // Invalidated boot sector - allowed in recovery mode
         } else {
             return Err(Error::BootSectorValidation(format!(
@@ -337,6 +345,43 @@ mod tests {
         assert!(
             validate_boot_sector_for_recovery(&invalidated).is_ok(),
             "recovery validation must accept a zeroed signature"
+        );
+    }
+
+    /// [F-R5]: an interrupted resize and a corrupt boot sector must be
+    /// distinguishable by *type*, not by the text of a formatted message. The
+    /// CLI's recovery decision keys on this variant; if strict validation ever
+    /// folds the zeroed signature back into `BootSectorValidation`, recovery
+    /// silently stops being offered.
+    #[test]
+    fn an_invalidated_signature_is_a_distinct_error_variant() {
+        let boot = valid_boot_sector_with(512, 8, 32, 2, 2_000_000, 7813);
+
+        let mut data = boot.as_bytes().to_vec();
+        data[510] = 0x00;
+        data[511] = 0x00;
+        let invalidated = BootSector::from_bytes(&data).unwrap();
+
+        assert!(
+            matches!(
+                validate_boot_sector(&invalidated),
+                Err(Error::BootSectorInvalidated)
+            ),
+            "a zeroed signature must be its own variant, not a formatted string"
+        );
+
+        // A merely-wrong signature must NOT get the recovery-bearing variant.
+        let mut data = boot.as_bytes().to_vec();
+        data[510] = 0x34;
+        data[511] = 0x12;
+        let corrupt = BootSector::from_bytes(&data).unwrap();
+
+        assert!(
+            matches!(
+                validate_boot_sector(&corrupt),
+                Err(Error::BootSectorValidation(_))
+            ),
+            "a corrupt signature must stay a plain validation failure"
         );
     }
 

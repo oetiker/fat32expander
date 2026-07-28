@@ -15,6 +15,18 @@ pub enum Error {
     #[error("Boot sector validation failed: {0}")]
     BootSectorValidation(String),
 
+    /// The boot signature is zeroed -- this tool's own marker for "a resize is
+    /// in progress", written across the unsafe window and cleared on commit.
+    ///
+    /// This means *recovery may be possible, try it*, and is what the CLI keys
+    /// its recovery decision on. It is deliberately **not**
+    /// [`Error::InvalidatedFilesystem`], which the executor constructs to mean
+    /// the opposite -- recovery was attempted and could not proceed. Merging
+    /// the two would restate [F-R5]'s conflation in the type system, where it
+    /// would look correct.
+    #[error("Boot sector is invalidated (signature 0x0000), indicating an interrupted resize")]
+    BootSectorInvalidated,
+
     #[error("FSInfo sector validation failed: {0}")]
     FSInfoValidation(String),
 
