@@ -439,7 +439,7 @@ reproduced against crafted ones.
 - **Behaviour change (developer-approved):** "already at maximum size" now exits **0**, not non-zero, making `resize` idempotent and safe to call unconditionally from a provisioning script that does not track whether it has already run. Covered by its own red/green tests (`a_filesystem_already_at_maximum_size_exits_zero`, `resizing_an_already_maximal_filesystem_twice_succeeds_twice`), which also assert the image is byte-identical afterwards and that the reason is still printed. Code 6 remains allocated but unreachable, so the mapping stays complete if that decision is ever revisited.
 - **Note for [F-R41]:** the no-op case is currently detected twice — once by the CLI's `can_grow()` pre-check in `run()`, once by `AlreadyMaxSize` surfacing from the library — and both must return 0 for the behaviour to be consistent. That duplication *is* [F-R41]; when the CLI stops recomputing the library's decision, the `run()` branch should collapse into the mapping.
 - **Status date:** 2026-07-28 19:45 UTC
-- **Status commit:** _(recorded in the following commit)_
+- **Status commit:** 32c0894
 
 ### [F-R33] Six error variants are never constructed
 - **Category:** 29 ("utility" dumping ground) / 31 (dead code)
