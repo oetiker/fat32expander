@@ -251,6 +251,42 @@ mod tests {
         );
     }
 
+    /// The motivating case in [F-R29]: a file readable but not writable is the
+    /// EACCES path a non-root user hits after `--force`, and today it collapses
+    /// into the same "not found" message as a missing device. The two existing
+    /// open tests cover ENOENT and EISDIR only, so without this the errno the
+    /// fix preserves has no witness on the one path the report actually cites.
+    ///
+    /// Whatever variant the fix introduces, a write-open of an unwritable file
+    /// must fail and must name the path.
+    #[test]
+    fn opening_a_write_protected_file_for_writing_fails_and_names_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // root ignores the permission bits entirely, so under root this asserts
+        // nothing. Skip loudly rather than pass hollowly.
+        if crate::system::check_root() {
+            eprintln!("skipping: running as root, permission bits do not apply");
+            return;
+        }
+
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![0u8; 1024 * 1024]).unwrap();
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o444)).unwrap();
+        let path = file.path().display().to_string();
+
+        // Read-only access must still work -- the fix must not turn a
+        // permission distinction into a blanket refusal.
+        Device::open_readonly(file.path()).expect("a readable file must open read-only");
+
+        let err = Device::open(file.path())
+            .expect_err("a write-open of a read-only file must not succeed");
+        assert!(
+            err.to_string().contains(&path),
+            "the error must name the path it refers to, got: {err}"
+        );
+    }
+
     /// The sector-length guard is the only bounds check the device layer has
     /// today. [F-R30] rewraps this error; it must keep rejecting the write.
     #[test]

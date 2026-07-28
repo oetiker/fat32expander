@@ -48,6 +48,59 @@ fn image_with_signature(size_mb: u64, signature: u16) -> NamedTempFile {
     file
 }
 
+/// A healthy FAT32 image: `fs_mb` megabytes of filesystem inside a `file_mb`
+/// megabyte file, so `file_mb > fs_mb` yields a filesystem the tool can grow.
+///
+/// Built by hand for the same reason as `image_with_signature` -- no `mkfs.fat`
+/// dependency, so these run on every `cargo test` rather than only under
+/// `--ignored`. The geometry is chosen to clear the FAT32 minimum of 65525
+/// clusters; below that the tool correctly rejects the image as FAT12/16.
+fn valid_image(file_mb: u64, fs_mb: u64) -> NamedTempFile {
+    let file = NamedTempFile::new().expect("temp file");
+    let mut data = vec![0u8; (file_mb * 1024 * 1024) as usize];
+
+    let total_sectors: u32 = (fs_mb * 1024 * 1024 / 512) as u32;
+    data[0] = 0xEB;
+    data[1] = 0x58;
+    data[2] = 0x90;
+    data[3..11].copy_from_slice(b"MSDOS5.0");
+    data[11..13].copy_from_slice(&512u16.to_le_bytes());
+    data[13] = 1; // sectors per cluster
+    data[14..16].copy_from_slice(&32u16.to_le_bytes()); // reserved sectors
+    data[16] = 2; // number of FATs
+    data[21] = 0xF8; // media descriptor
+    data[32..36].copy_from_slice(&total_sectors.to_le_bytes());
+    data[36..40].copy_from_slice(&1024u32.to_le_bytes()); // FAT size in sectors
+    data[44..48].copy_from_slice(&2u32.to_le_bytes()); // root cluster
+    data[48] = 0x01; // FSInfo sector
+    data[50] = 0x06; // backup boot sector
+    data[82..90].copy_from_slice(b"FAT32   ");
+    data[510] = 0x55;
+    data[511] = 0xAA;
+
+    // FSInfo at sector 1, with both counts set to the "unknown" sentinel.
+    let o = 512;
+    data[o..o + 4].copy_from_slice(b"RRaA");
+    data[o + 484..o + 488].copy_from_slice(b"rrAa");
+    data[o + 488..o + 492].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    data[o + 492..o + 496].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    data[o + 508..o + 512].copy_from_slice(&0xAA55_0000u32.to_le_bytes());
+
+    // Backup boot sector at sector 6 must match the primary.
+    let primary = data[0..512].to_vec();
+    data[6 * 512..7 * 512].copy_from_slice(&primary);
+
+    std::fs::write(file.path(), &data).expect("write image");
+    file
+}
+
+fn run(args: &[&std::ffi::OsStr]) -> Output {
+    Command::new(BIN)
+        .args(args)
+        .output()
+        .expect("failed to run fat32expander")
+}
+
 /// Run `resize` against `path`. `--force` is required because the test suite
 /// does not run as root; it only bypasses the privilege warning.
 fn run_resize(path: &std::path::Path) -> Output {
@@ -187,5 +240,70 @@ fn failures_name_the_device_they_refer_to() {
         combined.contains(&path),
         "the failing device path {path} must appear in the output.\n\
          output was:\n{combined}"
+    );
+}
+
+/// The other half of [F-R31], and the half nothing else covers: giving failures
+/// distinct non-zero exit codes means rewriting how `main` returns, and the way
+/// that goes wrong is the *success* path picking up a non-zero code.
+///
+/// Every test that runs the binary today asserts a failure, and
+/// `integration_test.rs` calls the library directly and never observes an exit
+/// code at all -- so a `resize` that reported failure on a completed resize
+/// would pass the entire suite. These three pin the successful commands at 0.
+#[test]
+fn version_exits_zero() {
+    let output = run(&[std::ffi::OsStr::new("version")]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "`version` must exit 0.\nstderr was:\n{}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
+fn info_on_a_healthy_filesystem_exits_zero() {
+    let image = valid_image(64, 64);
+    let output = run(&[std::ffi::OsStr::new("info"), image.path().as_os_str()]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "`info` on a healthy filesystem must exit 0.\nstderr was:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("FAT32 Filesystem Information"),
+        "`info` must actually report, not exit 0 having done nothing"
+    );
+}
+
+/// A dry run is the success path that also touches the resize machinery, so it
+/// exercises far more of `main` than `info` does -- and it must still exit 0.
+/// It must also leave the image byte-identical, which is what makes a 0 here
+/// mean "previewed successfully" rather than "wrote something and survived".
+#[test]
+fn a_dry_run_on_a_growable_filesystem_exits_zero_and_changes_nothing() {
+    let image = valid_image(96, 64);
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run(&[
+        std::ffi::OsStr::new("resize"),
+        std::ffi::OsStr::new("--dry-run"),
+        image.path().as_os_str(),
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a dry-run resize of a growable filesystem must exit 0.\nstderr was:\n{}",
+        stderr_of(&output)
+    );
+
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a dry run must not modify the image by a single byte"
     );
 }
