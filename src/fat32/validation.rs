@@ -182,6 +182,94 @@ pub fn boot_sectors_match(primary: &BootSector, backup: &BootSector) -> bool {
 mod tests {
     use super::*;
 
+    /// Build a boot sector that is a legitimate FAT32 volume under the given
+    /// geometry, satisfying every check `validate_boot_sector_impl` makes.
+    fn valid_boot_sector_with(
+        bytes_per_sector: u16,
+        sectors_per_cluster: u8,
+        reserved_sectors: u16,
+        num_fats: u8,
+        total_sectors: u32,
+        fat_size: u32,
+    ) -> BootSector {
+        let mut data = [0u8; 512];
+        data[0] = 0xEB;
+        data[1] = 0x58;
+        data[2] = 0x90;
+        data[3..11].copy_from_slice(b"MSDOS5.0");
+        data[11..13].copy_from_slice(&bytes_per_sector.to_le_bytes());
+        data[13] = sectors_per_cluster;
+        data[14..16].copy_from_slice(&reserved_sectors.to_le_bytes());
+        data[16] = num_fats;
+        data[21] = 0xF8;
+        data[32..36].copy_from_slice(&total_sectors.to_le_bytes());
+        data[36..40].copy_from_slice(&fat_size.to_le_bytes());
+        data[44..48].copy_from_slice(&2u32.to_le_bytes());
+        data[48] = 0x01;
+        data[50] = 0x06;
+        data[82..90].copy_from_slice(b"FAT32   ");
+        data[510] = 0x55;
+        data[511] = 0xAA;
+        BootSector::from_bytes(&data).unwrap()
+    }
+
+    /// Validation must keep accepting legitimate filesystems across all four
+    /// supported sector sizes and a range of cluster sizes. This is the guard
+    /// against a tightened validator starting to reject real volumes: the
+    /// pre-existing `test_valid_boot_sector` covers one geometry only
+    /// (512-byte sectors, 8 sectors per cluster).
+    #[test]
+    fn validation_accepts_legitimate_geometries() {
+        let cases: [(u16, u8, u16, u8, u32, u32); 7] = [
+            (512, 1, 32, 2, 1_000_000, 7813),
+            (512, 8, 32, 2, 2_000_000, 7813),
+            (512, 128, 32, 2, 60_000_000, 3700),
+            (1024, 4, 32, 2, 1_200_000, 1200),
+            (2048, 2, 32, 1, 800_000, 900),
+            (4096, 1, 32, 2, 500_000, 500),
+            // Single-FAT volume with a large reserved area.
+            (512, 4, 4096, 1, 3_000_000, 6000),
+        ];
+
+        for (bps, spc, reserved, num_fats, total, fat_size) in cases {
+            let boot = valid_boot_sector_with(bps, spc, reserved, num_fats, total, fat_size);
+            let label =
+                format!("bps={bps} spc={spc} reserved={reserved} nfats={num_fats} total={total}");
+            assert!(
+                boot.data_clusters() >= 65525,
+                "case is not FAT32, fix the fixture: {label}"
+            );
+            assert!(
+                validate_boot_sector(&boot).is_ok(),
+                "validation rejected a legitimate filesystem: {label} -> {:?}",
+                validate_boot_sector(&boot)
+            );
+        }
+    }
+
+    /// The recovery variant must accept exactly what the strict variant accepts,
+    /// plus a zeroed signature. Both halves matter: [F-R5] hinges on the two
+    /// readers disagreeing only about the signature.
+    #[test]
+    fn recovery_validation_differs_from_strict_only_on_the_signature() {
+        let boot = valid_boot_sector_with(512, 8, 32, 2, 2_000_000, 7813);
+        assert!(validate_boot_sector(&boot).is_ok());
+        assert!(validate_boot_sector_for_recovery(&boot).is_ok());
+
+        let mut data = boot.as_bytes().to_vec();
+        data[510] = 0x00;
+        data[511] = 0x00;
+        let invalidated = BootSector::from_bytes(&data).unwrap();
+        assert!(
+            validate_boot_sector(&invalidated).is_err(),
+            "strict validation must reject a zeroed signature"
+        );
+        assert!(
+            validate_boot_sector_for_recovery(&invalidated).is_ok(),
+            "recovery validation must accept a zeroed signature"
+        );
+    }
+
     fn create_valid_fat32_boot_sector() -> [u8; 512] {
         let mut data = [0u8; 512];
 

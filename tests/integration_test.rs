@@ -336,3 +336,185 @@ fn test_resize_with_data() {
     // Verify filesystem integrity
     assert!(check_filesystem(image.path()), "Filesystem check failed");
 }
+
+// ---------------------------------------------------------------------------
+// Safety-net tests written before the [F-R5]/[F-R6]/[F-R7]/[F-R8] fixes.
+//
+// These pin behaviour that must survive tightened validation and the removal of
+// the CLI's substring-matched recovery entry. They assert what the tool does
+// today on legitimate and on plainly-broken input; they are not tests of the
+// fixes themselves.
+// ---------------------------------------------------------------------------
+
+/// Create a FAT32 image with explicit mkfs geometry.
+fn create_fat32_image_with_sector_size(size_mb: u32, sector_size: u32, spc: u32) -> NamedTempFile {
+    let file = NamedTempFile::new().expect("Failed to create temp file");
+    let path = file.path();
+
+    Command::new("truncate")
+        .arg("-s")
+        .arg(format!("{}M", size_mb))
+        .arg(path)
+        .status()
+        .expect("Failed to truncate file");
+
+    let status = Command::new("mkfs.fat")
+        .arg("-F")
+        .arg("32")
+        .arg("-S")
+        .arg(sector_size.to_string())
+        .arg("-s")
+        .arg(spc.to_string())
+        .arg(path)
+        .status()
+        .expect("Failed to run mkfs.fat");
+
+    assert!(
+        status.success(),
+        "mkfs.fat failed for sector_size={sector_size} spc={spc}"
+    );
+
+    file
+}
+
+/// Real filesystems produced by `mkfs.fat` must keep validating and reporting
+/// sane geometry across sector sizes. Guards the [F-R7]/[F-R8] fixes against
+/// rejecting or mis-measuring legitimate volumes — the unit-level equivalent
+/// uses synthetic boot sectors, this one uses what mkfs actually writes.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn mkfs_produced_filesystems_validate_across_sector_sizes() {
+    // (size_mb, sector_size, sectors_per_cluster)
+    //
+    // Each case must clear FAT32's 65525-cluster floor. `mkfs.fat -F 32` will
+    // happily format below it (128MB at spc=8 gives 32700 clusters), producing
+    // a volume that is FAT16 by the spec's own definition and that this tool
+    // rightly refuses — so the image has to be sized against the cluster size.
+    let cases = [(128u32, 512u32, 1u32), (512, 512, 8), (512, 4096, 1)];
+
+    for (size_mb, sector_size, spc) in cases {
+        let image = create_fat32_image_with_sector_size(size_mb, sector_size, spc);
+        let label = format!("size={size_mb}MB sector_size={sector_size} spc={spc}");
+
+        let info = get_fs_info(image.path())
+            .unwrap_or_else(|e| panic!("get_fs_info rejected a real filesystem ({label}): {e:?}"));
+
+        assert_eq!(info.bytes_per_sector as u32, sector_size, "bps {label}");
+        assert_eq!(info.sectors_per_cluster as u32, spc, "spc {label}");
+        assert!(
+            info.data_clusters >= 65525,
+            "mkfs volume reported as non-FAT32 ({label}): {} clusters",
+            info.data_clusters
+        );
+        assert!(
+            check_filesystem(image.path()),
+            "dosfsck rejected a freshly made image ({label})"
+        );
+    }
+}
+
+/// The FAT of a valid image must read back in full: one entry per 4 bytes of
+/// FAT, with cluster 2 (the root directory) allocated. Guards [F-R6]'s
+/// allocation bound against being set tight enough to truncate a real FAT.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn fat_table_reads_back_in_full_for_a_valid_image() {
+    use fat32expander::fat32::{fat_entry, read_boot_sector, read_fat_table};
+    use fat32expander::Device;
+
+    let image = create_fat32_image(128);
+    let mut device = Device::open_readonly(image.path()).expect("open failed");
+    let boot = read_boot_sector(&mut device).expect("read_boot_sector failed");
+
+    let expected_entries = (boot.fat_size() as usize * boot.bytes_per_sector() as usize) / 4;
+    let fat = read_fat_table(&device, &boot, 0).expect("read_fat_table failed");
+
+    assert_eq!(
+        fat.len(),
+        expected_entries,
+        "FAT entry count must cover the whole declared FAT"
+    );
+    assert!(
+        !fat_entry::is_free(fat[boot.root_cluster() as usize]),
+        "root cluster must be marked in use"
+    );
+
+    // The two FAT copies must agree on a freshly made filesystem.
+    let fat2 = read_fat_table(&device, &boot, 1).expect("read_fat_table(1) failed");
+    assert_eq!(fat, fat2, "FAT1 and FAT2 must match on a fresh image");
+}
+
+/// A device that is not FAT32 at all must be reported as an error. After
+/// [F-R5] replaces the CLI's substring match with a typed error, this is what
+/// stops an unrelated failure from being routed into crash recovery.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn non_fat32_device_is_rejected() {
+    let file = NamedTempFile::new().expect("Failed to create temp file");
+    Command::new("truncate")
+        .arg("-s")
+        .arg("64M")
+        .arg(file.path())
+        .status()
+        .expect("truncate failed");
+
+    // Zeroed image: no boot signature, no FAT32 anything.
+    let result = get_fs_info(file.path());
+    assert!(
+        result.is_err(),
+        "get_fs_info must reject a device that is not FAT32"
+    );
+
+    let options = ResizeOptions::new(file.path())
+        .dry_run(false)
+        .verbose(false);
+    assert!(
+        resize_fat32(options).is_err(),
+        "resize_fat32 must reject a device that is not FAT32"
+    );
+}
+
+/// An invalidated boot signature with no checkpoint on the device is not
+/// recoverable, and must fail rather than be treated as a resumable resize.
+/// [F-R5]'s fix changes how this reaches the CLI; the outcome must not change.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn invalidated_boot_sector_without_a_checkpoint_is_not_recoverable() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 256);
+
+    // Zero the boot signature, exactly as the executor's danger zone does.
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(image.path())
+            .expect("open for invalidation failed");
+        f.seek(SeekFrom::Start(510)).expect("seek failed");
+        f.write_all(&[0x00, 0x00]).expect("write failed");
+        f.sync_all().expect("sync failed");
+
+        let mut sig = [0u8; 2];
+        f.seek(SeekFrom::Start(510)).expect("seek failed");
+        f.read_exact(&mut sig).expect("read failed");
+        assert_eq!(sig, [0x00, 0x00], "boot signature was not invalidated");
+    }
+
+    // get_fs_info uses the strict reader, so it must fail.
+    assert!(
+        get_fs_info(image.path()).is_err(),
+        "get_fs_info must fail on an invalidated boot sector"
+    );
+
+    // resize_fat32 uses the recovery reader, finds no checkpoint, and must
+    // refuse rather than proceed on a filesystem it cannot reconstruct.
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
+    assert!(
+        resize_fat32(options).is_err(),
+        "resize must refuse an invalidated filesystem with no checkpoint"
+    );
+}

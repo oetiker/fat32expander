@@ -599,6 +599,163 @@ pub mod fat_entry {
 mod tests {
     use super::*;
 
+    /// Build a boot sector with an explicit FAT32 geometry.
+    ///
+    /// Only the fields the layout accessors read are set; everything else stays
+    /// zero, which is what a FAT32 boot sector holds for them anyway
+    /// (`root_entry_count`, `total_sectors_16`, `fat_size_16`).
+    fn boot_sector_with(
+        bytes_per_sector: u16,
+        sectors_per_cluster: u8,
+        reserved_sectors: u16,
+        num_fats: u8,
+        total_sectors: u32,
+        fat_size: u32,
+    ) -> BootSector {
+        let mut data = [0u8; 512];
+        data[11..13].copy_from_slice(&bytes_per_sector.to_le_bytes());
+        data[13] = sectors_per_cluster;
+        data[14..16].copy_from_slice(&reserved_sectors.to_le_bytes());
+        data[16] = num_fats;
+        data[21] = 0xF8;
+        data[32..36].copy_from_slice(&total_sectors.to_le_bytes());
+        data[36..40].copy_from_slice(&fat_size.to_le_bytes());
+        data[44..48].copy_from_slice(&2u32.to_le_bytes());
+        data[510] = 0x55;
+        data[511] = 0xAA;
+        BootSector::from_bytes(&data).unwrap()
+    }
+
+    /// Pins the derived layout arithmetic on geometries that are all valid
+    /// FAT32. The expected values are worked out by hand in the table rather
+    /// than by re-running the formula under test, so a change to how
+    /// `data_sectors`/`data_clusters` compute cannot move the good-path answers
+    /// without failing here.
+    /// One geometry plus the layout values it must produce.
+    struct LayoutCase {
+        bytes_per_sector: u16,
+        sectors_per_cluster: u8,
+        reserved_sectors: u16,
+        num_fats: u8,
+        total_sectors: u32,
+        fat_size: u32,
+        expect_first_data_sector: u64,
+        expect_data_sectors: u64,
+        expect_data_clusters: u32,
+    }
+
+    #[test]
+    fn layout_accessors_on_valid_geometries() {
+        let cases = [
+            // 32 + 2*7813 = 15_658; 2_000_000 - 15_658 = 1_984_342; /8 = 248_042 rem 6
+            LayoutCase {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 8,
+                reserved_sectors: 32,
+                num_fats: 2,
+                total_sectors: 2_000_000,
+                fat_size: 7813,
+                expect_first_data_sector: 15_658,
+                expect_data_sectors: 1_984_342,
+                expect_data_clusters: 248_042,
+            },
+            // 32 + 2*7813 = 15_658; 1_000_000 - 15_658 = 984_342; /1 = 984_342
+            LayoutCase {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 1,
+                reserved_sectors: 32,
+                num_fats: 2,
+                total_sectors: 1_000_000,
+                fat_size: 7813,
+                expect_first_data_sector: 15_658,
+                expect_data_sectors: 984_342,
+                expect_data_clusters: 984_342,
+            },
+            // 32 + 2*500 = 1_032; 500_000 - 1_032 = 498_968; /1 = 498_968
+            LayoutCase {
+                bytes_per_sector: 4096,
+                sectors_per_cluster: 1,
+                reserved_sectors: 32,
+                num_fats: 2,
+                total_sectors: 500_000,
+                fat_size: 500,
+                expect_first_data_sector: 1_032,
+                expect_data_sectors: 498_968,
+                expect_data_clusters: 498_968,
+            },
+            // 32 + 2*1200 = 2_432; 1_200_000 - 2_432 = 1_197_568; /4 = 299_392
+            LayoutCase {
+                bytes_per_sector: 1024,
+                sectors_per_cluster: 4,
+                reserved_sectors: 32,
+                num_fats: 2,
+                total_sectors: 1_200_000,
+                fat_size: 1200,
+                expect_first_data_sector: 2_432,
+                expect_data_sectors: 1_197_568,
+                expect_data_clusters: 299_392,
+            },
+            // 32 + 1*900 = 932; 800_000 - 932 = 799_068; /2 = 399_534
+            LayoutCase {
+                bytes_per_sector: 2048,
+                sectors_per_cluster: 2,
+                reserved_sectors: 32,
+                num_fats: 1,
+                total_sectors: 800_000,
+                fat_size: 900,
+                expect_first_data_sector: 932,
+                expect_data_sectors: 799_068,
+                expect_data_clusters: 399_534,
+            },
+        ];
+
+        for case in cases {
+            let boot = boot_sector_with(
+                case.bytes_per_sector,
+                case.sectors_per_cluster,
+                case.reserved_sectors,
+                case.num_fats,
+                case.total_sectors,
+                case.fat_size,
+            );
+            let label = format!(
+                "bps={} spc={} total={} fat_size={}",
+                case.bytes_per_sector, case.sectors_per_cluster, case.total_sectors, case.fat_size
+            );
+            assert_eq!(
+                boot.first_data_sector(),
+                case.expect_first_data_sector,
+                "first_data_sector {label}"
+            );
+            assert_eq!(
+                boot.data_sectors(),
+                case.expect_data_sectors,
+                "data_sectors {label}"
+            );
+            assert_eq!(
+                boot.data_clusters(),
+                case.expect_data_clusters,
+                "data_clusters {label}"
+            );
+            // Every case must stay a legitimate FAT32 volume, or it is not
+            // exercising the good path this test exists to protect.
+            assert!(
+                case.expect_data_clusters >= 65525,
+                "case is not FAT32: {label}"
+            );
+        }
+    }
+
+    /// `cluster_to_sector` must keep agreeing with `first_data_sector` for the
+    /// first and a later data cluster.
+    #[test]
+    fn cluster_to_sector_is_anchored_to_the_data_area_start() {
+        let boot = boot_sector_with(512, 8, 32, 2, 2_000_000, 7813);
+        assert_eq!(boot.cluster_to_sector(2), 15_658);
+        assert_eq!(boot.cluster_to_sector(3), 15_658 + 8);
+        assert_eq!(boot.cluster_to_sector(1000), 15_658 + 998 * 8);
+    }
+
     #[test]
     fn test_fat_entry_helpers() {
         assert!(fat_entry::is_free(0x00000000));
