@@ -112,8 +112,25 @@ fn validate_boot_sector_impl(boot: &BootSector, allow_invalidated: bool) -> Resu
         )));
     }
 
+    // Cross-field check: the reserved area plus the FATs must fit inside the
+    // volume the boot sector declares. This has to come before the cluster-count
+    // test below, which consumes the same arithmetic - when the layout does not
+    // fit there is no cluster count to speak of, and reporting the failure as
+    // "looks like FAT12/16" sends the reader somewhere unrelated.
+    // `data_clusters` is also None for a zero cluster size, but that is already
+    // rejected above, so reaching here can only mean the layout does not fit.
+    let Some(cluster_count) = boot.data_clusters() else {
+        return Err(Error::BootSectorValidation(format!(
+            "Filesystem layout does not fit in the volume: {} reserved sectors + \
+             {} FATs x {} sectors exceeds {} total sectors",
+            boot.reserved_sectors(),
+            boot.num_fats(),
+            boot.fat_size(),
+            boot.total_sectors()
+        )));
+    };
+
     // Verify this is actually FAT32 by cluster count
-    let cluster_count = boot.data_clusters();
     if cluster_count < 65525 {
         return Err(Error::InvalidFAT32(format!(
             "Cluster count {} indicates FAT12/16, not FAT32 (need >= 65525)",
@@ -236,7 +253,7 @@ mod tests {
             let label =
                 format!("bps={bps} spc={spc} reserved={reserved} nfats={num_fats} total={total}");
             assert!(
-                boot.data_clusters() >= 65525,
+                boot.data_clusters().is_some_and(|c| c >= 65525),
                 "case is not FAT32, fix the fixture: {label}"
             );
             assert!(
@@ -245,6 +262,59 @@ mod tests {
                 validate_boot_sector(&boot)
             );
         }
+    }
+
+    /// [F-R7]: a crafted image whose FATs are larger than the whole volume must
+    /// be rejected, and rejected for the right reason. Before the fix the
+    /// subtraction wrapped and the volume was reported as healthy in release
+    /// builds (4291285132 data clusters) while panicking in debug builds.
+    #[test]
+    fn validation_rejects_a_layout_larger_than_the_volume() {
+        let boot = valid_boot_sector_with(512, 8, 32, 2, 2_000_000, 15_728_640);
+        let result = validate_boot_sector(&boot);
+
+        let err = result.expect_err("a volume smaller than its own FATs must be rejected");
+        let message = format!("{err}");
+        assert!(
+            matches!(err, Error::BootSectorValidation(_)),
+            "expected a boot-sector layout error, got: {err:?}"
+        );
+        // The pre-fix failure mode was this being reported as a cluster-count
+        // problem, which sends the user looking in entirely the wrong place.
+        assert!(
+            !message.contains("FAT12/16"),
+            "an impossible layout must not be reported as a cluster-count problem: {message}"
+        );
+    }
+
+    /// The same must hold for the recovery path: a crash-recovery run reads a
+    /// boot sector with a deliberately invalidated signature, which must not
+    /// become a way to skip the layout check.
+    #[test]
+    fn recovery_validation_also_rejects_a_layout_larger_than_the_volume() {
+        let boot = valid_boot_sector_with(512, 8, 32, 2, 2_000_000, 15_728_640);
+        let mut data = boot.as_bytes().to_vec();
+        data[510] = 0x00;
+        data[511] = 0x00;
+        let invalidated = BootSector::from_bytes(&data).unwrap();
+
+        assert!(
+            validate_boot_sector_for_recovery(&invalidated).is_err(),
+            "recovery validation must still reject an impossible layout"
+        );
+    }
+
+    /// A total_sectors of zero is already rejected, but the layout check must
+    /// not start reporting it as a layout problem - the existing, clearer error
+    /// should still win.
+    #[test]
+    fn zero_total_sectors_is_still_reported_as_such() {
+        let boot = valid_boot_sector_with(512, 8, 32, 2, 0, 7813);
+        let err = validate_boot_sector(&boot).expect_err("zero total sectors must be rejected");
+        assert!(
+            format!("{err}").contains("Total sectors is 0"),
+            "expected the total-sectors error, got: {err}"
+        );
     }
 
     /// The recovery variant must accept exactly what the strict variant accepts,

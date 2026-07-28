@@ -464,14 +464,25 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         let (first_affected_cluster, last_affected_cluster) =
             affected_cluster_range(&boot, checkpoint.old_fat_size, checkpoint.new_fat_size);
 
+        // A checkpoint carries the geometry a previous run committed to. If that
+        // geometry does not describe a filesystem that fits, the record is not
+        // one we can resume from.
+        let new_data_clusters = boot
+            .with_geometry(checkpoint.new_total_sectors, checkpoint.new_fat_size)
+            .data_clusters()
+            .ok_or_else(|| {
+                Error::Calculation(format!(
+                    "Checkpoint geometry does not fit: {} sectors with a FAT of {} sectors",
+                    checkpoint.new_total_sectors, checkpoint.new_fat_size
+                ))
+            })?;
+
         SizeCalculation {
             old_total_sectors: checkpoint.old_total_sectors,
             new_total_sectors: checkpoint.new_total_sectors,
             old_fat_size: checkpoint.old_fat_size,
             new_fat_size: checkpoint.new_fat_size,
-            new_data_clusters: boot
-                .with_geometry(checkpoint.new_total_sectors, checkpoint.new_fat_size)
-                .data_clusters(),
+            new_data_clusters,
             new_free_clusters: 0, // Will be recalculated
             fat_needs_growth: checkpoint.new_fat_size > checkpoint.old_fat_size,
             fat_growth_sectors: checkpoint
@@ -689,9 +700,13 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
 
         // Update FSInfo with new free cluster count
         let old_free = fsinfo.free_count();
+        // The old geometry came off a filesystem that validated, so it fits;
+        // falling back to the new count yields a zero delta, which leaves the
+        // free-cluster hint untouched rather than inventing free space.
         let old_data_clusters = boot
             .with_geometry(calculation.old_total_sectors, calculation.old_fat_size)
-            .data_clusters();
+            .data_clusters()
+            .unwrap_or(calculation.new_data_clusters);
         let additional_clusters = calculation
             .new_data_clusters
             .saturating_sub(old_data_clusters);
@@ -731,7 +746,10 @@ fn print_verbose_resize_info(boot: &BootSector, calculation: &SizeCalculation) {
     eprintln!("Current filesystem:");
     eprintln!("  Total sectors: {}", calculation.old_total_sectors);
     eprintln!("  FAT size: {} sectors", calculation.old_fat_size);
-    eprintln!("  Data clusters: {}", boot.data_clusters());
+    match boot.data_clusters() {
+        Some(clusters) => eprintln!("  Data clusters: {}", clusters),
+        None => eprintln!("  Data clusters: <layout does not fit in the volume>"),
+    }
     eprintln!();
     eprintln!("After resize:");
     eprintln!("  Total sectors: {}", calculation.new_total_sectors);
@@ -821,7 +839,14 @@ pub fn get_fs_info(device_path: impl AsRef<std::path::Path>) -> Result<FSInfoRep
         num_fats: boot.num_fats(),
         fat_size_sectors: boot.fat_size(),
         total_sectors: boot.total_sectors(),
-        data_clusters: boot.data_clusters(),
+        // get_fs_info reads through the strict validator, which rejects a layout
+        // that does not fit - so this cannot be None by the time we are here.
+        data_clusters: boot.data_clusters().ok_or_else(|| {
+            Error::BootSectorValidation(format!(
+                "Filesystem layout does not fit in {} sectors",
+                boot.total_sectors()
+            ))
+        })?,
         root_cluster: boot.root_cluster(),
         fsinfo_sector: boot.fs_info_sector(),
         backup_boot_sector: boot.backup_boot_sector(),
@@ -970,7 +995,7 @@ mod tests {
 
             assert_eq!(
                 base.with_geometry(total_sectors, fat_size).data_clusters(),
-                expected,
+                Some(expected),
                 "wrong cluster count at total_sectors={} fat_size={}",
                 total_sectors,
                 fat_size

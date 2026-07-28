@@ -273,7 +273,9 @@ pub fn find_free_cluster(
     fat: &[u32],
     start: u32,
 ) -> Option<u32> {
-    let max_cluster = boot.data_clusters() + 2; // Clusters are numbered from 2
+    // Clusters are numbered from 2. A layout that does not fit has no clusters
+    // to search, so there is no free one to return.
+    let max_cluster = boot.data_clusters()?.checked_add(2)?;
 
     // Search from start to end
     for cluster in start..max_cluster {

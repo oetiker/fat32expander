@@ -48,7 +48,15 @@ impl SizeCalculation {
 pub fn calculate_new_size(boot: &BootSector, device_sectors: u64) -> Result<SizeCalculation> {
     let old_total_sectors = boot.total_sectors();
     let old_fat_size = boot.fat_size();
-    let old_data_clusters = boot.data_clusters();
+    // The boot sector reaching here has passed validation, which rejects a
+    // layout that does not fit - but this function is public, so it checks
+    // rather than assuming.
+    let old_data_clusters = boot.data_clusters().ok_or_else(|| {
+        Error::Calculation(format!(
+            "Current filesystem layout does not fit in its own {} sectors",
+            boot.total_sectors()
+        ))
+    })?;
 
     // New total sectors is the device size (in sectors)
     // Cap at u32::MAX since FAT32 uses 32-bit sector counts
@@ -83,7 +91,13 @@ pub fn calculate_new_size(boot: &BootSector, device_sectors: u64) -> Result<Size
     // Calculate new data clusters, from the layout the volume will actually have
     let new_data_clusters = boot
         .with_geometry(new_total_sectors, new_fat_size)
-        .data_clusters();
+        .data_clusters()
+        .ok_or_else(|| {
+            Error::Calculation(format!(
+                "Projected layout does not fit: {} sectors with a FAT of {} sectors",
+                new_total_sectors, new_fat_size
+            ))
+        })?;
 
     // Verify we still have FAT32 (>= 65525 clusters)
     if new_data_clusters < 65525 {
@@ -297,7 +311,7 @@ mod tests {
         grown.set_total_sectors_32(calc.new_total_sectors);
         grown.set_fat_size_32(calc.new_fat_size);
 
-        assert_eq!(calc.new_data_clusters, grown.data_clusters());
+        assert_eq!(Some(calc.new_data_clusters), grown.data_clusters());
     }
 
     #[test]

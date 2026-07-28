@@ -1,5 +1,5 @@
 use crate::device::Device;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::fat32::{fat_entry, BootSector};
 
 /// A planned cluster relocation representing physical sector movement
@@ -89,7 +89,15 @@ pub fn plan_relocation(
     let new_first_data_sector = new_boot.first_data_sector();
     let sectors_per_cluster = boot.sectors_per_cluster() as u64;
 
-    let old_max_cluster = boot.data_clusters() + 2;
+    let old_max_cluster = boot
+        .data_clusters()
+        .and_then(|c| c.checked_add(2))
+        .ok_or_else(|| {
+            Error::Relocation(format!(
+                "Cannot plan relocation: current layout does not fit in {} sectors",
+                boot.total_sectors()
+            ))
+        })?;
 
     // Find all clusters that are in use and need to be shifted
     // We only need to move clusters that have data (not free clusters)

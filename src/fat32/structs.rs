@@ -401,20 +401,35 @@ impl BootSector {
             + root_dir_sectors
     }
 
-    /// Total data sectors
-    pub fn data_sectors(&self) -> u64 {
+    /// Total data sectors, or `None` if the metadata does not fit in the volume.
+    ///
+    /// The field values here come straight off the disk and are therefore
+    /// attacker-controlled: a crafted image can declare FATs larger than the
+    /// whole volume. Subtracting those with bare operators panics in debug
+    /// builds and wraps to a huge plausible value in release builds, and
+    /// validation's FAT32-vs-FAT16 check then reads that wrapped result - so a
+    /// crafted image passed validation. Returning `None` makes the impossible
+    /// geometry impossible to mistake for a real one.
+    pub fn data_sectors(&self) -> Option<u64> {
         let root_dir_sectors =
             (self.root_entry_count() as u64 * 32).div_ceil(self.bytes_per_sector() as u64);
 
-        self.total_sectors() as u64
-            - self.reserved_sectors() as u64
-            - (self.num_fats() as u64 * self.fat_size() as u64)
-            - root_dir_sectors
+        let metadata_sectors = (self.num_fats() as u64)
+            .checked_mul(self.fat_size() as u64)?
+            .checked_add(self.reserved_sectors() as u64)?
+            .checked_add(root_dir_sectors)?;
+
+        (self.total_sectors() as u64).checked_sub(metadata_sectors)
     }
 
-    /// Total number of data clusters
-    pub fn data_clusters(&self) -> u32 {
-        (self.data_sectors() / self.sectors_per_cluster() as u64) as u32
+    /// Total number of data clusters, or `None` if the geometry cannot express
+    /// one - either the metadata does not fit ([`Self::data_sectors`]) or
+    /// `sectors_per_cluster` is zero.
+    pub fn data_clusters(&self) -> Option<u32> {
+        let clusters = self
+            .data_sectors()?
+            .checked_div(self.sectors_per_cluster() as u64)?;
+        u32::try_from(clusters).ok()
     }
 
     /// Convert cluster number to first sector of that cluster
@@ -440,6 +455,8 @@ impl std::fmt::Debug for BootSector {
             .field("root_cluster", &self.root_cluster())
             .field("fs_info_sector", &self.fs_info_sector())
             .field("backup_boot_sector", &self.backup_boot_sector())
+            // Reachable from error paths, so it must render an impossible
+            // geometry rather than panic on one.
             .field("data_clusters", &self.data_clusters())
             .field("first_data_sector", &self.first_data_sector())
             .finish()
@@ -729,12 +746,12 @@ mod tests {
             );
             assert_eq!(
                 boot.data_sectors(),
-                case.expect_data_sectors,
+                Some(case.expect_data_sectors),
                 "data_sectors {label}"
             );
             assert_eq!(
                 boot.data_clusters(),
-                case.expect_data_clusters,
+                Some(case.expect_data_clusters),
                 "data_clusters {label}"
             );
             // Every case must stay a legitimate FAT32 volume, or it is not
@@ -744,6 +761,60 @@ mod tests {
                 "case is not FAT32: {label}"
             );
         }
+    }
+
+    /// A boot sector whose FATs do not fit inside the volume has no meaningful
+    /// data area. The arithmetic must report that rather than wrapping into a
+    /// huge plausible-looking number (release) or panicking (debug).
+    ///
+    /// Geometry is the report's own [F-R7] reproduction.
+    #[test]
+    fn data_area_is_unrepresentable_when_the_layout_exceeds_the_volume() {
+        let boot = boot_sector_with(512, 8, 32, 2, 2_000_000, 15_728_640);
+        assert_eq!(
+            boot.data_sectors(),
+            None,
+            "FATs larger than the volume must not yield a data-sector count"
+        );
+        assert_eq!(boot.data_clusters(), None);
+    }
+
+    /// Boundary: the layout exactly filling the volume leaves zero data sectors,
+    /// which is representable - it is one sector further that is not.
+    #[test]
+    fn data_area_boundary_is_exact() {
+        // reserved 32 + 2*984 = 2000 sectors of metadata in a 2000-sector volume.
+        let exact = boot_sector_with(512, 1, 32, 2, 2_000, 984);
+        assert_eq!(exact.data_sectors(), Some(0));
+        assert_eq!(exact.data_clusters(), Some(0));
+
+        let one_too_far = boot_sector_with(512, 1, 32, 2, 1_999, 984);
+        assert_eq!(one_too_far.data_sectors(), None);
+    }
+
+    /// `sectors_per_cluster` of zero is rejected by validation, but `Debug` and
+    /// other callers can still reach a boot sector holding it.
+    #[test]
+    fn data_clusters_is_unrepresentable_without_a_cluster_size() {
+        let boot = boot_sector_with(512, 0, 32, 2, 2_000_000, 7813);
+        assert_eq!(boot.data_sectors(), Some(1_984_342));
+        assert_eq!(
+            boot.data_clusters(),
+            None,
+            "division by a zero cluster size"
+        );
+    }
+
+    /// Debug-formatting is reachable from error paths and logging, so it must
+    /// survive a boot sector that failed validation.
+    #[test]
+    fn debug_formatting_survives_a_corrupt_boot_sector() {
+        let boot = boot_sector_with(512, 0, 32, 2, 2_000_000, 15_728_640);
+        let rendered = format!("{boot:?}");
+        assert!(
+            rendered.contains("BootSector"),
+            "expected a BootSector rendering, got: {rendered}"
+        );
     }
 
     /// `cluster_to_sector` must keep agreeing with `first_data_sector` for the
