@@ -67,11 +67,22 @@ check_prerequisites() {
         log_warn "Install mtools package for comprehensive testing"
     fi
 
-    if [ ! -f "$BINARY" ]; then
-        log_info "Building release binary..."
-        cd "$PROJECT_DIR"
-        cargo build --release
+    # Always rebuild. Building only when the binary is absent means a stale
+    # binary from an earlier commit is tested silently, and the suite reports
+    # "All tests passed" for code that is no longer in the tree.
+    log_info "Building release binary..."
+    cd "$PROJECT_DIR"
+    cargo build --release
+
+    # Respect CARGO_TARGET_DIR: with it set, cargo does not write to
+    # $PROJECT_DIR/target, and the path below would be a leftover from a
+    # previous layout rather than what was just built.
+    BINARY="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}/release/fat32expander"
+    if [ ! -x "$BINARY" ]; then
+        log_error "Build succeeded but no binary at $BINARY"
+        exit 1
     fi
+    log_info "Testing binary: $BINARY"
 }
 
 # Create a test image
@@ -306,14 +317,32 @@ test_already_max_size() {
     create_image "$img" 128
     # Don't extend - already at max
 
-    log_info "Running resize (should fail)..."
-    if run_resize "$img" --force 2>&1; then
-        log_error "Resize should have failed but didn't"
-        exit 1
+    # A resize that finds nothing to do is a successful no-op, not a failure:
+    # the tool has to be safe to re-run from a provisioning script that does not
+    # track whether it already ran. It must still say why it did nothing.
+    log_info "Running resize (should succeed as a no-op)..."
+    local output
+    if output=$(run_resize "$img" --force 2>&1); then
+        if echo "$output" | grep -q "maximum size"; then
+            log_info "Resize correctly reported nothing to do"
+        else
+            log_error "Resize succeeded but did not explain why there was nothing to do"
+            echo "$output"
+            exit 1
+        fi
     else
-        log_info "Resize correctly failed (filesystem already at max size)"
-        log_info "Test passed!"
+        log_error "Resize of an already-maximal filesystem should succeed, but exited $?"
+        echo "$output"
+        exit 1
     fi
+
+    # Re-running must behave identically -- that is what idempotent means here.
+    if ! run_resize "$img" --force >/dev/null 2>&1; then
+        log_error "Second resize should also have succeeded"
+        exit 1
+    fi
+
+    log_info "Test passed!"
 }
 
 # Test 6: Large resize (FAT must grow significantly)
