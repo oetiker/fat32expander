@@ -504,7 +504,7 @@ reproduced against crafted ones.
 - **On not saturating:** returning `None` was chosen over clamping deliberately. `ClusterId::index`, deleted by [F-R35] in this same batch, used `saturating_sub(2)`, which maps clusters 0 and 1 to the *first data cluster's* sector — a plausible, wrong answer that reads as success. The report's own framing ("the safe helper beside it is unused") slightly overstates that helper: adopting it would have replaced a loud failure with a quiet one.
 - **Safety-net integrity:** the signature change touched 26 call sites across `structs.rs` and `relocator.rs`. Every edit was `Some(...)` wrapping or `.unwrap()` — call shape only. Verified by diff: every expected *value* is byte-identical, and no assertion was relaxed, skipped or deleted. `plan_relocation_maps_clusters_to_independently_computed_sectors`, written in the safety-net phase with hand-derived sector literals precisely so it would not move with the code, passed **completely unedited** across the rewrite.
 - **Status date:** 2026-07-28 21:20 UTC
-- **Status commit:** (recorded in the following commit)
+- **Status commit:** f2cce0b
 
 ### [F-R37] Executor reaches past `fat32::operations` to write FAT areas as raw sectors
 - **Category:** 13 (inconsistent boundaries)
