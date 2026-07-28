@@ -242,6 +242,10 @@ reproduced against crafted ones.
 - **Evidence:** `scripts/qemu/test-qemu.sh:404`, excerpt: `mapfile -t tests < <(find "$SCRIPT_DIR/tests" -name "test-*.sh" -type f | sort)`. `scripts/qemu/tests/` contains 9 files; `test-crash-recovery.sh` sits one level up in `scripts/qemu/`. `.github/workflows/tests.yml` invokes `./scripts/qemu/test-qemu.sh` with no arguments, and the only `cargo build --features fault-injection` in the repo is inside `test-crash-recovery.sh:57`.
 - **Found by:** Security & Code Quality
 - **Note:** This is the direct reason [F-R1] survived to the current commit. Qualifies [S-D].
+- **Status:** Fixed
+- **Status reason:** `.github/workflows/tests.yml` gained a "Run crash recovery tests" step that invokes `./scripts/qemu/test-crash-recovery.sh` after the QEMU step, with pass/fail reported into the job summary. No `fault-injection` build step was needed in the workflow — the script already builds its own binary with that feature (`:57-58`), and the Alpine setup and musl target CI needs are steps that already existed. The script was deliberately *not* moved into `scripts/qemu/tests/`: it drives its VM differently from the nine discovered suites, and restructuring a working crash-safety harness carried more risk than the duplication saves. Instead the glob at `test-qemu.sh:404` now carries a comment stating that discovery covers `tests/` only, that this suite is invoked separately by CI, and that adding a suite outside `tests/` without a matching workflow step means it never runs anywhere — which is precisely how this flaw arose. Verified by running the new step's exact command and summary parsing locally (exit 0, 6 crash points parsed) and confirming `test-qemu.sh` still discovers its 9 tests.
+- **Status date:** 2026-07-28 09:55 UTC
+- **Status commit:** (recorded in the follow-up docs commit)
 
 ### [F-R10] Relocation sector math is untested; the unit tests only assert on hand-built structs
 - **Category:** 32 (missing test coverage for critical paths)

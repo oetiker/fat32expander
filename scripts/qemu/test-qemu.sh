@@ -401,6 +401,11 @@ main() {
         fi
         tests=("$test_file")
     else
+        # NOTE: this discovers scripts/qemu/tests/ only. test-crash-recovery.sh
+        # deliberately sits one level up - it builds its own fault-injection
+        # binary and drives the VM differently - so it is NOT run from here.
+        # CI invokes it as a separate step. Adding a suite outside tests/
+        # without a matching workflow step means it never runs anywhere.
         mapfile -t tests < <(find "$SCRIPT_DIR/tests" -name "test-*.sh" -type f | sort)
     fi
 

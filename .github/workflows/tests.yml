@@ -118,3 +118,25 @@ jobs:
         echo "::endgroup::"
         exit $QEMU_EXIT
 
+    - name: Run crash recovery tests
+      run: |
+        echo "::group::Running crash recovery tests"
+        # Not discovered by test-qemu.sh - it globs scripts/qemu/tests/ and this
+        # suite lives one level up, because it builds its own fault-injection
+        # binary and drives the VM differently. It must be invoked explicitly,
+        # or the only test of the checkpoint and resume machinery never runs.
+        ./scripts/qemu/test-crash-recovery.sh 2>&1 | tee crash-recovery-results.txt
+        CRASH_EXIT=${PIPESTATUS[0]}
+
+        echo "## Crash Recovery Results" >> $GITHUB_STEP_SUMMARY
+        if [ $CRASH_EXIT -eq 0 ]; then
+          PASSED=$(grep -oP 'Passed: \K[0-9]+' crash-recovery-results.txt | tail -1)
+          echo "✅ All crash points recovered (${PASSED:-?} points)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Crash recovery failed" >> $GITHUB_STEP_SUMMARY
+          grep -E "(FAILED|ERROR)" crash-recovery-results.txt >> $GITHUB_STEP_SUMMARY || true
+        fi
+
+        echo "::endgroup::"
+        exit $CRASH_EXIT
+
