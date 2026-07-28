@@ -490,7 +490,7 @@ reproduced against crafted ones.
 - **On the finding's strongest argument:** the evidence points at `ClusterMove` as "exactly the cluster/sector confusion the newtypes were meant to prevent, and exactly where [F-R2] lives". That argument was addressed structurally instead of typographically: [F-R44]'s fix deleted `ClusterMove::to_cluster`, so the struct now carries one cluster number and two sector numbers rather than two of each, and the class of confusion the newtypes targeted has one fewer place to occur.
 - **Coverage:** none, by agreement — the deleted items had zero constructors and zero consumers crate-wide, so no execution path ran through them and the compiler is the safety net. Confirmed by the suite being byte-for-byte unchanged at 128 passing before and after.
 - **Status date:** 2026-07-28 21:20 UTC
-- **Status commit:** (recorded in the following commit)
+- **Status commit:** bc81d9d
 
 ### [F-R36] `cluster_to_sector` does unchecked `cluster - 2` while the safe helper beside it is unused
 - **Category:** 28 (magic numbers) / 20
