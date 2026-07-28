@@ -398,7 +398,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** `Device` no longer has a default sector size or a two-phase init. `Device::open_with(path, writable, sector_size_from)` determines the geometry before `Self` exists: the caller supplies a probe closure that turns the leading bytes into a sector size, so `device` stays format-agnostic while `fat32` supplies the FAT knowledge (`fat32::operations::bootstrap_sector_size`, wrapped as `open_fat32_device`). `set_sector_size` and the hardcoded `512` are deleted, so the window in which a `Device` addressed sectors at the wrong size is not merely closed but unrepresentable. The file is still opened exactly once. Both production call sites (`resize::fsinfo::get_fs_info`, `resize::executor::resize_fat32`) now go through `open_fat32_device`. Covered by `total_sectors_always_matches_the_device_size_divided_by_the_sector_size`, `a_sector_index_addresses_sector_size_times_index_bytes`, `checkpoint_round_trips_at_a_non_default_sector_size`, `crash_detection_finds_a_checkpoint_at_a_non_default_sector_size`, `device_geometry_matches_a_4096_byte_sector_filesystem` and `resize_preserves_files_on_a_4096_byte_sector_filesystem`.
 - **Status date:** 2026-07-28 00:00 UTC
-- **Status commit:** 9a6de9a
+- **Status commit:** 7d278d9
 
 ### [F-R25] FAT extension is guarded by `!plan.is_empty()` but the metadata commit is unconditional
 - **Category:** 26 (poor transactional boundaries)
@@ -516,7 +516,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** Resolved together with [F-R23], which removed the setter these readers called. `read_boot_sector` and `read_boot_sector_for_recovery` now take `&Device` and are pure reads -- the geometry they used to install is established at construction by `open_fat32_device`. A reader can no longer change what a later `read_sector`/`write_sector` means. Covered by `read_boot_sector_returns_the_same_answer_on_repeated_calls` (which the `&Device` signature makes expressible) and `device_geometry_matches_a_4096_byte_sector_filesystem`.
 - **Status date:** 2026-07-28 00:00 UTC
-- **Status commit:** 9a6de9a
+- **Status commit:** 7d278d9
 
 ### [F-R41] CLI recomputes the resize decision and target size the library already owns
 - **Category:** 25 (business logic in the UI)
@@ -575,7 +575,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** Resolved by [F-R23]'s removal of `set_sector_size`. There is no longer a setter that can leave `total_sectors` stale: the size is read once in `Device::open_with`, and `total_sectors` is derived from it in the same expression that constructs the device, with the `?` on `size_of` propagating a stat failure instead of swallowing it. Covered by `total_sectors_always_matches_the_device_size_divided_by_the_sector_size`.
 - **Status date:** 2026-07-28 00:00 UTC
-- **Status commit:** 9a6de9a
+- **Status commit:** 7d278d9
 
 ### [F-R29] All open failures collapse to "not found", discarding errno
 - **Category:** 20 (weak error handling strategy)
