@@ -291,7 +291,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** Both duplicated formulas now have a single home. `BootSector::with_geometry(total_sectors, fat_size)` returns the boot sector as it would look under a different geometry, so every layout question is answered by the canonical accessors; the three data-cluster copies (`calculator.rs:84-87`, the inline FSInfo copy at `executor.rs:591-594` which omitted `root_dir_sectors`, and `calculate_data_clusters_from_params`) are replaced by `with_geometry(..).data_clusters()`, and the last of those functions is deleted. The affected-cluster formula, duplicated between `calculator.rs` and the checkpoint-resume branch at `executor.rs:409-417` (with the comment admitting the copies had to be hand-synced), is now `calculator::affected_cluster_range`, called from both. The commit path at `executor.rs:566-567` also goes through `with_geometry`, so the projected and committed boot sectors are built by the same code. Covered by `test_data_clusters_for_a_projected_geometry` and `test_with_geometry_preserves_the_rest_of_the_sector`; the former computes its expected values independently rather than comparing two implementations against each other.
 - **Status date:** 2026-07-28 00:00 UTC
-- **Status commit:** PENDING13
+- **Status commit:** 23fdf7a
 
 ### [F-R14] `resize_fat32` is a ~307-line function doing everything
 - **Category:** 2 (god object)
