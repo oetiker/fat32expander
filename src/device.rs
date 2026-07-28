@@ -202,4 +202,74 @@ mod tests {
         let sector0 = device.read_sector(0).unwrap();
         assert_eq!(sector0, vec![0u8; 512]);
     }
+
+    /// Safety net for [F-R29]: the fix replaces the blanket `DeviceNotFound`
+    /// with an errno-bearing error. Whatever the variant becomes, opening a
+    /// path that is not there must fail, and the message must name the path --
+    /// that is what tells a user which device the failure is about.
+    #[test]
+    fn opening_a_missing_path_fails_and_names_the_path() {
+        let missing = "/nonexistent/fat32expander/safety/net/device.img";
+        let err = Device::open(missing).expect_err("a missing path must not open");
+
+        assert!(
+            err.to_string().contains(missing),
+            "the error must name the path it refers to, got: {err}"
+        );
+    }
+
+    /// A directory fails to open for a different reason than a missing file
+    /// (EISDIR, not ENOENT). Today both collapse into one variant; [F-R29]
+    /// separates them. Either way it must be an error, and must name the path.
+    #[test]
+    fn opening_a_directory_fails_and_names_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().display().to_string();
+        let err = Device::open(dir.path()).expect_err("a directory must not open as a device");
+
+        assert!(
+            err.to_string().contains(&path),
+            "the error must name the path it refers to, got: {err}"
+        );
+    }
+
+    /// Safety net for [F-R30]: the fix attaches path and sector context to I/O
+    /// errors. Reading past the end of the device must remain an error and
+    /// must not start returning zeroed data.
+    #[test]
+    fn reading_past_the_end_of_the_device_fails() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![0u8; 4 * 512]).unwrap();
+
+        let device = Device::open(file.path()).unwrap();
+        assert_eq!(device.total_sectors(), 4);
+
+        // Sector 4 is one past the last valid sector (0..=3).
+        assert!(
+            device.read_sector(4).is_err(),
+            "reading past the end of the device must fail, not return zeros"
+        );
+    }
+
+    /// The sector-length guard is the only bounds check the device layer has
+    /// today. [F-R30] rewraps this error; it must keep rejecting the write.
+    #[test]
+    fn writing_a_sector_of_the_wrong_length_is_rejected() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![0u8; 1024 * 1024]).unwrap();
+
+        let device = Device::open(file.path()).unwrap();
+
+        assert!(
+            device.write_sector(0, &vec![0xAB; 511]).is_err(),
+            "a short buffer must be rejected"
+        );
+        assert!(
+            device.write_sector(0, &vec![0xAB; 513]).is_err(),
+            "an over-long buffer must be rejected"
+        );
+
+        // The rejected writes must not have modified the device.
+        assert_eq!(device.read_sector(0).unwrap(), vec![0u8; 512]);
+    }
 }

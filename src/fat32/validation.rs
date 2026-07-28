@@ -340,6 +340,33 @@ mod tests {
         );
     }
 
+    /// The recovery reader's extra permissiveness must extend to the zeroed
+    /// signature and nothing else. A signature that is merely *wrong* is a
+    /// corrupt or foreign device, and [F-R5]'s fix must not widen the
+    /// invalidated case into "any bad signature" while making it a distinct
+    /// error variant.
+    #[test]
+    fn a_garbage_signature_is_rejected_by_both_readers() {
+        let boot = valid_boot_sector_with(512, 8, 32, 2, 2_000_000, 7813);
+
+        for sig in [0x1234u16, 0xFFFF, 0x00AA, 0xAA00, 0x55AA] {
+            let mut data = boot.as_bytes().to_vec();
+            data[510] = (sig & 0xFF) as u8;
+            data[511] = (sig >> 8) as u8;
+            let corrupt = BootSector::from_bytes(&data).unwrap();
+
+            assert!(
+                validate_boot_sector(&corrupt).is_err(),
+                "strict validation must reject signature {sig:#06X}"
+            );
+            assert!(
+                validate_boot_sector_for_recovery(&corrupt).is_err(),
+                "recovery validation must reject signature {sig:#06X} -- only a \
+                 zeroed signature marks an interrupted resize"
+            );
+        }
+    }
+
     fn create_valid_fat32_boot_sector() -> [u8; 512] {
         let mut data = [0u8; 512];
 
