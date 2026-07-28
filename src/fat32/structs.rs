@@ -314,9 +314,27 @@ impl BootSector {
         u32::try_from(clusters).ok()
     }
 
-    /// Convert cluster number to first sector of that cluster
-    pub fn cluster_to_sector(&self, cluster: u32) -> u64 {
-        self.first_data_sector() + ((cluster - 2) as u64 * self.sectors_per_cluster() as u64)
+    /// First sector of `cluster`, or `None` if the cluster cannot address one.
+    ///
+    /// Data clusters are numbered from 2, so clusters 0 and 1 are reserved and
+    /// have no sector. [F-R36] This used to compute `cluster - 2` with a bare
+    /// operator: for those two values that panics in debug builds and wraps to
+    /// a ~4-billion-sector offset in release builds. Both the cluster number and
+    /// the geometry it is combined with come off the disk and are therefore
+    /// attacker-controlled, which is the same reasoning that made
+    /// [`Self::data_sectors`] and [`Self::data_clusters`] return `Option` --
+    /// this now matches them rather than being the one accessor beside them
+    /// that still trusts its input.
+    ///
+    /// Returning `None` is deliberate in preference to saturating. The deleted
+    /// `ClusterId::index` ([F-R35]) used `saturating_sub(2)`, which maps
+    /// clusters 0 and 1 to the *first data cluster's* sector -- a plausible,
+    /// wrong answer that reads as success. An impossible cluster should be
+    /// impossible to mistake for a real one.
+    pub fn cluster_to_sector(&self, cluster: u32) -> Option<u64> {
+        let index = cluster.checked_sub(2)?;
+        let offset = (index as u64).checked_mul(self.sectors_per_cluster() as u64)?;
+        self.first_data_sector().checked_add(offset)
     }
 
     /// Bytes per cluster
@@ -704,9 +722,48 @@ mod tests {
     #[test]
     fn cluster_to_sector_is_anchored_to_the_data_area_start() {
         let boot = boot_sector_with(512, 8, 32, 2, 2_000_000, 7813);
-        assert_eq!(boot.cluster_to_sector(2), 15_658);
-        assert_eq!(boot.cluster_to_sector(3), 15_658 + 8);
-        assert_eq!(boot.cluster_to_sector(1000), 15_658 + 998 * 8);
+        assert_eq!(boot.cluster_to_sector(2), Some(15_658));
+        assert_eq!(boot.cluster_to_sector(3), Some(15_658 + 8));
+        assert_eq!(boot.cluster_to_sector(1000), Some(15_658 + 998 * 8));
+    }
+
+    /// [F-R36] The reserved clusters have no sector, and must say so rather
+    /// than panicking (debug) or wrapping to a ~4-billion-sector offset
+    /// (release). Cluster 2 is the boundary and is valid.
+    #[test]
+    fn the_reserved_clusters_have_no_sector() {
+        let boot = boot_sector_with(512, 8, 32, 2, 2_000_000, 7813);
+
+        assert_eq!(boot.cluster_to_sector(0), None, "cluster 0 is reserved");
+        assert_eq!(boot.cluster_to_sector(1), None, "cluster 1 is reserved");
+        assert_eq!(
+            boot.cluster_to_sector(2),
+            Some(15_658),
+            "cluster 2 is the first data cluster, not a reserved one"
+        );
+    }
+
+    /// A cluster number large enough to overflow the sector arithmetic must
+    /// return `None`, not a wrapped offset. Both the cluster and the geometry
+    /// come off the disk, so this is reachable from a crafted image.
+    #[test]
+    fn a_cluster_whose_sector_would_overflow_has_no_sector() {
+        let boot = boot_sector_with(512, 8, 32, 2, 2_000_000, 7813);
+
+        assert_eq!(
+            boot.cluster_to_sector(u32::MAX),
+            Some(15_658 + (u32::MAX as u64 - 2) * 8),
+            "u32::MAX still fits in u64 arithmetic and must be answered exactly"
+        );
+
+        // 255 sectors per cluster is the largest a u8 can express; combined
+        // with a near-maximal cluster the product still fits u64, so the guard
+        // that matters here is that nothing wraps at u32 width on the way.
+        let wide = boot_sector_with(512, 255, 32, 2, 2_000_000, 7813);
+        assert_eq!(
+            wide.cluster_to_sector(u32::MAX),
+            Some(wide.first_data_sector() + (u32::MAX as u64 - 2) * 255),
+        );
     }
 
     /// [F-R36]'s safety net: every legitimate cluster must keep mapping to the
@@ -793,12 +850,12 @@ mod tests {
 
             assert_eq!(
                 boot.cluster_to_sector(2),
-                case.first_data_sector,
+                Some(case.first_data_sector),
                 "cluster 2 must start the data area for bps={bps} spc={spc}"
             );
             assert_eq!(
                 boot.cluster_to_sector(case.last_cluster),
-                case.last_cluster_sector,
+                Some(case.last_cluster_sector),
                 "last valid cluster {} for bps={bps} spc={spc}",
                 case.last_cluster
             );

@@ -91,7 +91,6 @@ pub fn plan_relocation(
     // Calculate sector positions
     let old_first_data_sector = boot.first_data_sector();
     let new_first_data_sector = new_boot.first_data_sector();
-    let sectors_per_cluster = boot.sectors_per_cluster() as u64;
 
     let old_max_cluster = boot
         .data_clusters()
@@ -119,8 +118,23 @@ pub fn plan_relocation(
             continue;
         }
 
-        let old_sector = old_first_data_sector + ((cluster - 2) as u64 * sectors_per_cluster);
-        let new_sector = new_first_data_sector + ((cluster - 2) as u64 * sectors_per_cluster);
+        // [F-R36] Ask the boot sectors where the cluster lives rather than
+        // recomputing it here. The formula was identical, so this is not a
+        // behaviour change -- it removes the second copy of it, which is what
+        // left the checked accessor without a caller, and means the bounds
+        // check exists in one place instead of needing to be repeated here.
+        let sector_of = |b: &BootSector| {
+            b.cluster_to_sector(cluster).ok_or_else(|| {
+                Error::Relocation(format!(
+                    "Cannot plan relocation: cluster {cluster} has no sector in a filesystem of \
+                     {} sectors with {} sectors per cluster",
+                    b.total_sectors(),
+                    b.sectors_per_cluster()
+                ))
+            })
+        };
+        let old_sector = sector_of(boot)?;
+        let new_sector = sector_of(new_boot)?;
 
         // Only include if positions differ (they should all differ when FAT grows)
         if old_sector != new_sector {
@@ -427,13 +441,13 @@ mod tests {
         for mv in &plan.moves {
             assert_eq!(
                 mv.from_sector,
-                old_boot.cluster_to_sector(mv.from_cluster),
+                old_boot.cluster_to_sector(mv.from_cluster).unwrap(),
                 "cluster {} source sector",
                 mv.from_cluster
             );
             assert_eq!(
                 mv.to_sector,
-                new_boot.cluster_to_sector(mv.from_cluster),
+                new_boot.cluster_to_sector(mv.from_cluster).unwrap(),
                 "cluster {} target sector",
                 mv.from_cluster
             );
@@ -480,7 +494,7 @@ mod tests {
         for &cluster in &in_use {
             let data = vec![fill_byte(cluster); bytes_per_cluster];
             device
-                .write_sectors(old_boot.cluster_to_sector(cluster), &data)
+                .write_sectors(old_boot.cluster_to_sector(cluster).unwrap(), &data)
                 .unwrap();
         }
 
@@ -489,7 +503,7 @@ mod tests {
 
         for &cluster in &in_use {
             let got = device
-                .read_sectors(new_boot.cluster_to_sector(cluster), SPC as u32)
+                .read_sectors(new_boot.cluster_to_sector(cluster).unwrap(), SPC as u32)
                 .unwrap();
             assert_eq!(
                 got,
@@ -515,14 +529,14 @@ mod tests {
         for &cluster in &in_use {
             let data = vec![fill_byte(cluster); bytes_per_cluster];
             device
-                .write_sectors(old_boot.cluster_to_sector(cluster), &data)
+                .write_sectors(old_boot.cluster_to_sector(cluster).unwrap(), &data)
                 .unwrap();
         }
 
         // Cluster 3's target is cluster 4's source: the ranges genuinely overlap.
         assert_eq!(
-            new_boot.cluster_to_sector(3),
-            old_boot.cluster_to_sector(4),
+            new_boot.cluster_to_sector(3).unwrap(),
+            old_boot.cluster_to_sector(4).unwrap(),
             "test geometry must produce overlapping source and target ranges"
         );
 
@@ -531,7 +545,7 @@ mod tests {
 
         for &cluster in &in_use {
             let got = device
-                .read_sectors(new_boot.cluster_to_sector(cluster), SPC as u32)
+                .read_sectors(new_boot.cluster_to_sector(cluster).unwrap(), SPC as u32)
                 .unwrap();
             assert_eq!(
                 got,
@@ -548,7 +562,7 @@ mod tests {
         for &cluster in in_use {
             let data = vec![fill_byte(cluster); bytes_per_cluster];
             device
-                .write_sectors(boot.cluster_to_sector(cluster), &data)
+                .write_sectors(boot.cluster_to_sector(cluster).unwrap(), &data)
                 .unwrap();
         }
     }
@@ -558,7 +572,7 @@ mod tests {
         let bytes_per_cluster = new_boot.bytes_per_cluster() as usize;
         for &cluster in in_use {
             let got = device
-                .read_sectors(new_boot.cluster_to_sector(cluster), SPC as u32)
+                .read_sectors(new_boot.cluster_to_sector(cluster).unwrap(), SPC as u32)
                 .unwrap();
             assert_eq!(
                 got,
@@ -652,7 +666,7 @@ mod tests {
         let bytes_per_cluster = old_boot.bytes_per_cluster() as usize;
         let intact = in_use.iter().filter(|&&cluster| {
             device
-                .read_sectors(new_boot.cluster_to_sector(cluster), SPC as u32)
+                .read_sectors(new_boot.cluster_to_sector(cluster).unwrap(), SPC as u32)
                 .unwrap()
                 == vec![fill_byte(cluster); bytes_per_cluster]
         });
@@ -727,7 +741,7 @@ mod tests {
         // Mark cluster 9's destination so we can tell whether it was written.
         let sentinel = vec![0xEE; bytes_per_cluster];
         device
-            .write_sectors(new_boot.cluster_to_sector(9), &sentinel)
+            .write_sectors(new_boot.cluster_to_sector(9).unwrap(), &sentinel)
             .unwrap();
 
         let mut record = |_next_cluster: u32| Ok(());
@@ -740,7 +754,7 @@ mod tests {
 
         assert_eq!(
             device
-                .read_sectors(new_boot.cluster_to_sector(9), SPC as u32)
+                .read_sectors(new_boot.cluster_to_sector(9).unwrap(), SPC as u32)
                 .unwrap(),
             sentinel,
             "cluster 9 is above the resume point and must not have been moved again"
@@ -805,7 +819,7 @@ mod tests {
         for mv in &plan.moves {
             assert_eq!(
                 mv.to_sector,
-                new_boot.cluster_to_sector(mv.from_cluster),
+                new_boot.cluster_to_sector(mv.from_cluster).unwrap(),
                 "cluster {} target sector",
                 mv.from_cluster
             );
@@ -826,7 +840,7 @@ mod tests {
         for &cluster in &in_use {
             let data = vec![fill_byte(cluster); bytes_per_cluster];
             device
-                .write_sectors(old_boot.cluster_to_sector(cluster), &data)
+                .write_sectors(old_boot.cluster_to_sector(cluster).unwrap(), &data)
                 .unwrap();
         }
 
@@ -835,7 +849,7 @@ mod tests {
 
         for &cluster in &in_use {
             let got = device
-                .read_sectors(new_boot.cluster_to_sector(cluster), MIS_SPC as u32)
+                .read_sectors(new_boot.cluster_to_sector(cluster).unwrap(), MIS_SPC as u32)
                 .unwrap();
             assert_eq!(
                 got,
