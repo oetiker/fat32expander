@@ -13,6 +13,5 @@ pub use executor::{
 
 // Re-export relocator types and functions
 pub use relocator::{
-    execute_relocation, plan_relocation, verify_relocation, ClusterMove, RelocationPlan,
-    ShiftProgress,
+    execute_relocation, plan_relocation, ClusterMove, RelocationPlan, ShiftProgress,
 };

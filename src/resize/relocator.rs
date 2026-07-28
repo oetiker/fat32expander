@@ -244,20 +244,6 @@ pub fn execute_relocation(
     Ok(())
 }
 
-/// Verify that all clusters in the affected range are free after relocation
-///
-/// Note: With the new data-shifting approach, the "affected range" clusters
-/// don't become free - they just move to new physical positions. This function
-/// is kept for API compatibility but the verification is different.
-pub fn verify_relocation(_fat: &[u32], _first_affected: u32, _last_affected: u32) -> Result<()> {
-    // With the new approach, clusters aren't freed, they're just shifted.
-    // The first_affected..last_affected range now represents sectors that
-    // are part of the expanded FAT, so we don't need to verify them.
-    //
-    // For API compatibility, we just return Ok.
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,16 +844,5 @@ mod tests {
         assert!(!plan.is_empty());
         assert_eq!(plan.cluster_count(), 2);
         assert_eq!(plan.total_bytes, 8192);
-    }
-
-    #[test]
-    fn test_verify_relocation_always_succeeds() {
-        let fat = vec![
-            0x0FFFFFF8, 0x0FFFFFFF, 0x00000003, // Cluster 2 in use
-            0x0FFFFFFF, // Cluster 3 in use
-        ];
-
-        // With new approach, verification always succeeds
-        assert!(verify_relocation(&fat, 2, 4).is_ok());
     }
 }

@@ -359,6 +359,10 @@ reproduced against crafted ones.
 - **Explanation:** `verify_relocation` ignores all three parameters and returns `Ok(())`, yet the executor pushes an audit entry asserting a safety check ran — on the one operation that physically moves user data.
 - **Evidence:** `src/resize/relocator.rs:178-185`, excerpt: `pub fn verify_relocation(_fat: &[u32], _first_affected: u32, _last_affected: u32) -> Result<()> { … // For API compatibility, we just return Ok. Ok(()) }`; `src/resize/executor.rs:505-510` `verify_relocation(…)?; operations.push("Verified data shift".to_string());`. Its own unit test is named `test_verify_relocation_always_succeeds` (`relocator.rs:247`).
 - **Found by:** all five specialists — the highest corroboration in the set
+- **Status:** Fixed
+- **Status reason:** `verify_relocation` is deleted, along with its call site, its `resize/mod.rs` re-export and the `"Verified data shift"` audit entry it justified. The audit trail no longer claims a check that never ran. Implementing a real verification was considered and rejected: a read-back comparison would double read I/O on the slowest phase and could not catch a misdirected write — it would re-read from the same wrong place and pass — while the structural invariants worth asserting are already guaranteed by `plan_relocation` deriving its geometry from the boot sector that will be committed ([F-R2]'s fix). What the stub pretended to check is now genuinely covered: relocation correctness by the unit tests in `relocator.rs`, and end-to-end integrity by the crash-recovery suite that [F-R9] wired into CI. Its own test, `test_verify_relocation_always_succeeds`, is deleted with it — it asserted the do-nothing behaviour, so it pinned the flaw rather than guarding against it.
+- **Status date:** 2026-07-28 09:55 UTC
+- **Status commit:** (recorded in the follow-up docs commit)
 
 ### [F-R21] No logging facade and no durable log; raw `eprintln!` inside library business logic
 - **Category:** 21 (no observability plan)
@@ -418,6 +422,7 @@ reproduced against crafted ones.
 - **Explanation:** The taxonomy advertises safety checks — cluster-in-use detection, FAT corruption detection, post-relocation verification — that the code does not perform.
 - **Evidence:** `src/error.rs:24-57` — verified by grep rather than by trusting a count: zero construction sites for `DeviceTooSmall` (`:27`), `Relocation` (`:42`), `Verification` (`:45`), `ClusterInUse` (`:48`), `NoFreeCluster` (`:51`), `CorruptedFAT` (`:57`). Excerpt: `#[error("Cluster {0} is in use and would be overwritten by FAT growth")] ClusterInUse(u32)`.
 - **Found by:** Error Handling & Observability, Security & Code Quality, Structure & Boundaries (3 specialists)
+- **Note (2026-07-28):** Still open, but now five variants rather than six — the [F-R1] fix constructs `Relocation` for the two cases where an interrupted data shift cannot be resumed safely. `DeviceTooSmall`, `Verification`, `ClusterInUse`, `NoFreeCluster` and `CorruptedFAT` remain unconstructed. Note that `Verification` was the variant a real `verify_relocation` would have used; [F-R20] deleted that stub rather than implementing it, so this variant is now dead by decision rather than by oversight.
 
 ### [F-R34] Seven public FAT-manipulation functions are never called
 - **Category:** 29 ("utility" dumping ground) / 31 (dead code)
@@ -453,10 +458,10 @@ reproduced against crafted ones.
 - **Explanation:** The relocator's three entry points take a `&Device`, a mutable FAT slice, `new_fat_size` and `new_data_clusters` that are all discarded, so the signatures advertise data dependencies the implementations do not have.
 - **Evidence:** `src/resize/relocator.rs:52-58, 125-133, 178-185` — `plan_relocation(_device: &Device, …, _new_data_clusters: u32)`; `execute_relocation(device, boot, _fat: &mut [u32], plan, _new_fat_size: u32, _new_data_clusters: u32, verbose)`; `:168-170` `// No cluster number changes, so return empty vector … Ok(Vec::new())`. The executor still constructs and threads these values through at `:455-462` and `:493-501`.
 - **Found by:** Coupling & Dependencies, Structure & Boundaries
-- **Status:** Partially fixed
-- **Status reason:** Resolved for two of the three entry points as a side effect of the [F-R2] fix: `plan_relocation` no longer takes `_device` or `_new_data_clusters`, and `execute_relocation` no longer takes `_fat`, `_new_fat_size` or `_new_data_clusters` and returns `()` instead of an always-empty `Vec`. `verify_relocation(_fat, _first_affected, _last_affected)` still ignores all three parameters — that remainder is inseparable from [F-R20] (the function is a do-nothing stub) and should be fixed with it.
-- **Status date:** 2026-07-28 00:00 UTC
-- **Status commit:** 960a851
+- **Status:** Fixed
+- **Status reason:** Resolved for two of the three entry points as a side effect of the [F-R2] fix: `plan_relocation` no longer takes `_device` or `_new_data_clusters`, and `execute_relocation` no longer takes `_fat`, `_new_fat_size` or `_new_data_clusters` and returns `()` instead of an always-empty `Vec`. The remaining entry point, `verify_relocation(_fat, _first_affected, _last_affected)`, was deleted outright with [F-R20] — it was a do-nothing stub, so the three ignored parameters went with it. No relocator entry point now declares a dependency it does not use.
+- **Status date:** 2026-07-28 09:55 UTC (completed; partial fix 2026-07-28 00:00 UTC)
+- **Status commit:** 960a851, completed in the [F-R20] fix commit
 
 ### [F-R39] `read_boot_sector` and `read_boot_sector_for_recovery` are ~20-line near-verbatim copies
 - **Category:** 9 (shotgun surgery)

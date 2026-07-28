@@ -6,9 +6,7 @@ use crate::fat32::{
     BootSector, FSInfo,
 };
 use crate::resize::calculator::{affected_cluster_range, calculate_new_size, SizeCalculation};
-use crate::resize::relocator::{
-    execute_relocation, plan_relocation, verify_relocation, ShiftProgress,
-};
+use crate::resize::relocator::{execute_relocation, plan_relocation, ShiftProgress};
 use crate::system::check_not_mounted;
 
 // ===== Fault Injection for Testing =====
@@ -612,13 +610,6 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
                     execute_relocation(&device, &boot, &plan, &mut progress, options.is_verbose())?;
                     clusters_relocated = plan.cluster_count();
                     operations.push(format!("Shifted {} clusters forward", clusters_relocated));
-
-                    verify_relocation(
-                        &fat,
-                        calculation.first_affected_cluster,
-                        calculation.last_affected_cluster,
-                    )?;
-                    operations.push("Verified data shift".to_string());
 
                     maybe_crash_at("after_data_shift");
 
