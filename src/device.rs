@@ -1,6 +1,5 @@
 use crate::error::{Error, Result};
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
@@ -104,14 +103,17 @@ impl Device {
     }
 
     /// Size in bytes of an open device, whether image file or block device.
+    ///
+    /// [F-R48]: block devices are sized with `BLKGETSIZE64` via
+    /// `system::block_device_size_of`, which is the canonical interface and
+    /// which this used to bypass in favour of `seek`. The fd is already open,
+    /// so no second `open()` is needed to ask.
     fn size_of(file: &File) -> Result<u64> {
         let metadata = file.metadata()?;
         if metadata.is_file() {
             Ok(metadata.len())
         } else {
-            // Block device - use seek to end to get size
-            let mut f = file.try_clone()?;
-            Ok(f.seek(SeekFrom::End(0))?)
+            crate::system::block_device_size_of(file)
         }
     }
 

@@ -54,52 +54,67 @@ pub fn check_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Get the size of a block device in bytes
+/// Get the size in bytes of an already-open block device.
+///
+/// [F-R48]: this is the canonical way to size a block device, and it used to
+/// be dead -- `Device` sized everything with `seek(SeekFrom::End(0))` while
+/// this, the correct path, was reachable only from its own unit test. It is
+/// now what `Device` calls, so the `unsafe` block below sits on the execution
+/// path rather than beside it.
+///
+/// Takes an open file rather than a path so the caller's single `open()` is
+/// preserved: re-opening by path here would add a TOCTOU window ([F-R27]).
+///
+/// `seek` remains the fallback for anything `BLKGETSIZE64` refuses -- notably
+/// regular files, where the ioctl does not apply.
 #[cfg(target_os = "linux")]
-pub fn get_block_device_size(path: impl AsRef<Path>) -> Result<u64> {
-    use std::fs::File;
+pub fn block_device_size_of(file: &fs::File) -> Result<u64> {
     use std::os::unix::io::AsRawFd;
-
-    let path = path.as_ref();
-    let file = File::open(path).map_err(|source| Error::DeviceOpen {
-        path: path.display().to_string(),
-        source,
-    })?;
-    let fd = file.as_raw_fd();
-
-    // Use BLKGETSIZE64 ioctl
-    let mut size: u64 = 0;
 
     // BLKGETSIZE64 = 0x80081272
     // Cast to Ioctl type (i32 on musl, u64 on glibc)
     #[allow(overflowing_literals)]
     const BLKGETSIZE64: libc::Ioctl = 0x80081272u32 as libc::Ioctl;
 
-    let result = unsafe { libc::ioctl(fd, BLKGETSIZE64, &mut size) };
+    let mut size: u64 = 0;
+
+    // SAFETY: `fd` is borrowed from `file`, which outlives this call, so the
+    // descriptor is open and valid for the duration of the ioctl. BLKGETSIZE64
+    // is defined to write exactly one `u64` through its third argument, and
+    // `&mut size` is a unique, aligned, initialised pointer to exactly that.
+    // The kernel does not retain the pointer past the call. A non-block-device
+    // fd makes the call fail with -1, which is handled below, not UB.
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), BLKGETSIZE64, &mut size) };
 
     if result == -1 {
-        // Fall back to seek method
-        use std::io::{Seek, SeekFrom};
-        let mut file = file;
-        let size = file.seek(SeekFrom::End(0))?;
-        Ok(size)
+        seek_size(file)
     } else {
         Ok(size)
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn get_block_device_size(path: impl AsRef<Path>) -> Result<u64> {
-    use std::fs::File;
+pub fn block_device_size_of(file: &fs::File) -> Result<u64> {
+    seek_size(file)
+}
+
+/// Size of an open file by seeking to its end, on a private duplicate of the
+/// handle so the caller's file offset is left alone.
+fn seek_size(file: &fs::File) -> Result<u64> {
     use std::io::{Seek, SeekFrom};
 
+    let mut probe = file.try_clone()?;
+    Ok(probe.seek(SeekFrom::End(0))?)
+}
+
+/// Get the size of a block device in bytes, by path.
+pub fn get_block_device_size(path: impl AsRef<Path>) -> Result<u64> {
     let path = path.as_ref();
-    let mut file = File::open(path).map_err(|source| Error::DeviceOpen {
+    let file = fs::File::open(path).map_err(|source| Error::DeviceOpen {
         path: path.display().to_string(),
         source,
     })?;
-    let size = file.seek(SeekFrom::End(0))?;
-    Ok(size)
+    block_device_size_of(&file)
 }
 
 #[cfg(test)]
