@@ -561,7 +561,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** `Error::DeviceNotFound(String)` is replaced by `Error::DeviceOpen { path, #[source] source: std::io::Error }`, applied at all three construction sites (`device.rs` `open_impl`, and both the Linux and non-Linux halves of `system.rs::get_block_device_size`). The variant was renamed rather than merely extended because "not found" is *false* for EACCES, EBUSY and EROFS — appending the errno to a message that still says "not found" would have made the error more informative without making it correct. The `io::Error` is kept as a `#[source]` and deliberately **not** interpolated into the `Display` string: callers render the chain, so interpolating would print the errno twice; `to_string()` alone still names the path, which is what the device-level tests require. Keeping `source.kind()` reachable also means [F-R31] can map exit codes per errno class without a variant per errno. Confirmed end-to-end: a missing device now reports `Cannot open device 'X'` / `No such file or directory (os error 2)`, and a read-only image under `--force` reports `Permission denied (os error 13)` where it previously claimed the device was not found. This is a public API change (`DeviceNotFound` is gone). Verified: 76 unit + 8 error-contract + 5 fsinfo + 12 integration pass, `cargo fmt --check` and `clippy -D warnings` clean. No safety-net test needed editing.
 - **Status date:** 2026-07-28 18:40 UTC
-- **Status commit:** _(recorded in the following commit)_
+- **Status commit:** b7d449d
 
 ### [F-R30] Sector I/O errors carry neither path nor sector though `Device` holds both
 - **Category:** 20 (weak error handling strategy) / 34
