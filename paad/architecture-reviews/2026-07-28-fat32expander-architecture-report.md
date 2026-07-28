@@ -192,7 +192,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** `plan_relocation` now takes the boot sector as it will be committed (`new_boot`) and reads `new_boot.first_data_sector()` directly instead of deriving a shift from a rounded-up cluster count, so the plan cannot disagree with the geometry the filesystem ends up with. The ignored `_device`, `last_affected` and `_new_data_clusters` parameters were dropped. Regression covered by `plan_relocation_handles_growth_that_is_not_a_whole_cluster`, `execute_relocation_round_trips_with_unaligned_growth`, and the end-to-end `test_resize_with_unaligned_fat_growth_preserves_files` (256 MiB, `-s 4`, FAT 1020→1023 — the report's own reproduction). All three were confirmed to fail against the old rounding and pass against the fix.
 - **Status date:** 2026-07-28 00:00 UTC
-- **Status commit:** 4107955
+- **Status commit:** 960a851
 
 ### [F-R1] Resuming from phase `Started` re-runs a non-idempotent data shift over already-shifted data
 - **Category:** 19 (lack of idempotency)
