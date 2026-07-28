@@ -260,6 +260,39 @@ mod tests {
         assert!(calc.new_fat_size >= calc.old_fat_size);
     }
 
+    /// Pins the exact layout numbers a resize is planned from. `new_data_clusters`
+    /// and the affected-cluster range are consumed by the relocator, so a silent
+    /// change here moves user data.
+    #[test]
+    fn test_calculate_new_size_layout_values() {
+        // 512 B sectors, 8 sectors/cluster, 32 reserved, 2 FATs.
+        let boot = create_test_boot_sector(1_000_000, 1000);
+
+        let calc = calculate_new_size(&boot, 4_000_000).unwrap();
+
+        assert_eq!(calc.new_fat_size, 3903);
+        assert_eq!(calc.fat_growth_sectors, 2903);
+        assert_eq!(calc.new_data_clusters, 499_020);
+        assert!(calc.fat_needs_growth);
+        // 2 FATs x 2903 sectors = 5806 sectors of growth, spanning 726 clusters.
+        assert_eq!(calc.first_affected_cluster, 2);
+        assert_eq!(calc.last_affected_cluster, 727);
+    }
+
+    /// The calculator's data-cluster arithmetic must agree with the canonical
+    /// accessor on `BootSector` for the geometry it is planning against.
+    #[test]
+    fn test_new_data_clusters_agrees_with_boot_sector_accessor() {
+        let boot = create_test_boot_sector(1_000_000, 1000);
+        let calc = calculate_new_size(&boot, 4_000_000).unwrap();
+
+        let mut grown = boot.clone();
+        grown.set_total_sectors_32(calc.new_total_sectors);
+        grown.set_fat_size_32(calc.new_fat_size);
+
+        assert_eq!(calc.new_data_clusters, grown.data_clusters());
+    }
+
     #[test]
     fn test_calculate_new_size_no_shrink() {
         let boot = create_test_boot_sector(2_000_000, 2000);

@@ -845,6 +845,52 @@ impl std::fmt::Display for FSInfoReport {
 mod tests {
     use super::*;
 
+    /// Build a FAT32 boot sector with a standard geometry.
+    fn test_boot_sector(total_sectors: u32, fat_size: u32) -> BootSector {
+        let mut data = vec![0u8; 512];
+        data[0] = 0xEB;
+        data[1] = 0x58;
+        data[2] = 0x90;
+        data[11..13].copy_from_slice(&512u16.to_le_bytes());
+        data[13] = 8; // sectors per cluster
+        data[14..16].copy_from_slice(&32u16.to_le_bytes()); // reserved
+        data[16] = 2; // FATs
+        data[21] = 0xF8;
+        data[32..36].copy_from_slice(&total_sectors.to_le_bytes());
+        data[36..40].copy_from_slice(&fat_size.to_le_bytes());
+        data[44..48].copy_from_slice(&2u32.to_le_bytes());
+        data[48] = 0x01;
+        data[50] = 0x06;
+        data[510] = 0x55;
+        data[511] = 0xAA;
+        BootSector::from_bytes(&data).unwrap()
+    }
+
+    /// The executor's local data-cluster arithmetic must agree with the
+    /// canonical accessor on `BootSector`; the FSInfo free count is derived
+    /// from it.
+    #[test]
+    fn test_data_cluster_formula_agrees_with_boot_sector_accessor() {
+        for (total_sectors, fat_size) in [(1_000_000u32, 1000u32), (4_000_000, 3903), (65_536, 64)]
+        {
+            let boot = test_boot_sector(total_sectors, fat_size);
+
+            assert_eq!(
+                calculate_data_clusters_from_params(
+                    boot.total_sectors(),
+                    boot.reserved_sectors(),
+                    boot.num_fats(),
+                    boot.fat_size(),
+                    boot.sectors_per_cluster(),
+                ),
+                boot.data_clusters(),
+                "formulas diverge at total_sectors={} fat_size={}",
+                total_sectors,
+                fat_size
+            );
+        }
+    }
+
     #[test]
     fn test_resize_options() {
         let opts = ResizeOptions::new("/dev/sda1").dry_run(true).verbose(false);

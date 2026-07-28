@@ -124,6 +124,33 @@ fn test_resize_with_fat_growth() {
     assert!(check_filesystem(image.path()), "Filesystem check failed");
 }
 
+/// The FSInfo free count is extrapolated from the executor's own copy of the
+/// data-cluster formula. Pin the relationship it must hold to, since that copy
+/// has no unit-level seam.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn test_free_cluster_count_tracks_added_clusters() {
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 256);
+
+    let info_before = get_fs_info(image.path()).expect("Failed to get fs info");
+
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
+    resize_fat32(options).expect("Resize failed");
+
+    let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
+
+    let added_clusters = info_after.data_clusters - info_before.data_clusters;
+    assert!(added_clusters > 0, "resize should add clusters");
+    assert_eq!(
+        info_after.free_clusters,
+        info_before.free_clusters + added_clusters,
+        "free count must grow by exactly the number of clusters added"
+    );
+}
+
 #[test]
 #[ignore] // Requires mkfs.fat
 fn test_dry_run() {
