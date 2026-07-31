@@ -374,7 +374,7 @@ reproduced against crafted ones.
 - **Covered by:** `the_new_geometry_is_flushed_before_the_checkpoint_is_cleared`, confirmed red first — like [F-R17], the window between the FSInfo write and the checkpoint erase contained no operations at all.
 - **Safety-net integrity:** no safety-net test was edited. `the_commit_phase_writes_boot_backup_and_fsinfo_before_clearing_the_checkpoint`, which pins the commit-phase write order and the trailing flush, passed unchanged.
 - **Status date:** 2026-07-31 00:00 UTC
-- **Status commit:** (recorded in the following commit)
+- **Status commit:** 350bd8f
 
 ### [F-R19] The entire audit trail is discarded on the failure path
 - **Category:** 21 (no observability plan)
