@@ -79,6 +79,25 @@ jobs:
         echo "::endgroup::"
         exit $INTEGRATION_EXIT
 
+    - name: Run durability tests
+      run: |
+        echo "::group::Running durability tests"
+        # The device-journal feature is what makes sync barriers observable; the
+        # suite compiles to nothing without it, so it must be named explicitly
+        # or these tests silently stop existing.
+        cargo test --features device-journal --test durability_test -- --ignored 2>&1 \
+          | tee durability-test-results.txt
+        DURABILITY_EXIT=${PIPESTATUS[0]}
+
+        if grep -q "test result:" durability-test-results.txt; then
+          RESULTS=$(grep "test result:" durability-test-results.txt | tail -1)
+          echo "## Durability Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "$RESULTS" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        echo "::endgroup::"
+        exit $DURABILITY_EXIT
+
     - name: Run test script
       run: |
         echo "::group::Running test-resize.sh"

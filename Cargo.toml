@@ -12,6 +12,12 @@ default = []
 # Enable fault injection for crash recovery testing
 # Build with: cargo build --features fault-injection
 fault-injection = []
+# Record device writes and syncs so tests can assert durability ordering.
+# Test with: cargo test --features device-journal
+# [F-R17]/[F-R18]: a missing sync barrier is invisible to every other harness --
+# killing the process still lets the page cache flush everything -- so the order
+# in which the device is told to flush has to be observable to be testable.
+device-journal = []
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

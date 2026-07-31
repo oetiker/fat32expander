@@ -42,6 +42,16 @@ mod system;
 
 pub use device::Device;
 pub use error::{Error, Result};
+
+/// Device write/flush recording, for tests that assert durability ordering.
+///
+/// Only present under the `device-journal` feature, which no shipped build
+/// enables. It is exported because the ordering it exists to check is only
+/// visible from an integration test driving [`resize_fat32`] end to end, and
+/// integration test crates cannot see the library's `#[cfg(test)]` items.
+#[cfg(feature = "device-journal")]
+pub use device::journal;
+
 pub use fat32::{BootSector, FSInfo};
 pub use resize::{
     get_fs_info, resize_fat32, FSInfoReport, ResizeOptions, ResizeResult, SizeCalculation,

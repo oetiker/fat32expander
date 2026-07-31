@@ -1,0 +1,291 @@
+//! Safety net for the durability-barrier batch: [F-R17], [F-R18], [F-R26],
+//! [F-R56].
+//!
+//! These pin the order in which a resize mutates the device, and what it leaves
+//! behind. They exist because a missing sync barrier is invisible to every other
+//! harness in this project -- the QEMU crash harness kills the process, after
+//! which the page cache flushes everything regardless of what the code asked for
+//! -- so nothing else in the suite can tell a durable write sequence from a
+//! hopeful one.
+//!
+//! Requires the `device-journal` feature plus mkfs.fat and dosfsck:
+//!
+//! ```text
+//! cargo test --features device-journal --test durability_test -- --ignored
+//! ```
+
+#![cfg(feature = "device-journal")]
+
+use fat32expander::journal::{self, Op};
+use fat32expander::{get_fs_info, resize_fat32, Error, ResizeOptions};
+use std::path::Path;
+use std::process::Command;
+use tempfile::NamedTempFile;
+
+/// First bytes of a checkpoint record, per `resize::checkpoint`. Spelled out
+/// here rather than imported because the checkpoint type is crate-private by
+/// [F-R44]'s decision, and an external observer is exactly the right vantage
+/// point for "did anything survive on the device".
+const CHECKPOINT_MAGIC: &[u8; 8] = b"FAT32RSZ";
+
+fn create_fat32_image(size_mb: u32) -> NamedTempFile {
+    let file = NamedTempFile::new().expect("Failed to create temp file");
+    Command::new("truncate")
+        .arg("-s")
+        .arg(format!("{}M", size_mb))
+        .arg(file.path())
+        .status()
+        .expect("Failed to truncate file");
+    let status = Command::new("mkfs.fat")
+        .arg("-F")
+        .arg("32")
+        .arg(file.path())
+        .status()
+        .expect("Failed to run mkfs.fat");
+    assert!(status.success(), "mkfs.fat failed");
+    file
+}
+
+fn extend_image(path: &Path, new_size_mb: u32) {
+    Command::new("truncate")
+        .arg("-s")
+        .arg(format!("{}M", new_size_mb))
+        .arg(path)
+        .status()
+        .expect("Failed to extend file");
+}
+
+fn check_filesystem(path: &Path) -> bool {
+    Command::new("dosfsck")
+        .arg("-n")
+        .arg(path)
+        .output()
+        .expect("Failed to run dosfsck")
+        .status
+        .success()
+}
+
+fn read_sector(path: &Path, sector: u64, sector_size: u64) -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).expect("open image");
+    f.seek(SeekFrom::Start(sector * sector_size)).expect("seek");
+    let mut buf = vec![0u8; sector_size as usize];
+    f.read_exact(&mut buf).expect("read sector");
+    buf
+}
+
+/// Where the interesting sectors live, read off the filesystem after a resize.
+struct Layout {
+    sector_size: u64,
+    fs_info: u64,
+    backup: u64,
+    fat_start: u64,
+    fat_end: u64,
+    checkpoint: u64,
+}
+
+fn layout_of(path: &Path) -> Layout {
+    let info = get_fs_info(path).expect("read fs info");
+    let boot = info.boot();
+    let reserved = boot.reserved_sectors() as u64;
+    Layout {
+        sector_size: boot.bytes_per_sector() as u64,
+        fs_info: boot.fs_info_sector() as u64,
+        backup: boot.backup_boot_sector() as u64,
+        fat_start: reserved,
+        fat_end: reserved + boot.num_fats() as u64 * boot.fat_size_32() as u64,
+        checkpoint: info.device_sectors() - 1,
+    }
+}
+
+fn is_write_to(op: &Op, sector: u64) -> bool {
+    matches!(op, Op::Write { start, count } if *start <= sector && sector < start + count)
+}
+
+fn is_write_within(op: &Op, from: u64, to: u64) -> bool {
+    matches!(op, Op::Write { start, .. } if *start >= from && *start < to)
+}
+
+/// A resize large enough that the FAT tables must grow, which is the only path
+/// that writes checkpoints at all.
+fn growable_image() -> NamedTempFile {
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 512);
+    image
+}
+
+fn resize(path: &Path) {
+    let options = ResizeOptions::new(path).dry_run(false).verbose(false);
+    resize_fat32(options).expect("resize failed");
+}
+
+/// [F-R17]'s ground: the FAT extension must be fully written before the phase-2
+/// checkpoint records that it was, because recovery reads that checkpoint and
+/// skips the FAT work on the strength of it.
+///
+/// This asserts the *ordering*, which holds today. What does not hold today is
+/// that the FAT sectors are flushed before the checkpoint is -- that is the fix,
+/// and it may not disturb this sequence.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn a_fat_growth_resize_writes_the_fat_extension_before_the_phase_2_checkpoint() {
+    let image = growable_image();
+
+    journal::reset();
+    resize(image.path());
+    let ops = journal::recorded();
+
+    let l = layout_of(image.path());
+
+    // The commit phase opens with the boot-sector restore, and is the last time
+    // sector 0 is written, so it bounds the danger zone from above.
+    let commit_boot = ops
+        .iter()
+        .rposition(|op| is_write_to(op, 0))
+        .expect("the resize must write the boot sector");
+
+    let last_fat_write = ops[..commit_boot]
+        .iter()
+        .rposition(|op| is_write_within(op, l.fat_start, l.fat_end))
+        .expect("a FAT-growth resize must write into the FAT region");
+
+    // Searching only the window after the last FAT write is what makes this an
+    // ordering assertion: a checkpoint written before the FAT extension was
+    // finished would leave this window empty.
+    ops[last_fat_write + 1..commit_boot]
+        .iter()
+        .position(|op| is_write_to(op, l.checkpoint))
+        .expect(
+            "the phase-2 checkpoint must be written after the FAT extension \
+             and before the commit phase",
+        );
+
+    assert!(
+        check_filesystem(image.path()),
+        "dosfsck rejected the result"
+    );
+}
+
+/// [F-R18]'s ground: the commit phase publishes the new geometry and then erases
+/// the checkpoint. That order must hold -- erasing first would leave a device
+/// with an invalidated signature and no recovery record, which the tool's own
+/// `check_for_incomplete_resize` treats as unrecoverable.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn the_commit_phase_writes_boot_backup_and_fsinfo_before_clearing_the_checkpoint() {
+    let image = growable_image();
+
+    journal::reset();
+    resize(image.path());
+    let ops = journal::recorded();
+
+    let l = layout_of(image.path());
+
+    let commit_boot = ops
+        .iter()
+        .rposition(|op| is_write_to(op, 0))
+        .expect("the resize must write the boot sector");
+
+    let tail = &ops[commit_boot..];
+    let backup = tail
+        .iter()
+        .position(|op| is_write_to(op, l.backup))
+        .expect("the commit phase must write the backup boot sector");
+    let fsinfo = tail
+        .iter()
+        .position(|op| is_write_to(op, l.fs_info))
+        .expect("the commit phase must write FSInfo");
+    let clear = tail
+        .iter()
+        .rposition(|op| is_write_to(op, l.checkpoint))
+        .expect("the commit phase must clear the checkpoint");
+
+    assert!(
+        backup < clear,
+        "backup boot sector must be written before the checkpoint is cleared"
+    );
+    assert!(
+        fsinfo < clear,
+        "FSInfo must be written before the checkpoint is cleared"
+    );
+    assert_eq!(
+        ops.last(),
+        Some(&Op::Sync),
+        "a resize must end with a flush, so nothing it published is left in cache"
+    );
+}
+
+/// [F-R26] and [F-R56] both move what the last sector holds. Whatever they
+/// change, a completed resize may never leave a record that a later run would
+/// read as an interrupted one.
+#[test]
+#[ignore] // Requires mkfs.fat and dosfsck
+fn no_valid_checkpoint_survives_a_fat_growth_resize() {
+    let image = growable_image();
+    resize(image.path());
+
+    let l = layout_of(image.path());
+    let last = read_sector(image.path(), l.checkpoint, l.sector_size);
+
+    assert_ne!(
+        &last[..8],
+        &CHECKPOINT_MAGIC[..],
+        "a completed resize must not leave a checkpoint record behind"
+    );
+    assert!(
+        check_filesystem(image.path()),
+        "dosfsck rejected the result"
+    );
+}
+
+/// The same invariant on the path that writes no checkpoint at all today. This
+/// is the path [F-R26] brings under checkpoint protection and [F-R56] stops
+/// blindly zeroing, so it is the one most likely to end up holding a stale
+/// record by accident.
+#[test]
+#[ignore] // Requires mkfs.fat and dosfsck
+fn no_valid_checkpoint_survives_a_resize_without_fat_growth() {
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 150);
+    resize(image.path());
+
+    let l = layout_of(image.path());
+    let last = read_sector(image.path(), l.checkpoint, l.sector_size);
+
+    assert_ne!(
+        &last[..8],
+        &CHECKPOINT_MAGIC[..],
+        "a completed no-growth resize must not leave a checkpoint record behind"
+    );
+    assert!(
+        check_filesystem(image.path()),
+        "dosfsck rejected the result"
+    );
+}
+
+/// A resize that grows the FAT still has to survive being run again. The second
+/// run must report "already at maximum size" -- the library's way of saying
+/// there is nothing to do -- rather than discovering a checkpoint the first run
+/// failed to erase and trying to recover from it.
+///
+/// The distinction is the whole point: both outcomes are `Err`, but only one of
+/// them means the device was left in a state a later run misreads.
+#[test]
+#[ignore] // Requires mkfs.fat and dosfsck
+fn a_second_resize_after_a_completed_one_finds_nothing_to_recover() {
+    let image = growable_image();
+    resize(image.path());
+
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
+    match resize_fat32(options) {
+        Err(Error::AlreadyMaxSize) => {}
+        other => panic!("second resize must report AlreadyMaxSize, got {:?}", other),
+    }
+
+    assert!(
+        check_filesystem(image.path()),
+        "dosfsck rejected the result"
+    );
+}

@@ -21,6 +21,49 @@ impl std::fmt::Debug for Device {
     }
 }
 
+/// Records device mutations so a test can assert durability ordering.
+///
+/// A missing sync barrier ([F-R17], [F-R18]) cannot be observed any other way:
+/// `sync()` returns nothing, and the QEMU crash harness kills the process, after
+/// which the page cache flushes everything regardless of what the code asked
+/// for. Recording the sequence of writes and flushes makes the barrier itself
+/// the thing under test.
+///
+/// The journal is thread-local, so tests recording concurrently do not see each
+/// other's operations; `resize_fat32` is synchronous and runs entirely on its
+/// caller's thread.
+#[cfg(feature = "device-journal")]
+pub mod journal {
+    use std::cell::RefCell;
+
+    /// One recorded device mutation.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Op {
+        /// A write covering `count` sectors starting at `start`.
+        Write { start: u64, count: u64 },
+        /// A durability barrier -- everything written before this is on disk.
+        Sync,
+    }
+
+    thread_local! {
+        static JOURNAL: RefCell<Vec<Op>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(op: Op) {
+        JOURNAL.with(|j| j.borrow_mut().push(op));
+    }
+
+    /// Begin recording, discarding anything this thread recorded earlier.
+    pub fn reset() {
+        JOURNAL.with(|j| j.borrow_mut().clear());
+    }
+
+    /// Everything this thread has recorded since the last [`reset`].
+    pub fn recorded() -> Vec<Op> {
+        JOURNAL.with(|j| j.borrow().clone())
+    }
+}
+
 /// How many leading bytes are handed to a sector-size probe.
 ///
 /// Enough to cover the largest sector size FAT32 permits, so a probe can read
@@ -213,6 +256,13 @@ impl Device {
         self.file
             .write_all_at(data, offset)
             .map_err(|e| self.io_err("write", offset, data.len(), e))?;
+
+        #[cfg(feature = "device-journal")]
+        journal::record(journal::Op::Write {
+            start: start_sector,
+            count: sectors,
+        });
+
         Ok(())
     }
 
@@ -234,6 +284,10 @@ impl Device {
             path: self.path.display().to_string(),
             source,
         })?;
+
+        #[cfg(feature = "device-journal")]
+        journal::record(journal::Op::Sync);
+
         Ok(())
     }
 
