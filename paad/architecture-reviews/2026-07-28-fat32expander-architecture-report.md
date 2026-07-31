@@ -434,7 +434,7 @@ reproduced against crafted ones.
 - **Coverage caveat:** the QEMU crash-recovery suite (`scripts/qemu/test-crash-recovery.sh`), which exercises recovery from all six fault-injection points and is the only end-to-end test of the crash protocol this change alters, was **not run** for this fix — offered and declined in favour of speed. The Rust suite, the 15 integration tests and `scripts/test-resize.sh` all pass. Anyone revisiting this should run the QEMU suite before trusting the reorder under real crash conditions.
 - **Safety-net edit (developer-approved at the red-flag stop):** `the_commit_phase_writes_boot_backup_and_fsinfo_before_clearing_the_checkpoint` computed its indices in a window opening at the primary boot-sector write, which encoded "primary first" — the exact ordering this fix inverts. The window now spans the whole journal; all three assertions (`backup < clear`, `fsinfo < clear`, journal ends with `Sync`) are byte-identical and still hold. The incidental "primary first" pin is gone because it contradicts the fix; the new test above pins the inverted order explicitly.
 - **Status date:** 2026-07-31 00:00 UTC
-- **Status commit:** (recorded in the following commit)
+- **Status commit:** 817831d
 
 ### [F-R27] Mount guard is TOCTOU-race-prone, opens without `O_EXCL`, and misses loop-mounted images
 - **Category:** 30 (security as an afterthought)
