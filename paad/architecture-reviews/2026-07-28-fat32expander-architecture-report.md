@@ -368,6 +368,13 @@ reproduced against crafted ones.
 - **Evidence:** `src/resize/executor.rs:582` `write_boot_sector`, `:586` `write_backup_boot_sector`, `:605` `write_fsinfo`, `:609` `clear_checkpoint` (which, unlike `write_checkpoint` at `:204-210`, contains no `sync()` — see `:225-230`), then the only flush at `:613` `device.sync()?;`. Dead end at `:249` `None => Err(Error::InvalidatedFilesystem),`.
 - **Found by:** Integration & Data
 - **Qualifies:** [S-C].
+- **Status:** Fixed
+- **Status reason:** A `device.sync()?` now sits between `write_fsinfo` and `clear_checkpoint`, so the restored boot sector, the backup boot sector and FSInfo are all durable before the record that protects them is retired. The trailing `device.sync()` at the end of the commit phase is kept: it flushes the erase itself, which the new barrier does not cover. The audit trail gains a "Flushed new geometry" entry for the same reason as [F-R17]'s — a barrier that leaves no record cannot be distinguished from a missing one after the fact.
+- **On the asymmetry with [F-R17]:** this barrier is placed before the *erase*, not before each write, because the ordering that matters is one-to-many: boot, backup and FSInfo may reach the platter in any order relative to each other without harm, but none may follow the erase. A single flush before `clear_checkpoint` expresses exactly that and costs one extra sync per resize.
+- **Covered by:** `the_new_geometry_is_flushed_before_the_checkpoint_is_cleared`, confirmed red first — like [F-R17], the window between the FSInfo write and the checkpoint erase contained no operations at all.
+- **Safety-net integrity:** no safety-net test was edited. `the_commit_phase_writes_boot_backup_and_fsinfo_before_clearing_the_checkpoint`, which pins the commit-phase write order and the trailing flush, passed unchanged.
+- **Status date:** 2026-07-31 00:00 UTC
+- **Status commit:** (recorded in the following commit)
 
 ### [F-R19] The entire audit trail is discarded on the failure path
 - **Category:** 21 (no observability plan)

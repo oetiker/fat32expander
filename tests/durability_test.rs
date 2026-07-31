@@ -256,6 +256,41 @@ fn the_commit_phase_writes_boot_backup_and_fsinfo_before_clearing_the_checkpoint
     );
 }
 
+/// [F-R18]: clearing the checkpoint retires the only record that can recover
+/// this filesystem, so everything it was protecting must be durable first.
+/// Unsynced, the erase may reach the platter before the restored boot sector,
+/// and a power loss there leaves an invalidated signature with no checkpoint --
+/// the one combination `check_for_incomplete_resize` reports as
+/// `InvalidatedFilesystem` and refuses to touch.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn the_new_geometry_is_flushed_before_the_checkpoint_is_cleared() {
+    let image = growable_image();
+
+    journal::reset();
+    resize(image.path());
+    let ops = journal::recorded();
+
+    let l = layout_of(image.path());
+
+    let clear = ops
+        .iter()
+        .rposition(|op| is_write_to(op, l.checkpoint))
+        .expect("the commit phase must clear the checkpoint");
+
+    let fsinfo = ops[..clear]
+        .iter()
+        .rposition(|op| is_write_to(op, l.fs_info))
+        .expect("the commit phase must write FSInfo before clearing");
+
+    assert!(
+        ops[fsinfo + 1..clear].contains(&Op::Sync),
+        "the restored boot sector, backup and FSInfo must be flushed before the \
+         checkpoint protecting them is erased; ops between them were {:?}",
+        &ops[fsinfo + 1..clear]
+    );
+}
+
 /// [F-R26] and [F-R56] both move what the last sector holds. Whatever they
 /// change, a completed resize may never leave a record that a later run would
 /// read as an interrupted one.

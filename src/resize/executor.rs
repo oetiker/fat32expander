@@ -359,6 +359,16 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         write_fsinfo(&device, &fsinfo, fsinfo_sector)?;
         operations.push(format!("Updated FSInfo (free clusters: {})", new_free));
 
+        // [F-R18]: clearing the checkpoint retires the only record that can
+        // recover this filesystem, so everything it protects must be durable
+        // first. Unsynced, the erase may reach the platter before the restored
+        // boot sector, and a power loss there leaves an invalidated signature
+        // with no checkpoint -- the one combination
+        // `check_for_incomplete_resize` reports as `InvalidatedFilesystem` and
+        // refuses to touch.
+        device.sync()?;
+        operations.push("Flushed new geometry".to_string());
+
         // Clear checkpoint
         clear_checkpoint(&device)?;
         operations.push("Cleared checkpoint".to_string());
