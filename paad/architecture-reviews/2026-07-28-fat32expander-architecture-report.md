@@ -354,6 +354,12 @@ reproduced against crafted ones.
 - **Evidence:** The crate has exactly four `sync()` call sites — `relocator.rs:166`, `executor.rs:208` (inside `write_checkpoint`), `:537`, `:613`. Neither `init_new_fat_sectors` (`:659-678`) nor `sync_fat_copies` (`:682-705`) contains one; contrast `:536-537` `write_boot_sector(&device, &boot)?; device.sync()?;`. Recovery skips at `:565-567` `operations.push("Skipping FAT operations (already done)".to_string());`.
 - **Found by:** Integration & Data
 - **Qualifies:** [S-C].
+- **Status:** Fixed
+- **Status reason:** A `device.sync()?` now sits between `sync_fat_copies` and the phase-2 `write_checkpoint`, so the FAT extension is on the platter before the record claiming it is durable. One barrier covers both FAT helpers rather than one each: nothing reads the device between `init_new_fat_sectors` and `sync_fat_copies`, so a second flush would buy no guarantee. The audit trail gains a matching "Flushed FAT writes" entry, since a barrier that leaves no record is indistinguishable from a missing one in a post-mortem.
+- **Note on why this needed new test infrastructure:** the flaw was untestable by every harness the project had. `sync()` returns nothing, and the QEMU crash harness kills the process — after which the page cache flushes everything regardless of what the code asked for, so it cannot reproduce the reordering this is about. A `device-journal` cargo feature (off by default, mirroring `fault-injection`) makes `Device` record each sector write and each sync into a thread-local journal, which is what turns the barrier into an assertable fact. Covered by `the_fat_extension_is_flushed_before_the_phase_2_checkpoint`, which was confirmed red first — the window between the last FAT write and the checkpoint write contained *no operations at all*.
+- **Safety-net integrity:** no safety-net test was edited. `a_fat_growth_resize_writes_the_fat_extension_before_the_phase_2_checkpoint`, which pins the write *ordering* the fix must not disturb, passed unchanged.
+- **Status date:** 2026-07-31 00:00 UTC
+- **Status commit:** 1f547b3
 
 ### [F-R18] Commit phase has no barrier between restoring the boot sector and clearing the checkpoint
 - **Category:** 26 (poor transactional boundaries)

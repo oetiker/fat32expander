@@ -166,6 +166,47 @@ fn a_fat_growth_resize_writes_the_fat_extension_before_the_phase_2_checkpoint() 
     );
 }
 
+/// [F-R17]: ordering the writes is not enough. The phase-2 checkpoint is a
+/// promise that the FAT extension is on disk, and recovery skips the FAT work on
+/// the strength of it. Without a barrier the device is free to commit the
+/// checkpoint first, and a power loss there leaves a filesystem whose recovery
+/// refuses to redo work that never landed.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn the_fat_extension_is_flushed_before_the_phase_2_checkpoint() {
+    let image = growable_image();
+
+    journal::reset();
+    resize(image.path());
+    let ops = journal::recorded();
+
+    let l = layout_of(image.path());
+
+    let commit_boot = ops
+        .iter()
+        .rposition(|op| is_write_to(op, 0))
+        .expect("the resize must write the boot sector");
+
+    let last_fat_write = ops[..commit_boot]
+        .iter()
+        .rposition(|op| is_write_within(op, l.fat_start, l.fat_end))
+        .expect("a FAT-growth resize must write into the FAT region");
+
+    let phase2_checkpoint = last_fat_write
+        + 1
+        + ops[last_fat_write + 1..commit_boot]
+            .iter()
+            .position(|op| is_write_to(op, l.checkpoint))
+            .expect("the phase-2 checkpoint must follow the FAT extension");
+
+    assert!(
+        ops[last_fat_write + 1..phase2_checkpoint].contains(&Op::Sync),
+        "the FAT extension must be flushed before the checkpoint that claims \
+         it is durable; ops between them were {:?}",
+        &ops[last_fat_write + 1..phase2_checkpoint]
+    );
+}
+
 /// [F-R18]'s ground: the commit phase publishes the new geometry and then erases
 /// the checkpoint. That order must hold -- erasing first would leave a device
 /// with an invalidated signature and no recovery record, which the tool's own

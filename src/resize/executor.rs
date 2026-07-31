@@ -288,6 +288,17 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
                     sync_fat_copies(&device, &boot, &calculation)?;
                     operations.push("Synced FAT copies".to_string());
 
+                    // [F-R17]: the checkpoint written below is a promise that
+                    // the FAT extension is on disk -- a resume reads it and
+                    // skips the FAT work entirely. Without this barrier both
+                    // land in one flush window, so the device may commit the
+                    // checkpoint first; a power loss there leaves recovery
+                    // refusing to redo work that never reached the platter.
+                    // Nothing reads the device between the two helpers above,
+                    // so one barrier covering both is sufficient.
+                    device.sync()?;
+                    operations.push("Flushed FAT writes".to_string());
+
                     maybe_crash_at("after_fat_write");
 
                     // Update checkpoint to phase 2
