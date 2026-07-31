@@ -359,7 +359,7 @@ reproduced against crafted ones.
 - **Note on why this needed new test infrastructure:** the flaw was untestable by every harness the project had. `sync()` returns nothing, and the QEMU crash harness kills the process — after which the page cache flushes everything regardless of what the code asked for, so it cannot reproduce the reordering this is about. A `device-journal` cargo feature (off by default, mirroring `fault-injection`) makes `Device` record each sector write and each sync into a thread-local journal, which is what turns the barrier into an assertable fact. Covered by `the_fat_extension_is_flushed_before_the_phase_2_checkpoint`, which was confirmed red first — the window between the last FAT write and the checkpoint write contained *no operations at all*.
 - **Safety-net integrity:** no safety-net test was edited. `a_fat_growth_resize_writes_the_fat_extension_before_the_phase_2_checkpoint`, which pins the write *ordering* the fix must not disturb, passed unchanged.
 - **Status date:** 2026-07-31 00:00 UTC
-- **Status commit:** 1f547b3
+- **Status commit:** e19a9fb
 
 ### [F-R18] Commit phase has no barrier between restoring the boot sector and clearing the checkpoint
 - **Category:** 26 (poor transactional boundaries)
