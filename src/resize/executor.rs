@@ -330,10 +330,21 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         boot = boot.with_geometry(calculation.new_total_sectors, calculation.new_fat_size);
         boot.restore_signature(); // Restore 0xAA55 signature
 
-        write_boot_sector(&device, &boot)?;
-        operations.push("Updated boot sector (signature restored)".to_string());
-
-        // Update backup boot sector
+        // [F-R26]: the primary boot sector is written LAST, and is the single
+        // commit point for the whole resize. Everything the new geometry
+        // depends on -- the backup boot sector and FSInfo -- is published and
+        // flushed first, while the primary still describes the old layout (or,
+        // on the FAT-growth path, carries an invalidated signature and a live
+        // checkpoint). A crash anywhere before the primary lands therefore
+        // leaves a filesystem that still reads as its old self, which is
+        // recoverable; a crash after it lands leaves one whose supporting
+        // structures are already correct.
+        //
+        // The previous order wrote the primary first, which opened a window
+        // where a valid new-geometry primary sat against a stale old-geometry
+        // backup. That combination is reported as `Error::BackupMismatch` and
+        // refused -- and `--force`, the documented escape, is not plumbed into
+        // the library at all ([F-R4]), so the window was a dead end.
         write_backup_boot_sector(&device, &boot, backup_sector)?;
         operations.push("Updated backup boot sector".to_string());
 
@@ -358,6 +369,14 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         fsinfo.set_free_count(new_free);
         write_fsinfo(&device, &fsinfo, fsinfo_sector)?;
         operations.push(format!("Updated FSInfo (free clusters: {})", new_free));
+
+        // [F-R26]: the supporting structures must be durable before the commit
+        // point publishes a geometry that assumes them.
+        device.sync()?;
+        operations.push("Flushed supporting structures".to_string());
+
+        write_boot_sector(&device, &boot)?;
+        operations.push("Updated boot sector (signature restored)".to_string());
 
         // [F-R18]: clearing the checkpoint retires the only record that can
         // recover this filesystem, so everything it protects must be durable

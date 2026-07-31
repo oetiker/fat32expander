@@ -222,21 +222,19 @@ fn the_commit_phase_writes_boot_backup_and_fsinfo_before_clearing_the_checkpoint
 
     let l = layout_of(image.path());
 
-    let commit_boot = ops
+    // Indices are taken over the whole journal rather than a window opening at
+    // the primary boot-sector write. [F-R26] made that write the *last* step of
+    // the commit phase instead of the first, so slicing there would exclude the
+    // very writes this test is about. The assertions below are unchanged.
+    let backup = ops
         .iter()
-        .rposition(|op| is_write_to(op, 0))
-        .expect("the resize must write the boot sector");
-
-    let tail = &ops[commit_boot..];
-    let backup = tail
-        .iter()
-        .position(|op| is_write_to(op, l.backup))
+        .rposition(|op| is_write_to(op, l.backup))
         .expect("the commit phase must write the backup boot sector");
-    let fsinfo = tail
+    let fsinfo = ops
         .iter()
-        .position(|op| is_write_to(op, l.fs_info))
+        .rposition(|op| is_write_to(op, l.fs_info))
         .expect("the commit phase must write FSInfo");
-    let clear = tail
+    let clear = ops
         .iter()
         .rposition(|op| is_write_to(op, l.checkpoint))
         .expect("the commit phase must clear the checkpoint");
@@ -288,6 +286,45 @@ fn the_new_geometry_is_flushed_before_the_checkpoint_is_cleared() {
         "the restored boot sector, backup and FSInfo must be flushed before the \
          checkpoint protecting them is erased; ops between them were {:?}",
         &ops[fsinfo + 1..clear]
+    );
+}
+
+/// [F-R26]: the primary boot sector is the single commit point for the resize,
+/// so everything the new geometry depends on must be durable before it lands.
+/// Writing the primary first opened a window where a valid new-geometry primary
+/// sat against a stale old-geometry backup -- reported as `BackupMismatch` and
+/// refused, with `--force` not plumbed into the library ([F-R4]) to escape it.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn the_backup_and_fsinfo_are_durable_before_the_primary_boot_sector_commits() {
+    let image = growable_image();
+
+    journal::reset();
+    resize(image.path());
+    let ops = journal::recorded();
+
+    let l = layout_of(image.path());
+
+    let commit = ops
+        .iter()
+        .rposition(|op| is_write_to(op, 0))
+        .expect("the resize must write the primary boot sector");
+
+    let backup = ops[..commit]
+        .iter()
+        .rposition(|op| is_write_to(op, l.backup))
+        .expect("the backup boot sector must be written before the commit point");
+    let fsinfo = ops[..commit]
+        .iter()
+        .rposition(|op| is_write_to(op, l.fs_info))
+        .expect("FSInfo must be written before the commit point");
+
+    let last_support = backup.max(fsinfo);
+    assert!(
+        ops[last_support + 1..commit].contains(&Op::Sync),
+        "backup and FSInfo must be flushed before the primary boot sector \
+         publishes a geometry that assumes them; ops between them were {:?}",
+        &ops[last_support + 1..commit]
     );
 }
 
