@@ -271,7 +271,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** The two steps now sweep with `cargo test --all-targets` and `cargo test --all-targets -- --ignored` instead of naming targets, so a new `tests/*.rs` file is covered the day it is written. The durability step keeps its explicit `--features device-journal --test durability_test` invocation, which a sweep cannot replace: without the feature that suite compiles to zero tests and a plain `--all-targets` run reports `ok` while asserting nothing. The suggested fix warned this might surface previously-unrun failures — it did not: all six binaries were already green locally (126 default + 16 ignored, 0 failures), verified before the workflow was touched. New `tests/ci_workflow_test.rs` fails the build if CI ever regresses to named targets, and separately if the durability invocation loses its feature flag.
 - **Status date:** 2026-08-02 08:20 UTC
-- **Status commit:** dbc3d18
+- **Status commit:** 155f7b6
 
 ### [F-R10] Relocation sector math is untested; the unit tests only assert on hand-built structs
 - **Category:** 32 (missing test coverage for critical paths)
