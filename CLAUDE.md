@@ -70,13 +70,17 @@ After:   [Reserved][FAT1 (bigger)][FAT2 (bigger)][Cluster2'][Cluster3']...
 
 This is implemented in `src/resize/relocator.rs:execute_relocation()`.
 
-### Directory Entry Updates
+### Cluster Numbers Are Preserved — No Directory Entry Updates
 
-FAT32 directory entries contain cluster pointers at:
-- Bytes 20-21: High 16 bits of starting cluster
-- Bytes 26-27: Low 16 bits of starting cluster
+**Relocation moves physical sectors and nothing else.** Cluster *N* is still cluster *N* after the resize; only the sector it lives at changes, because `first_data_sector` moved forward. Everything that names a cluster by number therefore stays correct on its own:
 
-When clusters are relocated, ALL directory entries pointing to moved clusters must be updated. This includes entries in subdirectories (which are themselves stored in clusters).
+- FAT chains are not rewritten — every entry still points at the same cluster number.
+- Directory entries are not rewritten — their cluster pointers (bytes 20-21 high, 26-27 low) still name the right cluster.
+- `root_cluster` in the boot sector is not rewritten — the root directory stays cluster 2, at a new physical location.
+
+See `src/resize/relocator.rs` (`/// Since cluster numbers don't change, no FAT chain or directory entry updates are needed!`) and `TECHGUIDE.md`.
+
+> **Historical note.** An earlier design *did* renumber clusters, which required walking every directory tree and rewriting each entry that pointed at a moved cluster. That approach was abandoned in favour of the sector shift above. If you find code or docs implying directory entries must be updated, it is residue from that design, not a requirement — `BootSector::set_root_cluster` survives with zero call sites for the same reason. This section itself described the abandoned design until [F-R60].
 
 ## Common Pitfalls
 
@@ -84,7 +88,7 @@ When clusters are relocated, ALL directory entries pointing to moved clusters mu
 
 2. **FAT table sync**: Both FAT1 and FAT2 must be updated identically.
 
-3. **Root cluster**: The root directory is a cluster chain starting at `boot.root_cluster()`. If cluster 2 is relocated, the boot sector's root cluster field must be updated.
+3. **Root cluster**: The root directory is a cluster chain starting at `boot.root_cluster()`. Relocating cluster 2 does **not** change that field — the root stays cluster 2 and only moves physically. Writing `set_root_cluster` during a resize is a bug, not a fix; `root_cluster_survives_a_relocating_resize` in `tests/integration_test.rs` guards this.
 
 4. **FSInfo free count**: Must be updated to reflect new available clusters.
 

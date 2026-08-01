@@ -637,6 +637,10 @@ reproduced against crafted ones.
 - **Evidence:** CLAUDE.md "Directory Entry Updates": *"When clusters are relocated, ALL directory entries pointing to moved clusters must be updated."*; "Common Pitfalls" §3: *"If cluster 2 is relocated, the boot sector's root cluster field must be updated."* Against `src/resize/relocator.rs:122` `/// Since cluster numbers don't change, no FAT chain or directory entry updates are needed!` and `:169` `// The root cluster stays at cluster 2 (just at a different physical location)`. `BootSector::set_root_cluster` (`structs.rs:276`) has zero call sites. `TECHGUIDE.md:162` matches the code.
 - **Found by:** Structure & Boundaries, Coupling & Dependencies
 - **Note:** CLAUDE.md's "Critical insight" paragraph (old vs. new `first_data_sector`) *does* match the code — only the two sections above contradict it.
+- **Status:** Fixed
+- **Status reason:** Both stale sections rewritten to the design the code implements. "Directory Entry Updates" became "Cluster Numbers Are Preserved — No Directory Entry Updates", stating that relocation moves physical sectors only and that FAT chains, directory entries and `root_cluster` therefore need no rewriting, with a historical note explaining that the renumbering design was abandoned and that `set_root_cluster`'s zero call sites are residue from it. Pitfall §3 was inverted to say that rewriting `root_cluster` during a resize is a bug, and now points at the safety-net test that guards it. The "Critical insight" paragraph was already correct and is untouched. CLAUDE.md and TECHGUIDE.md now agree. Documentation only; no code changed.
+- **Status date:** 2026-08-02 08:45 UTC
+- **Status commit:** _(recorded at the end of the session)_
 
 ### [F-R32] `--dry-run` skips crash detection, so the preview is not the plan that will run
 - **Category:** 12 (hidden side effects) / 24
