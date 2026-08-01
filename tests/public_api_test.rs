@@ -293,3 +293,46 @@ fn the_crate_root_exposes_the_system_helpers() {
     // runs the suite.
     let _: bool = check_root();
 }
+
+/// An image whose backup boot sector disagrees with the primary.
+fn fixture_image_with_mismatched_backup() -> NamedTempFile {
+    let file = fixture_image();
+    let mut data = std::fs::read(file.path()).expect("read image");
+
+    let backup_total_sectors_at = BACKUP_BOOT_SECTOR as usize * 512 + 32;
+    data[backup_total_sectors_at..backup_total_sectors_at + 4]
+        .copy_from_slice(&(TOTAL_SECTORS / 2).to_le_bytes());
+
+    std::fs::write(file.path(), &data).expect("write image");
+    file
+}
+
+/// `resize_fat32` must refuse a mismatched backup boot sector by default.
+///
+/// [F-R4] plumbs an override for this through `ResizeOptions`, because today
+/// the CLI promises `--force` will get past it and the library refuses anyway.
+/// This pins the half that must survive that change: the refusal is the
+/// default, and reaching past it has to be an explicit act by the caller.
+///
+/// This is the library-level statement of the contract, deliberately free of
+/// any flag name -- there is no flag here today, so the assertion cannot drift
+/// as the CLI spelling changes.
+#[test]
+fn the_resize_api_refuses_a_mismatched_backup_by_default() {
+    let image = fixture_image_with_mismatched_backup();
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let err = resize_fat32(ResizeOptions::new(image.path()))
+        .expect_err("a backup mismatch must not resize by default");
+
+    assert!(
+        matches!(err, Error::BackupMismatch),
+        "the refusal must be reported as a backup mismatch, got: {err:?}"
+    );
+
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resize must not modify the image by a single byte"
+    );
+}

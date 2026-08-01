@@ -116,6 +116,141 @@ fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// A growable image whose backup boot sector disagrees with the primary.
+///
+/// Sector 6 is a byte-for-byte copy of the primary in `valid_image`; changing
+/// the total-sector count there is enough for `boot_sectors_match` to reject
+/// the pair, and leaves everything else about the image healthy so the run
+/// reaches the mismatch check rather than failing validation first.
+fn image_with_mismatched_backup(file_mb: u64, fs_mb: u64) -> NamedTempFile {
+    let file = valid_image(file_mb, fs_mb);
+    let mut data = std::fs::read(file.path()).expect("read image");
+
+    let backup_total_sectors_at = 6 * 512 + 32;
+    let divergent: u32 = (fs_mb * 1024 * 1024 / 512) as u32 / 2;
+    data[backup_total_sectors_at..backup_total_sectors_at + 4]
+        .copy_from_slice(&divergent.to_le_bytes());
+
+    std::fs::write(file.path(), &data).expect("write image");
+    file
+}
+
+/// A backup boot sector that disagrees with the primary must stop the resize,
+/// and must say what stopped it.
+///
+/// [F-R4]/[F-R46]: `--force` is about to stop being a general-purpose bypass.
+/// What must not change is that a mismatch is refused *unless the user opts in
+/// specifically* -- an override that ends up defaulting to on would trade a
+/// false promise for silent data loss, since forcing rewrites the backup from
+/// a primary that the mismatch says might itself be the corrupt copy.
+///
+/// The assertions here are the contract; only the argv `run_resize` builds may
+/// change as the flag is renamed.
+#[test]
+fn a_backup_mismatch_is_refused_and_says_so() {
+    let image = image_with_mismatched_backup(96, 64);
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert!(
+        !output.status.success(),
+        "a backup mismatch must not be resized through by default.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.to_lowercase().contains("backup"),
+        "the refusal must name the backup boot sector as the reason.\noutput:\n{combined}"
+    );
+
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resize must not modify the image by a single byte"
+    );
+}
+
+/// A device the caller cannot write must fail with a message that names it.
+///
+/// [F-R46] removes the `geteuid() == 0` gate in favour of letting the open
+/// fail, on the grounds that the kernel is the authority on write access. That
+/// only holds if the resulting diagnostic is still usable: the failure has to
+/// name the device, or a script driving several devices cannot tell which one
+/// refused.
+#[test]
+fn an_unwritable_device_fails_and_names_the_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Permission bits do not apply to root, so under root this asserts
+    // nothing. Skip loudly rather than pass hollowly.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: running as root, permission bits do not apply");
+        return;
+    }
+
+    let image = valid_image(96, 64);
+    std::fs::set_permissions(image.path(), std::fs::Permissions::from_mode(0o444))
+        .expect("set read-only");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let path = image.path().display().to_string();
+
+    assert!(
+        !output.status.success(),
+        "a device that cannot be written must not report success.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains(&path),
+        "the failure must name the device {path} it refers to.\noutput:\n{combined}"
+    );
+
+    // Let the tempfile clean itself up.
+    let _ = std::fs::set_permissions(image.path(), std::fs::Permissions::from_mode(0o644));
+}
+
+/// The success path through the binary: a growable filesystem must actually be
+/// resized, and report it.
+///
+/// Nothing else covers this. `integration_test.rs` drives the library directly
+/// and never observes an exit code, and every other test in this file asserts a
+/// failure, a no-op, or a dry run -- so removing the privilege gate could break
+/// the one path users actually run and the suite would stay green.
+#[test]
+fn a_cli_resize_of_a_growable_filesystem_succeeds_and_grows_it() {
+    let image = valid_image(96, 64);
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr_of(&output)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "resizing a growable filesystem must exit 0.\noutput:\n{combined}"
+    );
+
+    // The filesystem must now claim the whole 96 MB file rather than its
+    // original 64 MB, read back off the device rather than from the report.
+    let after = std::fs::read(image.path()).expect("read image");
+    let total_sectors = u32::from_le_bytes(after[32..36].try_into().unwrap());
+    assert!(
+        total_sectors as u64 > 64 * 1024 * 1024 / 512,
+        "the resized filesystem must declare more sectors than it started with, got {total_sectors}"
+    );
+}
+
 /// A zeroed boot signature is how this tool marks a filesystem mid-resize, so
 /// the CLI must treat it as a possible interrupted resize and enter recovery.
 ///
