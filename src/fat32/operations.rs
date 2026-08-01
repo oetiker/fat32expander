@@ -9,9 +9,6 @@ use std::path::Path;
 /// Maximum sector size supported by FAT32 (4096 bytes)
 const MAX_SECTOR_SIZE: usize = 4096;
 
-/// Valid FAT32 sector sizes
-const VALID_SECTOR_SIZES: &[u16] = &[512, 1024, 2048, 4096];
-
 /// Determine the sector size a FAT32 boot sector declares.
 ///
 /// This is the probe [`Device::open_with`] needs: it turns leading bytes into
@@ -22,7 +19,7 @@ const VALID_SECTOR_SIZES: &[u16] = &[512, 1024, 2048, 4096];
 pub fn bootstrap_sector_size(leading_bytes: &[u8]) -> Result<u32> {
     let boot = BootSector::from_bytes(leading_bytes)?;
     let sector_size = boot.bytes_per_sector();
-    if !VALID_SECTOR_SIZES.contains(&sector_size) {
+    if !BootSector::VALID_SECTOR_SIZES.contains(&sector_size) {
         return Err(Error::UnsupportedSectorSize(sector_size as u32));
     }
     Ok(sector_size as u32)
@@ -68,7 +65,7 @@ fn read_boot_sector_unvalidated(device: &Device) -> Result<BootSector> {
 
     // Validate the sector size is a valid FAT32 size
     let sector_size = boot.bytes_per_sector();
-    if !VALID_SECTOR_SIZES.contains(&sector_size) {
+    if !BootSector::VALID_SECTOR_SIZES.contains(&sector_size) {
         return Err(Error::UnsupportedSectorSize(sector_size as u32));
     }
 

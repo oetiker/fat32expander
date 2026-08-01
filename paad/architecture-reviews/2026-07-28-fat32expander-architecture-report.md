@@ -742,6 +742,10 @@ reproduced against crafted ones.
 - **Category:** 28 (magic numbers/strings)
 - **Impact:** Low
 - **Evidence:** `src/fat32/validation.rs:20` `if sig != 0xAA55 {` although `BootSector::VALID_SIGNATURE` exists (`structs.rs:332`) and is used at `:336, :348`; `:33` `if !matches!(bps, 512 | 1024 | 2048 | 4096)` re-lists what `operations.rs:12` holds as `VALID_SECTOR_SIZES`; `65525` appears bare in both `validation.rs:117` and `calculator.rs:90`.
+- **Status:** Fixed
+- **Status reason:** All three spec constants now live together on `BootSector`: the existing `VALID_SIGNATURE`, `VALID_SECTOR_SIZES` moved up from a private const in `operations.rs`, and a new `MIN_FAT32_CLUSTERS` for the 65525 floor, which had no named constant anywhere. Four production call sites now read the constants (`validation.rs` signature/sector-size/cluster-count, `calculator.rs` projected cluster count), and `operations.rs`'s two users follow the moved constant. The error messages are built from the constants too, so the prose cannot drift from the check it describes. Literals survive deliberately in tests: a test asserting against a bare `65525` is the independent check that the constant still equals the spec value, which a test reading the constant would not be. Behaviour-preserving; the full suite passed unchanged (126 default + 16 ignored), including three safety-net tests written for this fix that pin the reject side of all three checks.
+- **Status date:** 2026-08-02 08:55 UTC
+- **Status commit:** _(recorded at the end of the session)_
 - **Found by:** Error Handling & Observability
 
 ### [F-R53] Verbose output split between stdout and stderr with no rule

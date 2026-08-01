@@ -106,8 +106,8 @@ pub fn calculate_new_size(boot: &BootSector, device_sectors: u64) -> Result<Size
             ))
         })?;
 
-    // Verify we still have FAT32 (>= 65525 clusters)
-    if new_data_clusters < 65525 {
+    // Verify the projected volume is still FAT32
+    if new_data_clusters < BootSector::MIN_FAT32_CLUSTERS {
         return Err(Error::Calculation(format!(
             "New cluster count {} would not be FAT32",
             new_data_clusters

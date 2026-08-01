@@ -210,8 +210,23 @@ impl BootSector {
         u16::from_le_bytes([self.raw[510], self.raw[511]])
     }
 
+    // [F-R52]: the three FAT32 spec constants live here, together, because
+    // they were previously spelled as bare literals at their point of use --
+    // `0xAA55` beside this very constant, the sector-size list in two modules,
+    // and `65525` in two more. A spec value with two homes is a spec value
+    // that can be changed in one of them.
+
     /// Valid boot sector signature value
     pub const VALID_SIGNATURE: u16 = 0xAA55;
+
+    /// The four sector sizes FAT32 permits.
+    pub const VALID_SECTOR_SIZES: &'static [u16] = &[512, 1024, 2048, 4096];
+
+    /// The cluster count separating FAT32 from FAT16. A volume with fewer
+    /// data clusters than this is FAT16 by definition, whatever its boot
+    /// sector claims, so it is both a validation floor for existing volumes
+    /// and a floor the resize calculator must not project a volume below.
+    pub const MIN_FAT32_CLUSTERS: u32 = 65525;
 
     /// Check if the boot sector signature is valid
     pub fn is_signature_valid(&self) -> bool {

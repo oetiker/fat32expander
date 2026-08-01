@@ -22,7 +22,7 @@ fn validate_boot_sector_impl(boot: &BootSector, allow_invalidated: bool) -> Resu
     // attempt crash recovery keys on it, and keying on message text made
     // rewording either side silently disable recovery ([F-R5]).
     let sig = boot.boot_signature();
-    if sig != 0xAA55 {
+    if sig != BootSector::VALID_SIGNATURE {
         if sig == 0x0000 {
             if !allow_invalidated {
                 return Err(Error::BootSectorInvalidated);
@@ -30,18 +30,20 @@ fn validate_boot_sector_impl(boot: &BootSector, allow_invalidated: bool) -> Resu
             // Invalidated boot sector - allowed in recovery mode
         } else {
             return Err(Error::BootSectorValidation(format!(
-                "Invalid boot signature: {:#06X} (expected 0xAA55)",
-                sig
+                "Invalid boot signature: {:#06X} (expected {:#06X})",
+                sig,
+                BootSector::VALID_SIGNATURE
             )));
         }
     }
 
-    // Check bytes per sector (must be 512, 1024, 2048, or 4096)
+    // Check bytes per sector (must be one of the four FAT32 permits)
     let bps = boot.bytes_per_sector();
-    if !matches!(bps, 512 | 1024 | 2048 | 4096) {
+    if !BootSector::VALID_SECTOR_SIZES.contains(&bps) {
         return Err(Error::BootSectorValidation(format!(
-            "Invalid bytes per sector: {} (must be 512, 1024, 2048, or 4096)",
-            bps
+            "Invalid bytes per sector: {} (must be one of {:?})",
+            bps,
+            BootSector::VALID_SECTOR_SIZES
         )));
     }
 
@@ -139,10 +141,11 @@ fn validate_boot_sector_impl(boot: &BootSector, allow_invalidated: bool) -> Resu
     };
 
     // Verify this is actually FAT32 by cluster count
-    if cluster_count < 65525 {
+    if cluster_count < BootSector::MIN_FAT32_CLUSTERS {
         return Err(Error::InvalidFAT32(format!(
-            "Cluster count {} indicates FAT12/16, not FAT32 (need >= 65525)",
-            cluster_count
+            "Cluster count {} indicates FAT12/16, not FAT32 (need >= {})",
+            cluster_count,
+            BootSector::MIN_FAT32_CLUSTERS
         )));
     }
 
