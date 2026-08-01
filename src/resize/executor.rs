@@ -73,12 +73,23 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
     let backup_sector = boot.backup_boot_sector();
     let backup_boot = read_backup_boot_sector(&device, backup_sector)?;
     if boot.is_signature_valid() && !boot_sectors_match(&boot, &backup_boot) {
-        return Err(Error::BackupMismatch);
+        // [F-R4]: refusing is the default, and the override has to be an
+        // explicit act by the caller -- it commits to the primary being the
+        // correct copy, and the resize then rewrites the backup from it.
+        if !options.ignores_backup_mismatch() {
+            return Err(Error::BackupMismatch);
+        }
+        operations.push(format!(
+            "Backup boot sector at sector {} does not match the primary; \
+             proceeding on the caller's explicit instruction",
+            backup_sector
+        ));
+    } else {
+        operations.push(format!(
+            "Verified backup boot sector at sector {}",
+            backup_sector
+        ));
     }
-    operations.push(format!(
-        "Verified backup boot sector at sector {}",
-        backup_sector
-    ));
 
     // Read FSInfo
     let fsinfo_sector = boot.fs_info_sector();
@@ -343,8 +354,10 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         // The previous order wrote the primary first, which opened a window
         // where a valid new-geometry primary sat against a stale old-geometry
         // backup. That combination is reported as `Error::BackupMismatch` and
-        // refused -- and `--force`, the documented escape, is not plumbed into
-        // the library at all ([F-R4]), so the window was a dead end.
+        // refused. [F-R4] has since given that refusal a real escape
+        // (`ResizeOptions::ignore_backup_mismatch`), but the escape asks the
+        // user to vouch for the primary, so leaving the window open would have
+        // meant asking them to vouch for a state this code created itself.
         write_backup_boot_sector(&device, &boot, backup_sector)?;
         operations.push("Updated backup boot sector".to_string());
 

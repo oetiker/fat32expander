@@ -307,6 +307,27 @@ fn fixture_image_with_mismatched_backup() -> NamedTempFile {
     file
 }
 
+/// [F-R4]: `ResizeOptions` must carry the override the CLI advertises, so the
+/// escape hatch reaches the check it is supposed to open.
+#[test]
+fn the_resize_api_accepts_an_explicit_backup_mismatch_override() {
+    let image = fixture_image_with_mismatched_backup();
+
+    let result = resize_fat32(
+        ResizeOptions::new(image.path())
+            .ignore_backup_mismatch(true)
+            .dry_run(true),
+    )
+    .expect("an explicit override must get past the mismatch");
+
+    assert!(
+        result.new_size_bytes > result.old_size_bytes,
+        "the override must still plan a real resize, got {} -> {}",
+        result.old_size_bytes,
+        result.new_size_bytes
+    );
+}
+
 /// `resize_fat32` must refuse a mismatched backup boot sector by default.
 ///
 /// [F-R4] plumbs an override for this through `ResizeOptions`, because today

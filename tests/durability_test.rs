@@ -293,7 +293,9 @@ fn the_new_geometry_is_flushed_before_the_checkpoint_is_cleared() {
 /// so everything the new geometry depends on must be durable before it lands.
 /// Writing the primary first opened a window where a valid new-geometry primary
 /// sat against a stale old-geometry backup -- reported as `BackupMismatch` and
-/// refused, with `--force` not plumbed into the library ([F-R4]) to escape it.
+/// refused. [F-R4] has since given that refusal an escape
+/// (`ResizeOptions::ignore_backup_mismatch`), but it asks the caller to vouch
+/// for the primary, so this ordering must still not manufacture the state.
 #[test]
 #[ignore] // Requires mkfs.fat
 fn the_backup_and_fsinfo_are_durable_before_the_primary_boot_sector_commits() {

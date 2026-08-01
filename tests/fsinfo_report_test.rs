@@ -255,8 +255,8 @@ fn a_filesystem_filling_its_device_reports_no_headroom() {
 }
 
 /// A mismatched backup boot sector is reported as a fact, not raised as an
-/// error -- the CLI turns it into a `--force`-able warning, so `get_fs_info`
-/// must keep succeeding.
+/// error -- the CLI turns it into a warning overridable with
+/// `--ignore-backup-mismatch`, so `get_fs_info` must keep succeeding.
 #[test]
 fn a_mismatched_backup_boot_sector_is_reported_not_raised() {
     let image = fixture_image(90_000, FREE_CLUSTERS, false);

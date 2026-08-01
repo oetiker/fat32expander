@@ -117,10 +117,14 @@ as the tool changes.
 | 5 | Not a usable FAT32 filesystem |
 | 6 | Already at maximum size *(reserved; a no-op resize exits 0)* |
 | 7 | Device is smaller than the filesystem claims — truncated image or wrong device |
-| 8 | Backup boot sector does not match the primary — re-run with `--force` to override |
+| 8 | Backup boot sector does not match the primary — re-run with `--ignore-backup-mismatch` to trust the primary and rewrite the backup from it |
 | 9 | An interrupted resize needs recovery and could not be recovered automatically |
 | 10 | I/O failure reading or writing the device |
-| 11 | Root privileges required — run as root or pass `--force` |
+
+Code 11 previously meant "root privileges required". The tool no longer guesses
+at write access from the effective uid — it attempts the open and reports what
+the kernel says, so a caller who cannot write the device now gets code 3. The
+number is not reused.
 
 `resize` is safe to re-run: a filesystem that is already at its maximum size
 exits 0 rather than reporting an error, so the tool can be called
@@ -196,7 +200,9 @@ make test-qemu-one TEST=test-fragmented
 
 ### Runtime
 - Linux (uses `/proc/mounts` for mount detection)
-- Root privileges (for block devices)
+- Write access to the target device. That usually means root for a block
+  device, but the tool does not require root as such — membership of `disk`,
+  a suitable ACL, or simply owning the image file all work.
 
 ### Building
 - Rust 1.70+

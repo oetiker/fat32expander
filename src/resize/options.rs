@@ -11,6 +11,7 @@ pub struct ResizeOptions {
     device_path: std::path::PathBuf,
     dry_run: bool,
     verbose: bool,
+    ignore_backup_mismatch: bool,
 }
 
 impl ResizeOptions {
@@ -20,6 +21,7 @@ impl ResizeOptions {
             device_path: device_path.as_ref().to_path_buf(),
             dry_run: false,
             verbose: false,
+            ignore_backup_mismatch: false,
         }
     }
 
@@ -48,6 +50,29 @@ impl ResizeOptions {
     /// Check if verbose mode is enabled
     pub fn is_verbose(&self) -> bool {
         self.verbose
+    }
+
+    /// Proceed even though the backup boot sector disagrees with the primary.
+    ///
+    /// Off by default, and deliberately not a general-purpose "force" ([F-R46]):
+    /// it opens exactly one check. A mismatch means the two copies of the
+    /// geometry disagree, and the resize resolves that by trusting the primary
+    /// and rewriting the backup from it. If the *primary* is the damaged copy,
+    /// that destroys the only good record of the original layout -- so this is
+    /// an assertion by the caller that the primary is the correct one, not a
+    /// way to make a warning go away.
+    ///
+    /// [F-R4]: the CLI advertised this escape long before the library carried
+    /// the field to honour it, so `resize_fat32` refused a second time and the
+    /// advertised flag was a dead end.
+    pub fn ignore_backup_mismatch(mut self, enable: bool) -> Self {
+        self.ignore_backup_mismatch = enable;
+        self
+    }
+
+    /// Check whether a backup boot sector mismatch is being overridden
+    pub fn ignores_backup_mismatch(&self) -> bool {
+        self.ignore_backup_mismatch
     }
 }
 

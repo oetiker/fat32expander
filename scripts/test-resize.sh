@@ -249,7 +249,7 @@ test_simple_resize() {
     check_fs "$img" "before resize"
 
     log_info "Running resize..."
-    run_resize "$img" --verbose --force
+    run_resize "$img" --verbose
 
     log_info "After resize:"
     show_info "$img" | grep -E "(Total sectors|FAT size|Can grow)"
@@ -273,7 +273,7 @@ test_fat_growth_resize() {
     check_fs "$img" "before resize"
 
     log_info "Running resize..."
-    run_resize "$img" --verbose --force
+    run_resize "$img" --verbose
 
     log_info "After resize:"
     show_info "$img" | grep -E "(Total sectors|FAT size|Can grow|Root directory cluster)"
@@ -295,7 +295,7 @@ test_dry_run() {
     before_sectors=$(show_info "$img" | grep "Total sectors" | awk '{print $NF}')
 
     log_info "Running dry run..."
-    run_resize "$img" --dry-run --verbose --force
+    run_resize "$img" --dry-run --verbose
 
     local after_sectors
     after_sectors=$(show_info "$img" | grep "Total sectors" | awk '{print $NF}')
@@ -322,7 +322,7 @@ test_already_max_size() {
     # track whether it already ran. It must still say why it did nothing.
     log_info "Running resize (should succeed as a no-op)..."
     local output
-    if output=$(run_resize "$img" --force 2>&1); then
+    if output=$(run_resize "$img" 2>&1); then
         if echo "$output" | grep -q "maximum size"; then
             log_info "Resize correctly reported nothing to do"
         else
@@ -337,7 +337,7 @@ test_already_max_size() {
     fi
 
     # Re-running must behave identically -- that is what idempotent means here.
-    if ! run_resize "$img" --force >/dev/null 2>&1; then
+    if ! run_resize "$img" >/dev/null 2>&1; then
         log_error "Second resize should also have succeeded"
         exit 1
     fi
@@ -359,7 +359,7 @@ test_large_resize() {
     check_fs "$img" "before resize"
 
     log_info "Running resize..."
-    run_resize "$img" --verbose --force
+    run_resize "$img" --verbose
 
     log_info "After resize:"
     show_info "$img" | grep -E "(Total sectors|FAT size|Data clusters)"
@@ -391,7 +391,7 @@ test_resize_with_simple_files() {
     check_fs "$img" "before resize"
 
     log_info "Running resize..."
-    run_resize "$img" --verbose --force
+    run_resize "$img" --verbose
 
     check_fs "$img" "after resize"
 
@@ -424,7 +424,7 @@ test_resize_with_nested_dirs() {
     check_fs "$img" "before resize"
 
     log_info "Running resize..."
-    run_resize "$img" --verbose --force
+    run_resize "$img" --verbose
 
     check_fs "$img" "after resize"
 
@@ -459,7 +459,7 @@ test_resize_with_deep_hierarchy() {
     check_fs "$img" "before resize"
 
     log_info "Running resize (large growth with deep directories)..."
-    run_resize "$img" --verbose --force
+    run_resize "$img" --verbose
 
     check_fs "$img" "after resize"
 

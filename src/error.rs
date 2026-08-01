@@ -5,8 +5,10 @@ use thiserror::Error;
 pub enum Error {
     /// A device could not be opened. The underlying `io::Error` is kept as the
     /// source rather than discarded: "not found", "permission denied" and
-    /// "busy" are different problems with different fixes, and a non-root user
-    /// hitting EACCES after `--force` is the common case ([F-R29]).
+    /// "busy" are different problems with different fixes, and a caller
+    /// without write access hitting EACCES is the common case ([F-R29]).
+    /// Since [F-R46] removed the privilege gate, this is also the *only*
+    /// report such a caller gets, so the distinction carries real weight.
     ///
     /// The errno is deliberately not interpolated into the message -- callers
     /// render the source chain, and interpolating would print it twice.
@@ -52,11 +54,11 @@ pub enum Error {
     #[error("Filesystem is already at maximum size for this device")]
     AlreadyMaxSize,
 
-    /// The operation needs root and the caller is not root. Typed rather than a
-    /// bare `anyhow::bail!` so it can carry its own exit code ([F-R31]).
-    #[error("Root privileges are required to modify block devices (or use --force)")]
-    RootRequired,
-
+    // [F-R46] removed `RootRequired`. The tool no longer guesses at write
+    // access from euid: it attempts the open and reports what the kernel says,
+    // which is both correct for non-root callers who do have access and more
+    // specific when access is genuinely denied (`DeviceOpen` carries the path
+    // and the errno).
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

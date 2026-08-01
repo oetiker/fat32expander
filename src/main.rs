@@ -2,9 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::time::{Duration, UNIX_EPOCH};
 
-use fat32expander::{
-    check_root, get_fs_info, resize_fat32, Error, FSInfo, FSInfoReport, ResizeOptions,
-};
+use fat32expander::{get_fs_info, resize_fat32, Error, FSInfo, FSInfoReport, ResizeOptions};
 
 const BUILD_TIMESTAMP: u64 = const_parse_u64(env!("BUILD_TIMESTAMP"));
 const GIT_HASH: &str = env!("GIT_HASH");
@@ -115,9 +113,13 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
 
-        /// Force resize even if warnings are present
-        #[arg(short, long)]
-        force: bool,
+        /// Proceed even if the backup boot sector disagrees with the primary
+        ///
+        /// This trusts the primary boot sector and rewrites the backup from
+        /// it. If the primary is the damaged copy, that discards the only
+        /// good record of the original layout.
+        #[arg(long)]
+        ignore_backup_mismatch: bool,
     },
 }
 
@@ -238,7 +240,10 @@ mod exit {
     pub const BACKUP_MISMATCH: u8 = 8;
     pub const NEEDS_RECOVERY: u8 = 9;
     pub const IO_FAILURE: u8 = 10;
-    pub const ROOT_REQUIRED: u8 = 11;
+    // 11 was ROOT_REQUIRED, removed with the privilege gate in [F-R46]. A
+    // caller who cannot write the device now gets DEVICE_UNOPENABLE, which is
+    // what the kernel actually reported. The number is not reused: a script
+    // branching on 11 should find nothing rather than a new meaning.
 }
 
 /// Map a failure to its exit code. Anything that is not one of our own errors
@@ -272,8 +277,6 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
         | Error::DeviceSync { .. }
         | Error::Io(_)
         | Error::SectorLengthMismatch { .. } => exit::IO_FAILURE,
-
-        Error::RootRequired => exit::ROOT_REQUIRED,
 
         // An out-of-range sector means our own arithmetic was wrong, not that
         // the device misbehaved ([F-R28]).
@@ -322,16 +325,20 @@ fn run() -> Result<()> {
             device,
             dry_run,
             verbose,
-            force,
+            ignore_backup_mismatch,
         } => {
-            // Check for root privileges
-            if !check_root() && !dry_run {
-                eprintln!("Warning: This tool requires root privileges to modify block devices.");
-                eprintln!("         Use --dry-run to preview changes without root.");
-                if !force {
-                    return Err(Error::RootRequired.into());
-                }
-            }
+            // [F-R46]: there is deliberately no `geteuid() == 0` gate here.
+            // The kernel is the authority on write access, and euid is a bad
+            // proxy for it -- a user resizing a file image they own, a member
+            // of group `disk`, or a caller holding CAP_SYS_ADMIN without uid 0
+            // are all legitimate and were all refused by the old check. The
+            // open fails with EACCES if access is genuinely denied, and that
+            // error names both the device and the errno ([F-R29], [F-R30]).
+            //
+            // The gate's own escape hatch is what made this worse: `--force`
+            // switched it off, so the flag users reached for to get past a
+            // privilege guess also switched off the backup-mismatch check,
+            // which is a data-loss decision. One flag, one meaning.
 
             // Try to show current state - may fail if boot sector is invalidated from crash
             let info_result = get_fs_info(&device);
@@ -355,12 +362,15 @@ fn run() -> Result<()> {
                         return Ok(());
                     }
 
-                    if !info.backup_matches() && !force {
+                    if !info.backup_matches() && !ignore_backup_mismatch {
                         eprintln!(
                             "Warning: Backup boot sector does not match primary boot sector."
                         );
                         eprintln!("         This could indicate filesystem corruption.");
-                        eprintln!("         Use --force to proceed anyway.");
+                        eprintln!(
+                            "         Use --ignore-backup-mismatch to trust the primary and \
+                             rewrite the backup from it."
+                        );
                         return Err(Error::BackupMismatch.into());
                     }
 
@@ -428,7 +438,8 @@ fn run() -> Result<()> {
             // Perform the resize
             let options = ResizeOptions::new(&device)
                 .dry_run(dry_run)
-                .verbose(verbose);
+                .verbose(verbose)
+                .ignore_backup_mismatch(ignore_backup_mismatch);
 
             let result = resize_fat32(options)
                 .with_context(|| format!("Failed to resize filesystem on {}", device))?;

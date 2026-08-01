@@ -472,7 +472,7 @@ mod tests {
     }
 
     /// The motivating case in [F-R29]: a file readable but not writable is the
-    /// EACCES path a non-root user hits after `--force`, and today it collapses
+    /// EACCES path a caller without write access hits, and it used to collapse
     /// into the same "not found" message as a missing device. The two existing
     /// open tests cover ENOENT and EISDIR only, so without this the errno the
     /// fix preserves has no witness on the one path the report actually cites.

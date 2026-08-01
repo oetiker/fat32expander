@@ -230,7 +230,7 @@ assert_overlapping_shift() {
     local image="$1"
     local num_fats=2
 
-    /bin/fat32expander resize --dry-run --verbose --force "$image" > /tmp/plan.log 2>&1
+    /bin/fat32expander resize --dry-run --verbose "$image" > /tmp/plan.log 2>&1
 
     local growth moved shift
     growth=$(sed -n 's/.*FAT needs to grow by \([0-9]*\) sectors.*/\1/p' /tmp/plan.log | head -1)
@@ -277,7 +277,7 @@ test_crash_point() {
 
     # Phase 1: Trigger crash
     echo "Triggering crash at $crash_point..."
-    FAT32_CRASH_AT="$crash_point" /bin/fat32expander resize --verbose --force "$image" > /tmp/crash_${crash_point}.log 2>&1
+    FAT32_CRASH_AT="$crash_point" /bin/fat32expander resize --verbose "$image" > /tmp/crash_${crash_point}.log 2>&1
     CRASH_EXIT=$?
     echo "Crash exit code: $CRASH_EXIT"
 
@@ -313,7 +313,7 @@ test_crash_point() {
 
     # Phase 2: Recovery
     echo "Attempting recovery..."
-    /bin/fat32expander resize --verbose --force "$image" > /tmp/recover_${crash_point}.log 2>&1
+    /bin/fat32expander resize --verbose "$image" > /tmp/recover_${crash_point}.log 2>&1
     RECOVER_EXIT=$?
 
     if [ $RECOVER_EXIT -ne 0 ]; then

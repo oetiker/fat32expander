@@ -101,13 +101,26 @@ fn run(args: &[&std::ffi::OsStr]) -> Output {
         .expect("failed to run fat32expander")
 }
 
-/// Run `resize` against `path`. `--force` is required because the test suite
-/// does not run as root; it only bypasses the privilege warning.
+/// Run `resize` against `path`, with no override flags at all.
+///
+/// This used to pass `--force`, purely to get past the `geteuid() == 0` gate
+/// that [F-R46] removed -- the test suite does not run as root, and a file
+/// image it owns needs no privileges to rewrite. The kernel decides write
+/// access; there is nothing left here to bypass.
 fn run_resize(path: &std::path::Path) -> Output {
     Command::new(BIN)
         .arg("resize")
         .arg(path)
-        .arg("--force")
+        .output()
+        .expect("failed to run fat32expander")
+}
+
+/// Run `resize` against `path`, opting in to overriding a backup mismatch.
+fn run_resize_ignoring_backup_mismatch(path: &std::path::Path) -> Output {
+    Command::new(BIN)
+        .arg("resize")
+        .arg(path)
+        .arg("--ignore-backup-mismatch")
         .output()
         .expect("failed to run fat32expander")
 }
@@ -138,14 +151,14 @@ fn image_with_mismatched_backup(file_mb: u64, fs_mb: u64) -> NamedTempFile {
 /// A backup boot sector that disagrees with the primary must stop the resize,
 /// and must say what stopped it.
 ///
-/// [F-R4]/[F-R46]: `--force` is about to stop being a general-purpose bypass.
-/// What must not change is that a mismatch is refused *unless the user opts in
-/// specifically* -- an override that ends up defaulting to on would trade a
-/// false promise for silent data loss, since forcing rewrites the backup from
-/// a primary that the mismatch says might itself be the corrupt copy.
+/// [F-R4]/[F-R46]: `--force` has stopped being a general-purpose bypass. What
+/// did not change is that a mismatch is refused *unless the user opts in
+/// specifically* -- an override that ended up defaulting to on would trade a
+/// false promise for silent data loss, since overriding rewrites the backup
+/// from a primary that the mismatch says might itself be the corrupt copy.
 ///
-/// The assertions here are the contract; only the argv `run_resize` builds may
-/// change as the flag is renamed.
+/// The assertions here are the contract; only the argv `run_resize` builds
+/// changed when the flag was renamed.
 #[test]
 fn a_backup_mismatch_is_refused_and_says_so() {
     let image = image_with_mismatched_backup(96, 64);
@@ -171,6 +184,46 @@ fn a_backup_mismatch_is_refused_and_says_so() {
     assert!(
         before == after,
         "a refused resize must not modify the image by a single byte"
+    );
+}
+
+/// [F-R4]: the override must actually reach the library.
+///
+/// The CLI used to print "Use --force to proceed anyway" and then hand
+/// `resize_fat32` an options struct with no override field in it, so the
+/// library refused a second time and the advertised escape was a dead end.
+/// Opting in must now get past the mismatch.
+#[test]
+fn the_backup_mismatch_override_actually_proceeds() {
+    let image = image_with_mismatched_backup(96, 64);
+
+    let output = run_resize_ignoring_backup_mismatch(image.path());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr_of(&output)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "opting in to the mismatch override must complete the resize.\noutput:\n{combined}"
+    );
+
+    let after = std::fs::read(image.path()).expect("read image");
+    let total_sectors = u32::from_le_bytes(after[32..36].try_into().unwrap());
+    assert!(
+        total_sectors as u64 > 64 * 1024 * 1024 / 512,
+        "the override must produce a real resize, not just a silent pass, got {total_sectors}"
+    );
+
+    // The rewritten backup must now agree with the primary -- the override
+    // exists to repair the disagreement, not to leave it in place.
+    let backup_total_sectors =
+        u32::from_le_bytes(after[6 * 512 + 32..6 * 512 + 36].try_into().unwrap());
+    assert_eq!(
+        backup_total_sectors, total_sectors,
+        "after a forced resize the backup must match the primary again"
     );
 }
 

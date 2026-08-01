@@ -207,7 +207,7 @@ ls -la "$FAT_IMAGE"
 
 echo ""
 echo "=== Phase 4: Running fat32expander ==="
-/bin/fat32expander resize --verbose --force "$FAT_IMAGE"
+/bin/fat32expander resize --verbose "$FAT_IMAGE"
 RESIZE_EXIT=$?
 
 if [ $RESIZE_EXIT -ne 0 ]; then
