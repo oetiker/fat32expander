@@ -365,7 +365,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** The doc now states the actual constraint (AFTER relocation) together with the reason it cannot be otherwise: the sectors it zeroes are FAT1's extension, which is physically the region relocation has just vacated, so running it first would erase live cluster data that relocation then copies forward from an already-blank area. The inverted claim was the whole defect — the call site was always correct — so no code changed. Cross-referenced to [F-R15]: nothing but the call site enforces the order.
 - **Status date:** 2026-08-02 08:35 UTC
-- **Status commit:** _(recorded at the end of the session)_
+- **Status commit:** 2c32a0d
 
 ### [F-R17] No durability barrier between the FAT writes and the phase-2 checkpoint
 - **Category:** 26 (poor transactional boundaries)
@@ -640,7 +640,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** Both stale sections rewritten to the design the code implements. "Directory Entry Updates" became "Cluster Numbers Are Preserved — No Directory Entry Updates", stating that relocation moves physical sectors only and that FAT chains, directory entries and `root_cluster` therefore need no rewriting, with a historical note explaining that the renumbering design was abandoned and that `set_root_cluster`'s zero call sites are residue from it. Pitfall §3 was inverted to say that rewriting `root_cluster` during a resize is a bug, and now points at the safety-net test that guards it. The "Critical insight" paragraph was already correct and is untouched. CLAUDE.md and TECHGUIDE.md now agree. Documentation only; no code changed.
 - **Status date:** 2026-08-02 08:45 UTC
-- **Status commit:** _(recorded at the end of the session)_
+- **Status commit:** 06a75fe
 
 ### [F-R32] `--dry-run` skips crash detection, so the preview is not the plan that will run
 - **Category:** 12 (hidden side effects) / 24
@@ -717,7 +717,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** Both `unsafe` blocks now carry a SAFETY comment; `grep -rn 'unsafe {' src/` returns 2 and `grep -rc 'SAFETY:' src/` accounts for both. The ioctl block was already documented as a side effect of the [F-R48] fix, which put it on the execution path — its comment covers fd validity, the single `u64` BLKGETSIZE64 writes, non-retention of the pointer, and the -1 path being an error rather than UB. This session added the remaining one: `geteuid` takes no arguments, borrows nothing, and is specified by POSIX as always successful, so the only obligation is a correct declaration and that is libc's. Comment only; no executable change, and therefore no test — an `unsafe` block with no argument is indistinguishable at a glance from one whose argument was never made, which is the whole finding.
 - **Status date:** 2026-08-02 09:05 UTC
-- **Status commit:** _(recorded at the end of the session)_
+- **Status commit:** 44c3a67
 
 ### [F-R48] `get_block_device_size` — the only correct block-device sizing path — is dead; `Device` uses seek
 - **Category:** 29 ("utility" dumping ground) / 31
@@ -749,7 +749,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** All three spec constants now live together on `BootSector`: the existing `VALID_SIGNATURE`, `VALID_SECTOR_SIZES` moved up from a private const in `operations.rs`, and a new `MIN_FAT32_CLUSTERS` for the 65525 floor, which had no named constant anywhere. Four production call sites now read the constants (`validation.rs` signature/sector-size/cluster-count, `calculator.rs` projected cluster count), and `operations.rs`'s two users follow the moved constant. The error messages are built from the constants too, so the prose cannot drift from the check it describes. Literals survive deliberately in tests: a test asserting against a bare `65525` is the independent check that the constant still equals the spec value, which a test reading the constant would not be. Behaviour-preserving; the full suite passed unchanged (126 default + 16 ignored), including three safety-net tests written for this fix that pin the reject side of all three checks.
 - **Status date:** 2026-08-02 08:55 UTC
-- **Status commit:** _(recorded at the end of the session)_
+- **Status commit:** 3eeae87
 - **Found by:** Error Handling & Observability
 
 ### [F-R53] Verbose output split between stdout and stderr with no rule
