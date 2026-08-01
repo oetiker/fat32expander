@@ -362,6 +362,27 @@ mod tests {
         );
     }
 
+    /// Safety net for [F-R52]. The second bare `65525` lives here, guarding
+    /// the *projected* layout rather than the current one, and nothing
+    /// exercised it: every other calculator test grows a volume that is
+    /// comfortably FAT32 both before and after.
+    #[test]
+    fn a_projected_layout_below_the_fat32_floor_is_rejected() {
+        // 8 sectors per cluster, so even the grown volume yields ~12,400
+        // clusters -- a growth that succeeds arithmetically but would leave
+        // behind something that is not a FAT32 filesystem.
+        let boot = create_test_boot_sector(50_000, 100);
+        let result = calculate_new_size(&boot, 100_000);
+        let msg = match result {
+            Err(Error::Calculation(msg)) => msg,
+            other => panic!("expected a Calculation error, got {other:?}"),
+        };
+        assert!(
+            msg.contains("would not be FAT32"),
+            "rejected for the wrong reason: {msg}"
+        );
+    }
+
     #[test]
     fn test_calculate_new_size_same_size() {
         let boot = create_test_boot_sector(2_000_000, 2000);

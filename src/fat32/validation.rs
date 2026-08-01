@@ -272,6 +272,46 @@ mod tests {
         }
     }
 
+    /// Safety net for [F-R52]. `validation_accepts_legitimate_geometries`
+    /// pins the four supported sector sizes on the *accept* side only, so a
+    /// widened set -- the exact way a literal-to-constant substitution can go
+    /// wrong -- would pass unnoticed. This pins the reject side.
+    #[test]
+    fn an_unsupported_sector_size_is_rejected() {
+        for bps in [0u16, 128, 256, 511, 513, 1000, 8192] {
+            let boot = valid_boot_sector_with(bps, 1, 32, 2, 1_000_000, 7813);
+            assert!(
+                matches!(
+                    validate_boot_sector(&boot),
+                    Err(Error::BootSectorValidation(_))
+                ),
+                "bytes_per_sector={bps} was not rejected: {:?}",
+                validate_boot_sector(&boot)
+            );
+        }
+    }
+
+    /// Safety net for [F-R52]. The 65525-cluster floor separating FAT32 from
+    /// FAT16 has no test of its own: `test_not_fat32` reaches
+    /// `Error::InvalidFAT32` through the root-entry-count check instead, and
+    /// would still pass if the floor were deleted outright.
+    #[test]
+    fn a_cluster_count_below_the_fat32_floor_is_rejected() {
+        // 512-byte sectors, one sector per cluster, 9,768 data sectors -- a
+        // legitimate layout in every respect except that it is FAT16-sized.
+        let boot = valid_boot_sector_with(512, 1, 32, 2, 10_000, 100);
+        assert_eq!(
+            boot.data_clusters(),
+            Some(9_768),
+            "fixture drifted; the case no longer sits below the floor"
+        );
+        assert!(
+            matches!(validate_boot_sector(&boot), Err(Error::InvalidFAT32(_))),
+            "a sub-65525-cluster volume was accepted as FAT32: {:?}",
+            validate_boot_sector(&boot)
+        );
+    }
+
     /// [F-R7]: a crafted image whose FATs are larger than the whole volume must
     /// be rejected, and rejected for the right reason. Before the fix the
     /// subtraction wrapped and the volume was reported as healthy in release

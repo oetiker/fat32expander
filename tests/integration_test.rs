@@ -683,3 +683,53 @@ fn resize_preserves_files_on_a_4096_byte_sector_filesystem() {
         "the file must survive the resize byte for byte"
     );
 }
+
+/// Safety net for [F-R60]. CLAUDE.md still describes the abandoned
+/// cluster-renumbering design, under which relocating cluster 2 would force
+/// `root_cluster` to be rewritten. The implementation preserves cluster
+/// numbers and moves only physical sectors, so `root_cluster` must come out
+/// the far side of a relocating resize untouched -- and `set_root_cluster`
+/// must stay callerless.
+///
+/// Nothing asserted this. `test_resize_with_fat_growth` checks cluster counts
+/// and `dosfsck`, neither of which distinguishes "root cluster preserved" from
+/// "root cluster rewritten consistently", which is precisely the pair the two
+/// designs disagree about.
+#[test]
+#[ignore]
+fn root_cluster_survives_a_relocating_resize() {
+    let image = create_fat32_image(128);
+    let payload = vec![0x5Au8; 96 * 1024];
+    let source = NamedTempFile::new().expect("Failed to create payload file");
+    std::fs::write(source.path(), &payload).expect("Failed to write payload");
+    mcopy_into(image.path(), source.path(), "ROOTCHK.BIN");
+
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    let root_before = before.boot().root_cluster();
+
+    extend_image(image.path(), 256);
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        result.fat_grew,
+        "fixture drifted: this case must grow the FAT, or it does not relocate anything"
+    );
+    assert!(
+        result.clusters_relocated > 0,
+        "fixture drifted: no cluster was relocated, so the invariant is untested"
+    );
+
+    let after = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(
+        after.boot().root_cluster(),
+        root_before,
+        "root_cluster was rewritten; the code has moved back to renumbering clusters"
+    );
+    assert_eq!(
+        mcopy_out(image.path(), "ROOTCHK.BIN"),
+        payload,
+        "the file must survive the relocating resize byte for byte"
+    );
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+}
