@@ -714,6 +714,10 @@ reproduced against crafted ones.
 - **Impact:** Low
 - **Evidence:** `src/system.rs:54` `unsafe { libc::geteuid() == 0 }` and `:75` `unsafe { libc::ioctl(fd, BLKGETSIZE64, &mut size) }`; `grep 'SAFETY' src/` → 0 hits. The ioctl passes a raw `&mut u64` and relies on `:72-73` `#[allow(overflowing_literals)] const BLKGETSIZE64: libc::Ioctl = 0x80081272u32 as libc::Ioctl;` to paper over the glibc/musl `Ioctl` type difference.
 - **Found by:** Security & Code Quality
+- **Status:** Fixed
+- **Status reason:** Both `unsafe` blocks now carry a SAFETY comment; `grep -rn 'unsafe {' src/` returns 2 and `grep -rc 'SAFETY:' src/` accounts for both. The ioctl block was already documented as a side effect of the [F-R48] fix, which put it on the execution path — its comment covers fd validity, the single `u64` BLKGETSIZE64 writes, non-retention of the pointer, and the -1 path being an error rather than UB. This session added the remaining one: `geteuid` takes no arguments, borrows nothing, and is specified by POSIX as always successful, so the only obligation is a correct declaration and that is libc's. Comment only; no executable change, and therefore no test — an `unsafe` block with no argument is indistinguishable at a glance from one whose argument was never made, which is the whole finding.
+- **Status date:** 2026-08-02 09:05 UTC
+- **Status commit:** _(recorded at the end of the session)_
 
 ### [F-R48] `get_block_device_size` — the only correct block-device sizing path — is dead; `Device` uses seek
 - **Category:** 29 ("utility" dumping ground) / 31

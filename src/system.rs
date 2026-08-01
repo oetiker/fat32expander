@@ -51,6 +51,15 @@ fn resolve_device_path(path: &Path) -> Result<String> {
 
 /// Check if running as root (required for block device access)
 pub fn check_root() -> bool {
+    // SAFETY: `geteuid` takes no arguments, borrows nothing, and cannot fail --
+    // POSIX specifies it as always successful, so there is no errno to race on
+    // and no pointer for the kernel to retain. The only obligation is that it
+    // be declared correctly, which is libc's.
+    //
+    // [F-R47]: the soundness here is self-evident, which is exactly why it went
+    // unwritten. An `unsafe` block with no argument is indistinguishable at a
+    // glance from one whose argument was never made, so the reviewer has to
+    // re-derive it every time.
     unsafe { libc::geteuid() == 0 }
 }
 
