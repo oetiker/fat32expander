@@ -268,6 +268,10 @@ reproduced against crafted ones.
 - **Evidence:** `.github/workflows/tests.yml:53` `cargo test --lib`, `:69` `cargo test --test integration_test -- --ignored`. Against `ls tests/` → `error_contract_test.rs`, `fsinfo_report_test.rs`, `integration_test.rs`, `public_api_test.rs`. A safety net CI does not run cannot fail a pull request, which is the only thing that makes it a net.
 - **Found by:** 2026-07-31 fix session, while wiring the new `durability_test` target into CI
 - **Suggested fix:** replace the two named targets with `cargo test --all-targets` plus a `-- --ignored` pass, so a new test file is covered the day it is added rather than the day someone remembers to name it. Note that this will surface any currently-failing test in those three files for the first time.
+- **Status:** Fixed
+- **Status reason:** The two steps now sweep with `cargo test --all-targets` and `cargo test --all-targets -- --ignored` instead of naming targets, so a new `tests/*.rs` file is covered the day it is written. The durability step keeps its explicit `--features device-journal --test durability_test` invocation, which a sweep cannot replace: without the feature that suite compiles to zero tests and a plain `--all-targets` run reports `ok` while asserting nothing. The suggested fix warned this might surface previously-unrun failures — it did not: all six binaries were already green locally (126 default + 16 ignored, 0 failures), verified before the workflow was touched. New `tests/ci_workflow_test.rs` fails the build if CI ever regresses to named targets, and separately if the durability invocation loses its feature flag.
+- **Status date:** 2026-08-02 08:20 UTC
+- **Status commit:** dbc3d18
 
 ### [F-R10] Relocation sector math is untested; the unit tests only assert on hand-built structs
 - **Category:** 32 (missing test coverage for critical paths)

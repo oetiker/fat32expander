@@ -47,32 +47,43 @@ jobs:
         cargo build --release
         echo "::endgroup::"
 
-    - name: Run unit tests
+    # [F-R61]: these two steps sweep every target rather than naming them.
+    # Naming targets one by one meant a new tests/*.rs file ran in CI on the
+    # day someone remembered to add it to this file, not the day it was
+    # written -- three binaries and 30 tests were missed that way, two of them
+    # safety nets from earlier fix sessions. `--all-targets` covers new files
+    # automatically; tests/ci_workflow_test.rs fails the build if this
+    # regresses to named targets.
+    - name: Run tests
       run: |
-        echo "::group::Running unit tests"
-        cargo test --lib 2>&1 | tee unit-test-results.txt
+        echo "::group::Running tests"
+        cargo test --all-targets 2>&1 | tee unit-test-results.txt
         UNIT_EXIT=${PIPESTATUS[0]}
 
         # Parse results from standard test output
         if grep -q "test result:" unit-test-results.txt; then
-          RESULTS=$(grep "test result:" unit-test-results.txt | tail -1)
-          echo "## Unit Test Results" >> $GITHUB_STEP_SUMMARY
+          RESULTS=$(grep "test result:" unit-test-results.txt)
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
           echo "$RESULTS" >> $GITHUB_STEP_SUMMARY
         fi
 
         echo "::endgroup::"
         exit $UNIT_EXIT
 
-    - name: Run integration tests
+    - name: Run ignored tests
       run: |
-        echo "::group::Running integration tests"
-        cargo test --test integration_test -- --ignored 2>&1 | tee integration-test-results.txt
+        echo "::group::Running ignored tests"
+        # The heavyweight cases -- those needing mkfs.fat/dosfsck/mtools --
+        # are #[ignore]d so a bare `cargo test` stays fast locally. CI has the
+        # tools, so it must run them, and across every target rather than just
+        # integration_test.
+        cargo test --all-targets -- --ignored 2>&1 | tee integration-test-results.txt
         INTEGRATION_EXIT=${PIPESTATUS[0]}
 
         # Parse results from standard test output
         if grep -q "test result:" integration-test-results.txt; then
-          RESULTS=$(grep "test result:" integration-test-results.txt | tail -1)
-          echo "## Integration Test Results" >> $GITHUB_STEP_SUMMARY
+          RESULTS=$(grep "test result:" integration-test-results.txt)
+          echo "## Ignored Test Results" >> $GITHUB_STEP_SUMMARY
           echo "$RESULTS" >> $GITHUB_STEP_SUMMARY
         fi
 
