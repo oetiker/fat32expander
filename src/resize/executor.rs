@@ -439,8 +439,20 @@ fn print_verbose_resize_info(boot: &BootSector, calculation: &SizeCalculation) {
     eprintln!("  FAT needs growth: {}", calculation.fat_needs_growth);
 }
 
-/// Initialize new FAT sectors with free entries (zeros)
-/// This must be called BEFORE relocation so that reading new FAT sectors returns valid data
+/// Initialize new FAT sectors with free entries (zeros).
+///
+/// This must be called AFTER relocation, and the order is not a preference.
+/// The sectors this zeroes -- FAT1's extension, from `old_fat_size` to
+/// `new_fat_size` -- are physically the sectors relocation has just vacated
+/// and moved cluster data out of. Running it first would zero the region
+/// while it still holds live cluster data, and relocation would then copy
+/// that data forward from an area this function had already erased.
+///
+/// [F-R16]: this doc said the exact opposite ("must be called BEFORE
+/// relocation so that reading new FAT sectors returns valid data") while the
+/// call site had it right, and the correct `sync_fat_copies` doc immediately
+/// below made the wrong one easy to trust. Nothing enforces the order but
+/// the call site in `resize_fat32` ([F-R15]).
 fn init_new_fat_sectors(device: &Device, boot: &BootSector, calc: &SizeCalculation) -> Result<()> {
     let bytes_per_sector = boot.bytes_per_sector() as usize;
 

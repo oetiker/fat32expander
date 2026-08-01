@@ -362,6 +362,10 @@ reproduced against crafted ones.
 - **Explanation:** The function that zeroes the FAT-extension sectors documents itself as running before relocation, but it is called after — and must be, since it overwrites the sectors whose cluster data relocation just moved forward.
 - **Evidence:** `src/resize/executor.rs:658`, excerpt: `/// This must be called BEFORE relocation so that reading new FAT sectors returns valid data`; actual order is `execute_relocation(…)` at `:493`, then `init_new_fat_sectors(&device, &boot, &calculation)?` at `:543`. The neighbouring `sync_fat_copies` doc at `:681` ("must be called AFTER relocation") is correct, which makes the wrong one easy to trust.
 - **Found by:** Coupling & Dependencies, Error Handling & Observability
+- **Status:** Fixed
+- **Status reason:** The doc now states the actual constraint (AFTER relocation) together with the reason it cannot be otherwise: the sectors it zeroes are FAT1's extension, which is physically the region relocation has just vacated, so running it first would erase live cluster data that relocation then copies forward from an already-blank area. The inverted claim was the whole defect — the call site was always correct — so no code changed. Cross-referenced to [F-R15]: nothing but the call site enforces the order.
+- **Status date:** 2026-08-02 08:35 UTC
+- **Status commit:** _(recorded at the end of the session)_
 
 ### [F-R17] No durability barrier between the FAT writes and the phase-2 checkpoint
 - **Category:** 26 (poor transactional boundaries)
