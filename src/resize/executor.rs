@@ -18,13 +18,182 @@ use crate::resize::checkpoint::{
 };
 use crate::resize::fault::maybe_crash_at;
 use crate::resize::options::{ResizeOptions, ResizeResult};
-use crate::resize::relocator::{execute_relocation, plan_relocation, ShiftProgress};
+use crate::resize::relocator::{
+    execute_relocation, plan_relocation, RelocationPlan, ShiftProgress,
+};
 use crate::system::check_not_mounted;
+
+// ===== Phase witnesses ([F-R15]) =====
+//
+// A crash-safe resize has three phases that must run in this order and at most
+// once each: shift the cluster data, write the FAT extension, commit the new
+// geometry. That ordering used to be enforced by two `if starting_phase ...`
+// guards and a pair of `// === DANGER ZONE ===` comments inside a single
+// 400-line function. Nothing stopped a later edit from reordering the blocks,
+// running one twice, or entering the danger zone without the shift having
+// happened -- and the reader had only the comments to tell them the order was
+// load-bearing rather than incidental.
+//
+// Each phase is now a function whose argument is the previous phase's return
+// value, so the correct order is the only order that compiles, and the values
+// are moved rather than borrowed, so no phase can be re-entered. Resume does
+// not weaken this: finding a checkpoint never lets a phase be skipped, it lets
+// the witness be constructed from the record of the run that already did the
+// work.
+
+/// Proof that the cluster data occupies its post-resize sectors.
+#[must_use]
+struct DataShifted {
+    clusters_relocated: usize,
+}
+
+impl DataShifted {
+    /// An earlier run completed the shift and recorded it in the checkpoint.
+    ///
+    /// This is the only way to obtain the witness without doing the work, and
+    /// it exists because redoing the work would be destructive rather than
+    /// merely wasteful: the shift walks clusters downward overwriting as it
+    /// goes, so a second pass reads sources the first pass already clobbered
+    /// ([F-R1], [F-R3]).
+    fn recorded_by_an_earlier_run(clusters_relocated: usize) -> Self {
+        Self { clusters_relocated }
+    }
+}
+
+/// Proof that the FAT extension is on disk and durable -- and that the primary
+/// boot sector is, right now, invalidated.
+///
+/// That second fact used to be visible only as a mutation of a local `boot`
+/// binding partway down the function, so "is this filesystem currently marked
+/// unusable?" could be answered only by reading the control flow around you.
+/// Holding this value *is* the answer: the device carries a filesystem marked
+/// unusable, and whoever holds it owes the commit a restored signature.
+#[must_use]
+struct FatExtended {
+    boot: BootSector,
+}
+
+impl FatExtended {
+    /// An earlier run wrote the extension and recorded it in the checkpoint.
+    ///
+    /// The `DataShifted` is consumed rather than inspected: a resume may skip
+    /// the work of a phase, but it may not skip the phase's precondition, so
+    /// this witness is still unobtainable without one.
+    fn recorded_by_an_earlier_run(boot: BootSector, _shifted: DataShifted) -> Self {
+        Self { boot }
+    }
+}
+
+/// What the FAT phase left on the device, and so what the metadata commit is
+/// about to publish.
+#[must_use]
+enum FatOnDisk {
+    /// No extension was written and the boot sector was never invalidated.
+    ///
+    /// Two situations reach this. Either the FAT is not growing, in which case
+    /// there is nothing to write; or the FAT is growing but the relocation
+    /// plan came back empty, in which case the growth path did no work at all
+    /// and the commit still publishes the new FAT geometry -- over an
+    /// unwritten FAT, with FAT2 left at its old offset.
+    ///
+    /// That second case is [F-R25]. Naming the state here does not fix it;
+    /// fixing it is [F-R25]'s own job. It is currently unreachable in
+    /// practice, because a `mkfs`'d root directory always occupies cluster 2
+    /// and so the plan is never empty.
+    NotWritten(BootSector),
+    /// The extension is written and flushed, and the boot sector is invalidated.
+    Written(FatExtended),
+}
+
+impl FatOnDisk {
+    /// The boot sector the commit builds the new geometry from.
+    ///
+    /// Its signature is valid in the `NotWritten` case and invalidated in the
+    /// `Written` case. The commit restores it unconditionally, which is why it
+    /// does not need to know which it got -- and why restoring an already-valid
+    /// signature has to stay idempotent.
+    fn into_boot(self) -> BootSector {
+        match self {
+            Self::NotWritten(boot) => boot,
+            Self::Written(FatExtended { boot }) => boot,
+        }
+    }
+}
+
+/// Everything read off the device before any of it is modified.
+struct Prepared {
+    device: Device,
+    boot: BootSector,
+    fsinfo: FSInfo,
+    fsinfo_sector: u16,
+    backup_sector: u16,
+    calculation: SizeCalculation,
+    fat: Vec<u32>,
+    incomplete_resize: Option<ResizeCheckpoint>,
+}
 
 /// Main resize function with crash-safe checkpoint support
 pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
     let mut operations = Vec::new();
+    let Prepared {
+        device,
+        boot,
+        mut fsinfo,
+        fsinfo_sector,
+        backup_sector,
+        calculation,
+        fat,
+        incomplete_resize,
+    } = prepare_resize(&options, &mut operations)?;
 
+    if options.is_verbose() {
+        print_verbose_resize_info(&boot, &calculation);
+    }
+
+    let old_size_bytes = calculation.old_total_sectors as u64 * boot.bytes_per_sector() as u64;
+    let new_size_bytes = calculation.new_total_sectors as u64 * boot.bytes_per_sector() as u64;
+
+    // Phases 0 and 1. `boot` is handed over by value and comes back inside the
+    // `FatOnDisk`, so there is exactly one live boot sector at any point and no
+    // path can commit one the FAT phase did not see.
+    let (fat_on_disk, clusters_relocated) = run_fat_phases(
+        &device,
+        boot,
+        &calculation,
+        &fat,
+        incomplete_resize.as_ref(),
+        &options,
+        &mut operations,
+    )?;
+
+    // Phase 2.
+    if !options.is_dry_run() {
+        commit_new_geometry(
+            &device,
+            fat_on_disk,
+            &calculation,
+            &mut fsinfo,
+            fsinfo_sector,
+            backup_sector,
+            &mut operations,
+        )?;
+    } else {
+        operations.push("Dry run: no changes made".to_string());
+    }
+
+    Ok(ResizeResult {
+        old_size_bytes,
+        new_size_bytes,
+        fat_grew: calculation.fat_needs_growth,
+        clusters_relocated,
+        calculation,
+        operations,
+    })
+}
+
+/// Read and validate everything the resize depends on, before it changes
+/// anything.
+fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Result<Prepared> {
     // Check if mounted
     check_not_mounted(options.device_path())?;
     operations.push("Verified device is not mounted".to_string());
@@ -39,7 +208,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
 
     // Read boot sector - use recovery mode to allow invalidated signature
     // from an interrupted resize operation
-    let mut boot = read_boot_sector_for_recovery(&device)?;
+    let boot = read_boot_sector_for_recovery(&device)?;
     operations.push(format!(
         "Read boot sector ({}-byte sectors)",
         boot.bytes_per_sector()
@@ -93,7 +262,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
 
     // Read FSInfo
     let fsinfo_sector = boot.fs_info_sector();
-    let mut fsinfo = read_fsinfo(&device, fsinfo_sector)?;
+    let fsinfo = read_fsinfo(&device, fsinfo_sector)?;
     operations.push(format!("Read FSInfo from sector {}", fsinfo_sector));
 
     // Calculate new size (use checkpoint values if resuming)
@@ -139,287 +308,356 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         calculation.old_total_sectors, calculation.new_total_sectors
     ));
 
-    if options.is_verbose() {
-        print_verbose_resize_info(&boot, &calculation);
-    }
-
-    let old_size_bytes = calculation.old_total_sectors as u64 * boot.bytes_per_sector() as u64;
-    let new_size_bytes = calculation.new_total_sectors as u64 * boot.bytes_per_sector() as u64;
-
     // Read FAT table
     let fat = read_fat_table(&device, &boot, 0)?;
     operations.push(format!("Read FAT table ({} entries)", fat.len()));
 
-    let mut clusters_relocated = 0;
+    Ok(Prepared {
+        device,
+        boot,
+        fsinfo,
+        fsinfo_sector,
+        backup_sector,
+        calculation,
+        fat,
+        incomplete_resize,
+    })
+}
 
-    // Determine starting phase based on checkpoint
+/// Phases 0 and 1: shift the cluster data, then write the FAT extension.
+///
+/// Takes the boot sector by value and returns it inside the [`FatOnDisk`], so
+/// the caller cannot hold a stale copy across the danger zone, and cannot
+/// commit a boot sector this function never saw.
+fn run_fat_phases(
+    device: &Device,
+    boot: BootSector,
+    calculation: &SizeCalculation,
+    fat: &[u32],
+    incomplete_resize: Option<&ResizeCheckpoint>,
+    options: &ResizeOptions,
+    operations: &mut Vec<String>,
+) -> Result<(FatOnDisk, usize)> {
+    // Derived here rather than passed in: the phase to start from is a fact
+    // *about* the checkpoint, and taking both as parameters would let a caller
+    // hand over a pair that disagree.
     let starting_phase = incomplete_resize
-        .as_ref()
         .map(|cp| cp.phase)
         .unwrap_or(ResizePhase::Started);
 
-    // Handle FAT growth if needed
-    if calculation.fat_needs_growth {
-        operations.push(format!(
-            "FAT needs to grow by {} sectors",
-            calculation.fat_growth_sectors
-        ));
-
-        // The boot sector as it will be committed once the resize completes.
-        // The relocator reads the new data-area start straight off it, so the
-        // plan cannot disagree with the geometry the filesystem ends up with.
-        let new_boot = boot.with_geometry(calculation.new_total_sectors, calculation.new_fat_size);
-
-        // Plan cluster data shift
-        let plan = plan_relocation(&boot, &new_boot, &fat, calculation.first_affected_cluster)?;
-
-        if !plan.is_empty() {
-            operations.push(format!(
-                "Planned data shift for {} clusters ({} bytes)",
-                plan.cluster_count(),
-                plan.total_bytes
-            ));
-
-            if options.is_verbose() {
-                eprintln!("\nData shift plan (cluster numbers unchanged, sectors shift forward):");
-                eprintln!("  {} clusters will be moved", plan.moves.len());
-            }
-
-            if !options.is_dry_run() {
-                // === PHASE 0: Data shift (safe - source preserved) ===
-                if starting_phase == ResizePhase::Started {
-                    // How far a previous pass got. A fresh run has moved
-                    // nothing, so it resumes from the highest cluster in the
-                    // plan; a resume must read the recorded position, because
-                    // restarting the shift from the top would re-read source
-                    // sectors the previous pass overwrote.
-                    let resume_from = match incomplete_resize.as_ref() {
-                        None => plan.highest_cluster(),
-                        Some(cp) => cp.shift_progress.ok_or_else(|| {
-                            Error::Relocation(
-                                "interrupted data shift left no progress record, so the point \
-                                 it reached is unknown; resuming would copy already-shifted \
-                                 data over itself. The filesystem is intact but must be \
-                                 recovered from backup or repaired by hand."
-                                    .to_string(),
-                            )
-                        })?,
-                    };
-
-                    // Redoing a move is only safe while its source is intact,
-                    // and `old_home(c)` survives until the pass descends
-                    // `shift_clusters` below it. Recording at least that often
-                    // keeps every replayed move readable.
-                    //
-                    // A shift shorter than one cluster overlaps a cluster with
-                    // itself, so no move may ever be replayed. A single pass is
-                    // still safe - each cluster is read whole before it is
-                    // written - so the run proceeds, but nothing is recorded:
-                    // a later resume then finds no progress record and refuses
-                    // rather than corrupting.
-                    let shift_clusters = plan.shift_clusters(&boot);
-                    let resumable = shift_clusters > 0;
-                    let record_every = if resumable {
-                        PROGRESS_RECORD_EVERY.min(shift_clusters)
-                    } else {
-                        u32::MAX
-                    };
-
-                    // Write initial checkpoint
-                    let mut checkpoint = ResizeCheckpoint::new(
-                        ResizePhase::Started,
-                        calculation.old_total_sectors,
-                        calculation.new_total_sectors,
-                        calculation.old_fat_size,
-                        calculation.new_fat_size,
-                    );
-                    if resumable {
-                        checkpoint.shift_progress = Some(resume_from);
-                    }
-                    write_checkpoint(&device, &checkpoint)?;
-                    operations.push("Wrote checkpoint (phase 0: started)".to_string());
-
-                    maybe_crash_at("after_checkpoint_start");
-
-                    // Execute data shift, recording how far it has got as it
-                    // descends so a crash here can be resumed rather than
-                    // replayed from the beginning.
-                    let mut record = |next_cluster: u32| -> Result<()> {
-                        if !resumable {
-                            return Ok(());
-                        }
-                        let mut cp = checkpoint.clone();
-                        cp.shift_progress = Some(next_cluster);
-                        write_checkpoint(&device, &cp)
-                    };
-                    let mut progress = ShiftProgress {
-                        resume_from,
-                        record_every,
-                        record: &mut record,
-                    };
-                    execute_relocation(&device, &boot, &plan, &mut progress, options.is_verbose())?;
-                    clusters_relocated = plan.cluster_count();
-                    operations.push(format!("Shifted {} clusters forward", clusters_relocated));
-
-                    maybe_crash_at("after_data_shift");
-
-                    // Update checkpoint to phase 1
-                    let checkpoint = ResizeCheckpoint::new(
-                        ResizePhase::DataCopied,
-                        calculation.old_total_sectors,
-                        calculation.new_total_sectors,
-                        calculation.old_fat_size,
-                        calculation.new_fat_size,
-                    );
-                    write_checkpoint(&device, &checkpoint)?;
-                    operations.push("Updated checkpoint (phase 1: data copied)".to_string());
-
-                    maybe_crash_at("after_checkpoint_data_copied");
-                } else {
-                    operations.push("Skipping data shift (already done)".to_string());
-                    clusters_relocated = plan.cluster_count();
-                }
-
-                // === PHASE 1: FAT operations (dangerous - boot sector invalidated) ===
-                if starting_phase <= ResizePhase::DataCopied {
-                    // === DANGER ZONE START ===
-                    // Invalidate boot sector to prevent other tools from operating
-                    boot.invalidate_signature();
-                    write_boot_sector(&device, &boot)?;
-                    device.sync()?;
-                    operations.push("Invalidated boot sector (danger zone)".to_string());
-
-                    maybe_crash_at("after_boot_invalidate");
-
-                    // Initialize new FAT1 sectors
-                    init_new_fat_sectors(&device, &boot, &calculation)?;
-                    operations.push("Initialized new FAT sectors".to_string());
-
-                    // Sync FAT1 to FAT2
-                    sync_fat_copies(&device, &boot, &calculation)?;
-                    operations.push("Synced FAT copies".to_string());
-
-                    // [F-R17]: the checkpoint written below is a promise that
-                    // the FAT extension is on disk -- a resume reads it and
-                    // skips the FAT work entirely. Without this barrier both
-                    // land in one flush window, so the device may commit the
-                    // checkpoint first; a power loss there leaves recovery
-                    // refusing to redo work that never reached the platter.
-                    // Nothing reads the device between the two helpers above,
-                    // so one barrier covering both is sufficient.
-                    device.sync()?;
-                    operations.push("Flushed FAT writes".to_string());
-
-                    maybe_crash_at("after_fat_write");
-
-                    // Update checkpoint to phase 2
-                    let checkpoint = ResizeCheckpoint::new(
-                        ResizePhase::FatWritten,
-                        calculation.old_total_sectors,
-                        calculation.new_total_sectors,
-                        calculation.old_fat_size,
-                        calculation.new_fat_size,
-                    );
-                    write_checkpoint(&device, &checkpoint)?;
-                    operations.push("Updated checkpoint (phase 2: FAT written)".to_string());
-
-                    maybe_crash_at("after_checkpoint_fat_written");
-                    // === DANGER ZONE END ===
-                } else {
-                    operations.push("Skipping FAT operations (already done)".to_string());
-                }
-            } else {
-                operations.push("Dry run: would shift cluster data".to_string());
-            }
-        }
+    if !calculation.fat_needs_growth {
+        return Ok((FatOnDisk::NotWritten(boot), 0));
     }
 
-    if !options.is_dry_run() {
-        // === PHASE 2: Metadata update (restore boot sector) ===
+    operations.push(format!(
+        "FAT needs to grow by {} sectors",
+        calculation.fat_growth_sectors
+    ));
 
-        // Update boot sector with new values and restore signature
-        boot = boot.with_geometry(calculation.new_total_sectors, calculation.new_fat_size);
-        boot.restore_signature(); // Restore 0xAA55 signature
+    // The boot sector as it will be committed once the resize completes.
+    // The relocator reads the new data-area start straight off it, so the
+    // plan cannot disagree with the geometry the filesystem ends up with.
+    let new_boot = boot.with_geometry(calculation.new_total_sectors, calculation.new_fat_size);
 
-        // [F-R26]: the primary boot sector is written LAST, and is the single
-        // commit point for the whole resize. Everything the new geometry
-        // depends on -- the backup boot sector and FSInfo -- is published and
-        // flushed first, while the primary still describes the old layout (or,
-        // on the FAT-growth path, carries an invalidated signature and a live
-        // checkpoint). A crash anywhere before the primary lands therefore
-        // leaves a filesystem that still reads as its old self, which is
-        // recoverable; a crash after it lands leaves one whose supporting
-        // structures are already correct.
-        //
-        // The previous order wrote the primary first, which opened a window
-        // where a valid new-geometry primary sat against a stale old-geometry
-        // backup. That combination is reported as `Error::BackupMismatch` and
-        // refused. [F-R4] has since given that refusal a real escape
-        // (`ResizeOptions::ignore_backup_mismatch`), but the escape asks the
-        // user to vouch for the primary, so leaving the window open would have
-        // meant asking them to vouch for a state this code created itself.
-        write_backup_boot_sector(&device, &boot, backup_sector)?;
-        operations.push("Updated backup boot sector".to_string());
+    // Plan cluster data shift
+    let plan = plan_relocation(&boot, &new_boot, fat, calculation.first_affected_cluster)?;
 
-        // Update FSInfo with new free cluster count
-        let old_free = fsinfo.free_count();
-        // The old geometry came off a filesystem that validated, so it fits;
-        // falling back to the new count yields a zero delta, which leaves the
-        // free-cluster hint untouched rather than inventing free space.
-        let old_data_clusters = boot
-            .with_geometry(calculation.old_total_sectors, calculation.old_fat_size)
-            .data_clusters()
-            .unwrap_or(calculation.new_data_clusters);
-        let additional_clusters = calculation
-            .new_data_clusters
-            .saturating_sub(old_data_clusters);
+    if plan.is_empty() {
+        // See [`FatOnDisk::NotWritten`]: the commit publishes the new geometry
+        // anyway, which is [F-R25].
+        return Ok((FatOnDisk::NotWritten(boot), 0));
+    }
 
-        let new_free = if old_free == FSInfo::UNKNOWN_FREE {
-            FSInfo::UNKNOWN_FREE
-        } else {
-            old_free.saturating_add(additional_clusters)
-        };
-        fsinfo.set_free_count(new_free);
-        write_fsinfo(&device, &fsinfo, fsinfo_sector)?;
-        operations.push(format!("Updated FSInfo (free clusters: {})", new_free));
+    operations.push(format!(
+        "Planned data shift for {} clusters ({} bytes)",
+        plan.cluster_count(),
+        plan.total_bytes
+    ));
 
-        // [F-R26]: the supporting structures must be durable before the commit
-        // point publishes a geometry that assumes them.
-        device.sync()?;
-        operations.push("Flushed supporting structures".to_string());
+    if options.is_verbose() {
+        eprintln!("\nData shift plan (cluster numbers unchanged, sectors shift forward):");
+        eprintln!("  {} clusters will be moved", plan.moves.len());
+    }
 
-        write_boot_sector(&device, &boot)?;
-        operations.push("Updated boot sector (signature restored)".to_string());
+    if options.is_dry_run() {
+        operations.push("Dry run: would shift cluster data".to_string());
+        return Ok((FatOnDisk::NotWritten(boot), 0));
+    }
 
-        // [F-R18]: clearing the checkpoint retires the only record that can
-        // recover this filesystem, so everything it protects must be durable
-        // first. Unsynced, the erase may reach the platter before the restored
-        // boot sector, and a power loss there leaves an invalidated signature
-        // with no checkpoint -- the one combination
-        // `check_for_incomplete_resize` reports as `InvalidatedFilesystem` and
-        // refuses to touch.
-        device.sync()?;
-        operations.push("Flushed new geometry".to_string());
-
-        // Clear checkpoint
-        clear_checkpoint(&device)?;
-        operations.push("Cleared checkpoint".to_string());
-
-        // Final sync
-        device.sync()?;
-        operations.push("Synced changes to disk".to_string());
+    // === PHASE 0: Data shift (safe - source preserved) ===
+    let shifted = if starting_phase == ResizePhase::Started {
+        shift_cluster_data(
+            device,
+            &boot,
+            calculation,
+            &plan,
+            incomplete_resize,
+            options.is_verbose(),
+            operations,
+        )?
     } else {
-        operations.push("Dry run: no changes made".to_string());
-    }
+        operations.push("Skipping data shift (already done)".to_string());
+        DataShifted::recorded_by_an_earlier_run(plan.cluster_count())
+    };
+    let clusters_relocated = shifted.clusters_relocated;
 
-    Ok(ResizeResult {
-        old_size_bytes,
-        new_size_bytes,
-        fat_grew: calculation.fat_needs_growth,
-        clusters_relocated,
-        calculation,
-        operations,
-    })
+    // === PHASE 1: FAT operations (dangerous - boot sector invalidated) ===
+    let extended = if starting_phase <= ResizePhase::DataCopied {
+        write_fat_extension(device, boot, calculation, shifted, operations)?
+    } else {
+        operations.push("Skipping FAT operations (already done)".to_string());
+        FatExtended::recorded_by_an_earlier_run(boot, shifted)
+    };
+
+    Ok((FatOnDisk::Written(extended), clusters_relocated))
+}
+
+/// Phase 0: move the affected clusters forward into the sectors the enlarged
+/// FAT will not occupy, recording progress so a crash here can be resumed.
+fn shift_cluster_data(
+    device: &Device,
+    boot: &BootSector,
+    calculation: &SizeCalculation,
+    plan: &RelocationPlan,
+    incomplete_resize: Option<&ResizeCheckpoint>,
+    verbose: bool,
+    operations: &mut Vec<String>,
+) -> Result<DataShifted> {
+    // How far a previous pass got. A fresh run has moved nothing, so it
+    // resumes from the highest cluster in the plan; a resume must read the
+    // recorded position, because restarting the shift from the top would
+    // re-read source sectors the previous pass overwrote.
+    let resume_from = match incomplete_resize {
+        None => plan.highest_cluster(),
+        Some(cp) => cp.shift_progress.ok_or_else(|| {
+            Error::Relocation(
+                "interrupted data shift left no progress record, so the point \
+                 it reached is unknown; resuming would copy already-shifted \
+                 data over itself. The filesystem is intact but must be \
+                 recovered from backup or repaired by hand."
+                    .to_string(),
+            )
+        })?,
+    };
+
+    // Redoing a move is only safe while its source is intact, and
+    // `old_home(c)` survives until the pass descends `shift_clusters` below
+    // it. Recording at least that often keeps every replayed move readable.
+    //
+    // A shift shorter than one cluster overlaps a cluster with itself, so no
+    // move may ever be replayed. A single pass is still safe - each cluster is
+    // read whole before it is written - so the run proceeds, but nothing is
+    // recorded: a later resume then finds no progress record and refuses
+    // rather than corrupting.
+    let shift_clusters = plan.shift_clusters(boot);
+    let resumable = shift_clusters > 0;
+    let record_every = if resumable {
+        PROGRESS_RECORD_EVERY.min(shift_clusters)
+    } else {
+        u32::MAX
+    };
+
+    // Write initial checkpoint
+    let mut checkpoint = ResizeCheckpoint::new(
+        ResizePhase::Started,
+        calculation.old_total_sectors,
+        calculation.new_total_sectors,
+        calculation.old_fat_size,
+        calculation.new_fat_size,
+    );
+    if resumable {
+        checkpoint.shift_progress = Some(resume_from);
+    }
+    write_checkpoint(device, &checkpoint)?;
+    operations.push("Wrote checkpoint (phase 0: started)".to_string());
+
+    maybe_crash_at("after_checkpoint_start");
+
+    // Execute data shift, recording how far it has got as it descends so a
+    // crash here can be resumed rather than replayed from the beginning.
+    let mut record = |next_cluster: u32| -> Result<()> {
+        if !resumable {
+            return Ok(());
+        }
+        let mut cp = checkpoint.clone();
+        cp.shift_progress = Some(next_cluster);
+        write_checkpoint(device, &cp)
+    };
+    let mut progress = ShiftProgress {
+        resume_from,
+        record_every,
+        record: &mut record,
+    };
+    execute_relocation(device, boot, plan, &mut progress, verbose)?;
+    let clusters_relocated = plan.cluster_count();
+    operations.push(format!("Shifted {} clusters forward", clusters_relocated));
+
+    maybe_crash_at("after_data_shift");
+
+    // Update checkpoint to phase 1
+    let checkpoint = ResizeCheckpoint::new(
+        ResizePhase::DataCopied,
+        calculation.old_total_sectors,
+        calculation.new_total_sectors,
+        calculation.old_fat_size,
+        calculation.new_fat_size,
+    );
+    write_checkpoint(device, &checkpoint)?;
+    operations.push("Updated checkpoint (phase 1: data copied)".to_string());
+
+    maybe_crash_at("after_checkpoint_data_copied");
+
+    Ok(DataShifted { clusters_relocated })
+}
+
+/// Phase 1, the danger zone: mark the filesystem unusable, extend FAT1, mirror
+/// it into the remaining FAT copies, and make all of it durable before the
+/// checkpoint promises that it is.
+///
+/// The boot sector goes in valid and comes back invalidated, inside the
+/// witness. That is the whole of the danger zone: it opens when this function
+/// is called and closes when [`commit_new_geometry`] consumes what it returns,
+/// and neither boundary depends on a comment any more ([F-R15]).
+fn write_fat_extension(
+    device: &Device,
+    mut boot: BootSector,
+    calculation: &SizeCalculation,
+    _shifted: DataShifted,
+    operations: &mut Vec<String>,
+) -> Result<FatExtended> {
+    // Invalidate boot sector to prevent other tools from operating
+    boot.invalidate_signature();
+    write_boot_sector(device, &boot)?;
+    device.sync()?;
+    operations.push("Invalidated boot sector (danger zone)".to_string());
+
+    maybe_crash_at("after_boot_invalidate");
+
+    // Initialize new FAT1 sectors
+    init_new_fat_sectors(device, &boot, calculation)?;
+    operations.push("Initialized new FAT sectors".to_string());
+
+    // Sync FAT1 to FAT2
+    sync_fat_copies(device, &boot, calculation)?;
+    operations.push("Synced FAT copies".to_string());
+
+    // [F-R17]: the checkpoint written below is a promise that the FAT
+    // extension is on disk -- a resume reads it and skips the FAT work
+    // entirely. Without this barrier both land in one flush window, so the
+    // device may commit the checkpoint first; a power loss there leaves
+    // recovery refusing to redo work that never reached the platter. Nothing
+    // reads the device between the two helpers above, so one barrier covering
+    // both is sufficient.
+    device.sync()?;
+    operations.push("Flushed FAT writes".to_string());
+
+    maybe_crash_at("after_fat_write");
+
+    // Update checkpoint to phase 2
+    let checkpoint = ResizeCheckpoint::new(
+        ResizePhase::FatWritten,
+        calculation.old_total_sectors,
+        calculation.new_total_sectors,
+        calculation.old_fat_size,
+        calculation.new_fat_size,
+    );
+    write_checkpoint(device, &checkpoint)?;
+    operations.push("Updated checkpoint (phase 2: FAT written)".to_string());
+
+    maybe_crash_at("after_checkpoint_fat_written");
+
+    Ok(FatExtended { boot })
+}
+
+/// Phase 2: publish the new geometry.
+///
+/// Consumes the [`FatOnDisk`], which is what closes the danger zone: after
+/// this returns, no witness of the FAT phase exists any more, so nothing can
+/// commit twice or commit without having gone through phases 0 and 1 first.
+fn commit_new_geometry(
+    device: &Device,
+    fat_on_disk: FatOnDisk,
+    calculation: &SizeCalculation,
+    fsinfo: &mut FSInfo,
+    fsinfo_sector: u16,
+    backup_sector: u16,
+    operations: &mut Vec<String>,
+) -> Result<()> {
+    // Update boot sector with new values and restore signature
+    let mut boot = fat_on_disk
+        .into_boot()
+        .with_geometry(calculation.new_total_sectors, calculation.new_fat_size);
+    boot.restore_signature(); // Restore 0xAA55 signature
+
+    // [F-R26]: the primary boot sector is written LAST, and is the single
+    // commit point for the whole resize. Everything the new geometry
+    // depends on -- the backup boot sector and FSInfo -- is published and
+    // flushed first, while the primary still describes the old layout (or,
+    // on the FAT-growth path, carries an invalidated signature and a live
+    // checkpoint). A crash anywhere before the primary lands therefore
+    // leaves a filesystem that still reads as its old self, which is
+    // recoverable; a crash after it lands leaves one whose supporting
+    // structures are already correct.
+    //
+    // The previous order wrote the primary first, which opened a window
+    // where a valid new-geometry primary sat against a stale old-geometry
+    // backup. That combination is reported as `Error::BackupMismatch` and
+    // refused. [F-R4] has since given that refusal a real escape
+    // (`ResizeOptions::ignore_backup_mismatch`), but the escape asks the
+    // user to vouch for the primary, so leaving the window open would have
+    // meant asking them to vouch for a state this code created itself.
+    write_backup_boot_sector(device, &boot, backup_sector)?;
+    operations.push("Updated backup boot sector".to_string());
+
+    // Update FSInfo with new free cluster count
+    let old_free = fsinfo.free_count();
+    // The old geometry came off a filesystem that validated, so it fits;
+    // falling back to the new count yields a zero delta, which leaves the
+    // free-cluster hint untouched rather than inventing free space.
+    let old_data_clusters = boot
+        .with_geometry(calculation.old_total_sectors, calculation.old_fat_size)
+        .data_clusters()
+        .unwrap_or(calculation.new_data_clusters);
+    let additional_clusters = calculation
+        .new_data_clusters
+        .saturating_sub(old_data_clusters);
+
+    let new_free = if old_free == FSInfo::UNKNOWN_FREE {
+        FSInfo::UNKNOWN_FREE
+    } else {
+        old_free.saturating_add(additional_clusters)
+    };
+    fsinfo.set_free_count(new_free);
+    write_fsinfo(device, fsinfo, fsinfo_sector)?;
+    operations.push(format!("Updated FSInfo (free clusters: {})", new_free));
+
+    // [F-R26]: the supporting structures must be durable before the commit
+    // point publishes a geometry that assumes them.
+    device.sync()?;
+    operations.push("Flushed supporting structures".to_string());
+
+    write_boot_sector(device, &boot)?;
+    operations.push("Updated boot sector (signature restored)".to_string());
+
+    // [F-R18]: clearing the checkpoint retires the only record that can
+    // recover this filesystem, so everything it protects must be durable
+    // first. Unsynced, the erase may reach the platter before the restored
+    // boot sector, and a power loss there leaves an invalidated signature
+    // with no checkpoint -- the one combination
+    // `check_for_incomplete_resize` reports as `InvalidatedFilesystem` and
+    // refuses to touch.
+    device.sync()?;
+    operations.push("Flushed new geometry".to_string());
+
+    // Clear checkpoint
+    clear_checkpoint(device)?;
+    operations.push("Cleared checkpoint".to_string());
+
+    // Final sync
+    device.sync()?;
+    operations.push("Synced changes to disk".to_string());
+
+    Ok(())
 }
 
 /// Print verbose resize information to stderr
