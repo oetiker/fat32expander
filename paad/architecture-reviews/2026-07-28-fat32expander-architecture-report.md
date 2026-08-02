@@ -350,7 +350,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** Resolved by [F-R15]'s witness-typed phase split, as predicted when the two were batched. Re-validated before the fix: the function had grown to **399 lines** (`:25-423`), not the ~307 the report recorded. It is now **62 lines**, and is purely orchestration — the concerns the finding enumerated are separate functions: `prepare_resize` (mount check, open, boot sector, crash detection, backup verification, FSInfo, size calculation, FAT load), `run_fat_phases`, `shift_cluster_data`, `write_fat_extension`, `commit_new_geometry`. The five-level nesting is gone: `run_fat_phases` returns early instead of nesting, so no block sits deeper than two levels. Dry-run is now tested twice rather than four times. The duplicated inline `SizeCalculation` literal survives inside `prepare_resize` — it constructs the calculation from checkpoint values rather than recomputing it, which is deliberate and not what [F-R13] fixed. **Residual, deliberately not chased:** `prepare_resize` is now the largest function at ~144 lines including its doc comments; it is a straight-line sequence of reads with no branching complexity and no phase logic, so it is not a further instance of this finding, but it is where any future decomposition would start.
 - **Status date:** 2026-08-02 05:03 UTC
-- **Status commit:** 1d06412
+- **Status commit:** a143db6
 
 ### [F-R15] Resize phase ordering is enforced only by an integer enum and comments
 - **Category:** 27 (temporal coupling)
@@ -362,7 +362,7 @@ reproduced against crafted ones.
 - **Status:** Fixed
 - **Status reason:** Phase ordering is now carried by the type system rather than by `if starting_phase` guards and `// === DANGER ZONE ===` comments. Each phase is a function taking the previous phase's return value: `shift_cluster_data` yields `DataShifted`, which `write_fat_extension` consumes by value to yield `FatExtended`, which `commit_new_geometry` consumes via `FatOnDisk`. The correct order is therefore the only order that compiles, and because the witnesses are moved rather than borrowed, no phase can be re-entered. Resume does not weaken this: a checkpoint never lets a phase be skipped, it lets the witness be constructed from the record of the run that already did the work (`DataShifted::recorded_by_an_earlier_run`, `FatExtended::recorded_by_an_earlier_run`, the latter still requiring a `DataShifted` so a resume cannot skip a precondition). "Boot sector currently invalidated" is no longer a mutable local: it is the `FatExtended` type, whose existence *is* the statement that the device carries a filesystem marked unusable and that the commit owes it a restored signature. Per the correction above, `restore_signature` was left where it is — it is benign and its idempotency is now documented on `FatOnDisk::into_boot` as a property the design depends on. The commit also removed a redundant `starting_phase` parameter that could have disagreed with the `incomplete_resize` it is derived from. Behaviour-preserving: no test assertion was changed, and all 151 tests pass across the four suite commands.
 - **Status date:** 2026-08-02 05:03 UTC
-- **Status commit:** 1d06412
+- **Status commit:** a143db6
 - **Note:** the empty-relocation-plan case is now explicit as `FatOnDisk::NotWritten` rather than an implicit fall-through, which makes [F-R25] legible in the type system without fixing it.
 
 ### [F-R16] `init_new_fat_sectors` doc states the opposite of the required order
