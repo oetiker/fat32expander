@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - used `let-else` pattern for cleaner checkpoint parsing
 
 ### Fixed
+- A resize that was interrupted while moving data, and then resumed, could write the wrong contents into files on a filesystem with free space between used clusters. Progress is now recorded often enough that a resumed run always copies intact data.
 
 ## 0.0.1 - 2025-12-01
 ### New

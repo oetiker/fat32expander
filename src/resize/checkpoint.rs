@@ -32,7 +32,7 @@ const PROGRESS_OFFSET: usize = 32;
 /// magic (4) + next_cluster (4) + CRC32 (4)
 const PROGRESS_SIZE: usize = 12;
 
-/// Record shift progress at most this often, in moves. The effective interval
+/// Record shift progress at least once per this many clusters. The effective interval
 /// is also capped by the shift distance in clusters - see [`ShiftProgress`].
 pub(crate) const PROGRESS_RECORD_EVERY: u32 = 1024;
 

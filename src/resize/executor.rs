@@ -14,7 +14,6 @@ use crate::fat32::{
 use crate::resize::calculator::{affected_cluster_range, calculate_new_size, SizeCalculation};
 use crate::resize::checkpoint::{
     check_for_incomplete_resize, clear_checkpoint, write_checkpoint, ResizeCheckpoint, ResizePhase,
-    PROGRESS_RECORD_EVERY,
 };
 use crate::resize::fault::maybe_crash_at;
 use crate::resize::options::{ResizeOptions, ResizeResult};
@@ -440,22 +439,15 @@ fn shift_cluster_data(
         })?,
     };
 
-    // Redoing a move is only safe while its source is intact, and
-    // `old_home(c)` survives until the pass descends `shift_clusters` below
-    // it. Recording at least that often keeps every replayed move readable.
+    // How often progress is recorded is decided by `ShiftProgress::new`,
+    // which keeps it within the shift distance ([F-01]).
     //
     // A shift shorter than one cluster overlaps a cluster with itself, so no
     // move may ever be replayed. A single pass is still safe - each cluster is
     // read whole before it is written - so the run proceeds, but nothing is
     // recorded: a later resume then finds no progress record and refuses
     // rather than corrupting.
-    let shift_clusters = plan.shift_clusters(boot);
-    let resumable = shift_clusters > 0;
-    let record_every = if resumable {
-        PROGRESS_RECORD_EVERY.min(shift_clusters)
-    } else {
-        u32::MAX
-    };
+    let resumable = plan.shift_clusters(boot) > 0;
 
     // Write initial checkpoint
     let mut checkpoint = ResizeCheckpoint::new(
@@ -483,11 +475,7 @@ fn shift_cluster_data(
         cp.shift_progress = Some(next_cluster);
         write_checkpoint(device, &cp)
     };
-    let mut progress = ShiftProgress {
-        resume_from,
-        record_every,
-        record: &mut record,
-    };
+    let mut progress = ShiftProgress::new(plan, boot, resume_from, &mut record);
     execute_relocation(device, boot, plan, &mut progress, verbose)?;
     let clusters_relocated = plan.cluster_count();
     operations.push(format!("Shifted {} clusters forward", clusters_relocated));

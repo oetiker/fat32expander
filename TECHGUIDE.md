@@ -614,15 +614,17 @@ fails the suite if that ever becomes true again.
 
 Recovery therefore records progress:
 
-1. Before each batch of at most `min(1024, k)` moves, the checkpoint records the
-   next cluster still to move.
+1. Before any move that lies `min(1024, k)` clusters or more below the last
+   record, the checkpoint records the next cluster still to move. The distance
+   is counted in clusters, not moves: free clusters get no move, so counting
+   moves would let a batch on a fragmented filesystem descend further than `k`.
 2. The preceding batch is synced before that record advances, so the record
    never runs ahead of the data.
 3. A resume skips every move above the recorded cluster.
 
-Replaying up to `k` moves is harmless - `old_home(c)` survives until the pass
-descends `k` clusters below it - which is why progress need not be recorded
-after every single move.
+Replaying the moves within `k` clusters of the record is harmless -
+`old_home(c)` survives until the pass descends `k` clusters below it - which is
+why progress need not be recorded after every single move.
 
 If a checkpoint carries no progress record the position is unknown, and the
 resume is **refused** rather than guessed. The same applies to a shift shorter

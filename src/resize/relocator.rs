@@ -1,6 +1,7 @@
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::fat32::{fat_entry, BootSector};
+use crate::resize::checkpoint::PROGRESS_RECORD_EVERY;
 
 /// A planned cluster relocation representing physical sector movement
 ///
@@ -170,19 +171,53 @@ pub fn plan_relocation(
 ///
 /// A resumed pass is therefore only correct if it knows where the previous one
 /// stopped. The saving grace is that `old_home(c)` survives until the pass has
-/// descended `k` clusters below it, so redoing up to `k` moves is harmless.
-/// That is why progress is recorded every `record_every` moves rather than
-/// after every single one.
+/// descended `k` clusters below it, so redoing moves within `k` clusters of the
+/// last record is harmless.
+///
+/// [F-01]: that bound is a distance in *clusters*. Free clusters get no move,
+/// so on a filesystem with gaps a handful of moves can descend further than
+/// `k`; counting the interval in moves let a resume read a source the previous
+/// pass had already overwritten. The interval is now a cluster distance, and
+/// [`ShiftProgress::new`] derives it from the plan, so code outside this module
+/// cannot choose one that breaks the bound.
 pub struct ShiftProgress<'a> {
     /// Highest cluster still to be moved. Moves for clusters above it were
     /// completed by an earlier pass and must not be repeated.
-    pub resume_from: u32,
-    /// How often to record progress, in moves. Must not exceed the shift
-    /// distance in clusters, or a resumed pass could redo a move whose source
-    /// has already been overwritten.
-    pub record_every: u32,
+    resume_from: u32,
+    /// Record progress before any move that lies this many clusters or more
+    /// below the last record. Must not exceed the shift distance in clusters,
+    /// or a resumed pass could redo a move whose source is already
+    /// overwritten. Set only by [`ShiftProgress::new`], except in this
+    /// module's tests, which exercise the mechanism with chosen intervals.
+    record_every: u32,
     /// Durably record "the next move still to run is for this cluster".
-    pub record: &'a mut dyn FnMut(u32) -> Result<()>,
+    record: &'a mut dyn FnMut(u32) -> Result<()>,
+}
+
+impl<'a> ShiftProgress<'a> {
+    /// Progress tracking for `plan`, resuming below `resume_from`.
+    ///
+    /// The interval is at most [`PROGRESS_RECORD_EVERY`] clusters, and never
+    /// more than the shift distance. A shift shorter than one cluster overlaps
+    /// each cluster with itself, so no move may ever be replayed; such a pass
+    /// records only once, at its start, and the caller must not treat that
+    /// record as resumable.
+    pub fn new(
+        plan: &RelocationPlan,
+        boot: &BootSector,
+        resume_from: u32,
+        record: &'a mut dyn FnMut(u32) -> Result<()>,
+    ) -> Self {
+        let record_every = match plan.shift_clusters(boot) {
+            0 => u32::MAX,
+            shift_clusters => PROGRESS_RECORD_EVERY.min(shift_clusters),
+        };
+        ShiftProgress {
+            resume_from,
+            record_every,
+            record,
+        }
+    }
 }
 
 /// Execute a relocation plan by shifting all data forward
@@ -230,18 +265,24 @@ pub fn execute_relocation(
         }
     }
 
-    let record_every = progress.record_every.max(1) as usize;
+    let record_every = progress.record_every.max(1);
+    let mut last_recorded: Option<u32> = None;
 
     // Copy data from highest cluster to lowest (already sorted in plan_relocation)
     for (i, mv) in remaining.iter().enumerate() {
-        if i % record_every == 0 {
+        let due = match last_recorded {
+            None => true,
+            Some(last) => last - mv.from_cluster >= record_every,
+        };
+        if due {
             // Everything copied since the last record has to reach the medium
             // before the record advances past it, or recovery would skip moves
             // that were never durable.
-            if i > 0 {
+            if last_recorded.is_some() {
                 device.sync()?;
             }
             (progress.record)(mv.from_cluster)?;
+            last_recorded = Some(mv.from_cluster);
         }
 
         if verbose && (i < 10 || i % 100 == 0 || i == remaining.len() - 1) {
@@ -686,6 +727,82 @@ mod tests {
         execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap();
 
         assert_all_landed(&device, &new_boot, &in_use);
+    }
+
+    /// [F-01]: the replay bound holds in clusters, not in moves. Free clusters
+    /// get no move, so on a filesystem with gaps a few moves can descend more
+    /// than `shift_clusters` clusters. Here the shift is 2 and clusters 10 and
+    /// 8 are in use with 9 free: moving 8 writes over the old home of 10, so a
+    /// record must name 8 before that move, or a resume from 10 reads 8's data
+    /// as 10's.
+    #[test]
+    fn execute_relocation_resumes_safely_across_free_clusters() {
+        let old_boot = boot_sector(OLD_FAT_SIZE);
+        let new_boot = boot_sector(OLD_FAT_SIZE + 8);
+        let (_file, device) = temp_device();
+        let in_use = [4u32, 8, 10];
+        let fat = fat_with(&in_use);
+        let plan = plan_relocation(&old_boot, &new_boot, &fat, 2).unwrap();
+        assert_eq!(plan.shift_clusters(&old_boot), 2);
+
+        populate(&device, &old_boot, &in_use);
+
+        // First pass: power loss at the second record, whenever that is.
+        let mut recorded = Vec::new();
+        {
+            let mut record = |next_cluster: u32| -> Result<()> {
+                if recorded.len() == 1 {
+                    return Err(Error::Relocation("simulated power loss".to_string()));
+                }
+                recorded.push(next_cluster);
+                Ok(())
+            };
+            let mut progress = ShiftProgress {
+                resume_from: plan.highest_cluster(),
+                record_every: 2,
+                record: &mut record,
+            };
+            execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap_err();
+        }
+        assert_eq!(recorded, vec![10]);
+
+        let mut record = |_next_cluster: u32| Ok(());
+        let mut progress = ShiftProgress {
+            resume_from: *recorded.last().unwrap(),
+            record_every: 2,
+            record: &mut record,
+        };
+        execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap();
+
+        assert_all_landed(&device, &new_boot, &in_use);
+    }
+
+    /// [F-01]: the interval comes from the plan, so it can never exceed the
+    /// shift distance, and is capped for shifts longer than the cap.
+    #[test]
+    fn shift_progress_interval_never_exceeds_the_shift_distance() {
+        let fat = fat_with(&[2]);
+        let interval = |old_boot: &BootSector, new_boot: &BootSector| {
+            let plan = plan_relocation(old_boot, new_boot, &fat, 2).unwrap();
+            let mut record = |_next_cluster: u32| Ok(());
+            ShiftProgress::new(&plan, old_boot, plan.highest_cluster(), &mut record).record_every
+        };
+
+        // 1 and 2 clusters at 8 sectors per cluster.
+        let old_boot = boot_sector(OLD_FAT_SIZE);
+        assert_eq!(interval(&old_boot, &boot_sector(OLD_FAT_SIZE + 4)), 1);
+        assert_eq!(interval(&old_boot, &boot_sector(OLD_FAT_SIZE + 8)), 2);
+
+        // Shorter than one cluster: nothing may be replayed.
+        assert_eq!(
+            interval(&old_boot, &boot_sector(OLD_FAT_SIZE + 1)),
+            u32::MAX
+        );
+
+        // 1200 clusters at 1 sector per cluster: the cap applies.
+        let old_boot = boot_sector_with(1, TOTAL_SECTORS, OLD_FAT_SIZE);
+        let new_boot = boot_sector_with(1, TOTAL_SECTORS, OLD_FAT_SIZE + 600);
+        assert_eq!(interval(&old_boot, &new_boot), PROGRESS_RECORD_EVERY);
     }
 
     /// The negative control for the test above: restarting an interrupted
