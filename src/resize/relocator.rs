@@ -640,6 +640,54 @@ mod tests {
         assert_all_landed(&device, &new_boot, &in_use);
     }
 
+    /// Safety net for [F-01]: a resume over a shift of more than one cluster,
+    /// recorded every `shift_clusters` moves, must leave every cluster intact
+    /// when the in-use clusters are contiguous. Here a move and a cluster are
+    /// the same distance, so this holds whatever unit the interval is counted
+    /// in, and a fix to that unit must keep it holding.
+    #[test]
+    fn execute_relocation_resumes_a_multi_cluster_shift_over_contiguous_clusters() {
+        // 2 FATs x 8 sectors of growth = 16 sectors = 2 clusters.
+        let old_boot = boot_sector(OLD_FAT_SIZE);
+        let new_boot = boot_sector(OLD_FAT_SIZE + 8);
+        let (_file, device) = temp_device();
+        let in_use = [2u32, 3, 4, 5, 6, 7, 8, 9];
+        let fat = fat_with(&in_use);
+        let plan = plan_relocation(&old_boot, &new_boot, &fat, 2).unwrap();
+        assert_eq!(plan.shift_clusters(&old_boot), 2);
+
+        populate(&device, &old_boot, &in_use);
+
+        // First pass: abort on the third record, after four moves.
+        let mut recorded = Vec::new();
+        {
+            let mut record = |next_cluster: u32| -> Result<()> {
+                if recorded.len() == 2 {
+                    return Err(Error::Relocation("simulated power loss".to_string()));
+                }
+                recorded.push(next_cluster);
+                Ok(())
+            };
+            let mut progress = ShiftProgress {
+                resume_from: plan.highest_cluster(),
+                record_every: 2,
+                record: &mut record,
+            };
+            execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap_err();
+        }
+        assert_eq!(recorded, vec![9, 7]);
+
+        let mut record = |_next_cluster: u32| Ok(());
+        let mut progress = ShiftProgress {
+            resume_from: *recorded.last().unwrap(),
+            record_every: 2,
+            record: &mut record,
+        };
+        execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap();
+
+        assert_all_landed(&device, &new_boot, &in_use);
+    }
+
     /// The negative control for the test above: restarting an interrupted
     /// shift from the top - which is what happens without a progress record -
     /// re-reads sources the first pass overwrote and destroys data.

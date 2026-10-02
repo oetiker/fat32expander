@@ -187,6 +187,61 @@ fn a_backup_mismatch_is_refused_and_says_so() {
     );
 }
 
+/// Safety net for [F-05]: the refusal has its own exit code, and it tells the
+/// user which flag overrides it.
+#[test]
+fn a_backup_mismatch_exits_8_and_names_the_override() {
+    let image = image_with_mismatched_backup(96, 64);
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(8),
+        "a backup mismatch must exit 8.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("--ignore-backup-mismatch"),
+        "the refusal must name the override flag.\noutput:\n{combined}"
+    );
+}
+
+/// Safety net for [F-05]: before it changes anything, a resize tells the user
+/// how big the filesystem is and how big it will be, in bytes.
+#[test]
+fn a_dry_run_reports_the_current_and_the_new_size() {
+    let image = valid_image(96, 64);
+
+    let output = run(&[
+        std::ffi::OsStr::new("resize"),
+        std::ffi::OsStr::new("--dry-run"),
+        image.path().as_os_str(),
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    let current = (64u64 * 1024 * 1024).to_string();
+    let new = (96u64 * 1024 * 1024).to_string();
+    assert!(
+        stdout.contains(&current),
+        "the current size ({current} bytes) must be reported.\nstdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&new),
+        "the new size ({new} bytes) must be reported.\nstdout:\n{stdout}"
+    );
+}
+
 /// [F-R4]: the override must actually reach the library.
 ///
 /// The CLI used to print "Use --force to proceed anyway" and then hand

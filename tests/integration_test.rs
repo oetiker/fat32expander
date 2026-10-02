@@ -273,6 +273,59 @@ fn test_free_cluster_count_tracks_added_clusters() {
     );
 }
 
+/// A filesystem whose FAT already has room for the grown volume.
+///
+/// `mkfs.fat` sizes the FAT tighter than the formula the resize uses, so a
+/// freshly made image always takes the FAT-growth path, however small the
+/// increase. A filesystem this tool has already grown carries a formula-sized
+/// FAT: 128 MiB grown to 129 MiB (264192 sectors) has a FAT of 2048 sectors,
+/// which still covers 264224 sectors. Growing by those 32 sectors therefore
+/// takes the no-growth path.
+fn image_ready_for_a_resize_without_fat_growth() -> NamedTempFile {
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 129);
+    resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("First resize failed");
+    extend_image_kib(image.path(), 264224 / 2);
+    image
+}
+
+/// Safety net for [F-04] and [F-12]: a resize that does not grow the FAT must
+/// still add the new clusters to the free count exactly once, and keep files.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn a_resize_without_fat_growth_adds_the_new_clusters_and_keeps_files() {
+    let image = image_ready_for_a_resize_without_fat_growth();
+    let payload: Vec<u8> = (0..40 * 1024u32).map(|i| (i % 251) as u8).collect();
+    let source = NamedTempFile::new().expect("Failed to create payload file");
+    std::fs::write(source.path(), &payload).expect("Failed to write payload");
+    mcopy_into(image.path(), source.path(), "NOGROW.BIN");
+
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        !result.fat_grew,
+        "fixture drifted: this case must not grow the FAT"
+    );
+    assert_eq!(result.clusters_relocated, 0);
+    assert!(result.new_size_bytes > result.old_size_bytes);
+
+    let after = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(after.boot().total_sectors(), 264224);
+    assert_eq!(after.boot().fat_size(), before.boot().fat_size());
+    let added_clusters = after.data_clusters() - before.data_clusters();
+    assert!(added_clusters > 0, "resize should add clusters");
+    assert_eq!(
+        after.free_clusters(),
+        before.free_clusters() + added_clusters,
+        "free count must grow by exactly the number of clusters added"
+    );
+    assert!(!after.can_grow(), "Should be at max size now");
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+    assert_eq!(mcopy_out(image.path(), "NOGROW.BIN"), payload);
+}
+
 #[test]
 #[ignore] // Requires mkfs.fat
 fn test_dry_run() {
