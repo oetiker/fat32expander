@@ -118,7 +118,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** Reproduced by `execute_relocation_resumes_safely_across_free_clusters` (cluster 10 corrupted on resume). The interval is now a cluster distance, and `ShiftProgress::new` derives it from the plan (`min(PROGRESS_RECORD_EVERY, shift_clusters)`) with private fields, so code outside the relocator cannot pick an unsafe interval.
 - **Status date:** 2026-10-03 UTC
-- **Status commit:** ba74698
+- **Status commit:** 9c8ecfd
 
 ### [F-02] Resume adopts checkpoint geometry without comparing it to the boot sector
 - **Category:** 26 Poor transactional boundaries
