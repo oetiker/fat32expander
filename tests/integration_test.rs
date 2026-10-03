@@ -328,6 +328,41 @@ fn a_resize_without_fat_growth_adds_the_new_clusters_and_keeps_files() {
     assert_eq!(mcopy_out(image.path(), "NOGROW.BIN"), payload);
 }
 
+/// [F-04]: the commit must be safe to run twice. A crash after the backup boot
+/// sector and FSInfo are written, but before the primary boot sector, leaves
+/// the old primary next to a new backup. Rerunning with the backup override
+/// commits again, and must not add the new clusters to the free count twice.
+#[test]
+#[ignore] // Requires mkfs.fat and dosfsck
+fn rerunning_an_interrupted_commit_counts_the_new_clusters_once() {
+    let image = image_ready_for_a_resize_without_fat_growth();
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    let old_primary = std::fs::read(image.path()).expect("Failed to read image")[..512].to_vec();
+
+    resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+
+    // The on-disk state of a crash just before the primary boot sector write.
+    let mut data = std::fs::read(image.path()).expect("Failed to read image");
+    data[..512].copy_from_slice(&old_primary);
+    std::fs::write(image.path(), &data).expect("Failed to write image");
+
+    resize_fat32(
+        ResizeOptions::new(image.path())
+            .dry_run(false)
+            .ignore_backup_mismatch(true),
+    )
+    .expect("Rerun failed");
+
+    let after = get_fs_info(image.path()).expect("Failed to get fs info");
+    let added_clusters = after.data_clusters() - before.data_clusters();
+    assert_eq!(
+        after.free_clusters(),
+        before.free_clusters() + added_clusters,
+        "a rerun of the commit must count the new clusters once"
+    );
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+}
+
 #[test]
 #[ignore] // Requires mkfs.fat
 fn test_dry_run() {

@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - A resize that was interrupted while moving data, and then resumed, could write the wrong contents into files on a filesystem with free space between used clusters. Progress is now recorded often enough that a resumed run always copies intact data.
+- After a resize was interrupted and run again, the free space shown by `fat32expander info` and the operating system could be too high, because the new clusters were counted twice. This happened when the rerun used `--ignore-backup-mismatch`, or resumed an interrupted resize late in its last step. The free-cluster count is now computed from the FAT on every run, which also replaces an "Unknown" or wrong count with the real value.
 
 ## 0.0.1 - 2025-12-01
 ### New

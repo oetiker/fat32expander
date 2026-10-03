@@ -7,9 +7,9 @@
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::fat32::{
-    boot_sectors_match, open_fat32_device, read_backup_boot_sector, read_boot_sector_for_recovery,
-    read_fat_table, read_fsinfo, write_backup_boot_sector, write_boot_sector, write_fsinfo,
-    BootSector, FSInfo,
+    boot_sectors_match, fat_entry, open_fat32_device, read_backup_boot_sector,
+    read_boot_sector_for_recovery, read_fat_table, read_fsinfo, write_backup_boot_sector,
+    write_boot_sector, write_fsinfo, BootSector, FSInfo,
 };
 use crate::resize::calculator::{affected_cluster_range, calculate_new_size, SizeCalculation};
 use crate::resize::checkpoint::{
@@ -149,6 +149,8 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         print_verbose_resize_info(&boot, &calculation);
     }
 
+    fsinfo.set_free_count(free_clusters_after_resize(&boot, &calculation, &fat));
+
     let old_size_bytes = calculation.old_total_sectors as u64 * boot.bytes_per_sector() as u64;
     let new_size_bytes = calculation.new_total_sectors as u64 * boot.bytes_per_sector() as u64;
 
@@ -171,7 +173,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
             &device,
             fat_on_disk,
             &calculation,
-            &mut fsinfo,
+            &fsinfo,
             fsinfo_sector,
             backup_sector,
             &mut operations,
@@ -566,7 +568,7 @@ fn commit_new_geometry(
     device: &Device,
     fat_on_disk: FatOnDisk,
     calculation: &SizeCalculation,
-    fsinfo: &mut FSInfo,
+    fsinfo: &FSInfo,
     fsinfo_sector: u16,
     backup_sector: u16,
     operations: &mut Vec<String>,
@@ -597,25 +599,9 @@ fn commit_new_geometry(
     write_backup_boot_sector(device, &boot, backup_sector)?;
     operations.push("Updated backup boot sector".to_string());
 
-    // Update FSInfo with new free cluster count
-    let old_free = fsinfo.free_count();
-    // The old geometry came off a filesystem that validated, so it fits;
-    // falling back to the new count yields a zero delta, which leaves the
-    // free-cluster hint untouched rather than inventing free space.
-    let old_data_clusters = boot
-        .with_geometry(calculation.old_total_sectors, calculation.old_fat_size)
-        .data_clusters()
-        .unwrap_or(calculation.new_data_clusters);
-    let additional_clusters = calculation
-        .new_data_clusters
-        .saturating_sub(old_data_clusters);
-
-    let new_free = if old_free == FSInfo::UNKNOWN_FREE {
-        FSInfo::UNKNOWN_FREE
-    } else {
-        old_free.saturating_add(additional_clusters)
-    };
-    fsinfo.set_free_count(new_free);
+    // The free count was set by the caller from the FAT; see
+    // [`free_clusters_after_resize`].
+    let new_free = fsinfo.free_count();
     write_fsinfo(device, fsinfo, fsinfo_sector)?;
     operations.push(format!("Updated FSInfo (free clusters: {})", new_free));
 
@@ -646,6 +632,36 @@ fn commit_new_geometry(
     operations.push("Synced changes to disk".to_string());
 
     Ok(())
+}
+
+/// The free-cluster count of the resized filesystem.
+///
+/// [F-04]: the count is derived from the FAT, never from the free count
+/// already on disk. Adding the new clusters to the on-disk hint counted them
+/// twice whenever the commit ran again after FSInfo had landed: a
+/// `FatWritten` resume, or the `--ignore-backup-mismatch` rerun after a crash
+/// between the FSInfo write and the primary boot sector's. `fat` is read with
+/// the old geometry and no phase changes its entries, so this is the same
+/// number on every run.
+fn free_clusters_after_resize(
+    boot: &BootSector,
+    calculation: &SizeCalculation,
+    fat: &[u32],
+) -> u32 {
+    // The old geometry came off a filesystem that validated, so it fits;
+    // falling back to the new count yields no added clusters rather than
+    // inventing free space.
+    let old_data_clusters = boot
+        .with_geometry(calculation.old_total_sectors, calculation.old_fat_size)
+        .data_clusters()
+        .unwrap_or(calculation.new_data_clusters);
+    let old_free = (2..old_data_clusters.saturating_add(2) as usize)
+        .filter(|&cluster| fat.get(cluster).copied().is_some_and(fat_entry::is_free))
+        .count() as u32;
+    let additional_clusters = calculation
+        .new_data_clusters
+        .saturating_sub(old_data_clusters);
+    old_free.saturating_add(additional_clusters)
 }
 
 /// Print verbose resize information to stderr
