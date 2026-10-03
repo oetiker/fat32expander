@@ -139,6 +139,24 @@ pub enum Error {
         "Incomplete resize detected at phase {0}, but device size changed. Cannot safely resume."
     )]
     ResizeSizeMismatch(u8),
+
+    /// [F-02]: the record was not written by an interrupted resize of this
+    /// filesystem. A real record always names the geometry the boot sector
+    /// still carries, because the new geometry is written last.
+    #[error(
+        "Resize checkpoint does not match this filesystem: it records {old_total_sectors} -> \
+         {new_total_sectors} sectors with a FAT of {old_fat_size} -> {new_fat_size} sectors, but \
+         the boot sector says {boot_total_sectors} sectors with a FAT of {boot_fat_size} sectors. \
+         Cannot safely resume."
+    )]
+    CheckpointMismatch {
+        old_total_sectors: u32,
+        new_total_sectors: u32,
+        old_fat_size: u32,
+        new_fat_size: u32,
+        boot_total_sectors: u32,
+        boot_fat_size: u32,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -242,6 +242,66 @@ fn a_dry_run_reports_the_current_and_the_new_size() {
     );
 }
 
+/// Write a version-1 checkpoint record into the last sector of `path`.
+///
+/// Built by hand from the documented layout (TECHGUIDE, `checkpoint.rs`), so
+/// the test needs no access to the crate's internals.
+fn plant_checkpoint(path: &std::path::Path, phase: u8, geometry: [u32; 4]) {
+    let mut data = std::fs::read(path).expect("read image");
+    let at = data.len() - 512;
+    let mut record = [0u8; 512];
+    record[0..8].copy_from_slice(b"FAT32RSZ");
+    record[8] = 1; // version
+    record[9] = phase;
+    for (i, value) in geometry.iter().enumerate() {
+        record[12 + 4 * i..16 + 4 * i].copy_from_slice(&value.to_le_bytes());
+    }
+    let crc = crc32fast::hash(&record[0..28]);
+    record[28..32].copy_from_slice(&crc.to_le_bytes());
+    data[at..].copy_from_slice(&record);
+    std::fs::write(path, &data).expect("write image");
+}
+
+/// [F-02]: a checkpoint whose old geometry is not the geometry in the boot
+/// sector next to it was not written by an interrupted resize of this
+/// filesystem. Resuming from it would commit a geometry computed for another
+/// volume, so it must be refused as needing recovery, without a single write.
+#[test]
+fn a_checkpoint_that_disagrees_with_the_boot_sector_is_refused() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    // FatWritten (2) from a filesystem 1 MiB smaller, with the same FAT size.
+    plant_checkpoint(
+        image.path(),
+        2,
+        [fs_sectors - 2048, device_sectors, 1024, 1024],
+    );
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(9),
+        "a mismatched checkpoint must exit 9.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.to_lowercase().contains("checkpoint"),
+        "the refusal must name the checkpoint.\noutput:\n{combined}"
+    );
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resume must not modify the image by a single byte"
+    );
+}
+
 /// [F-R4]: the override must actually reach the library.
 ///
 /// The CLI used to print "Use --force to proceed anyway" and then hand

@@ -117,6 +117,34 @@ impl ResizeCheckpoint {
         self
     }
 
+    /// Refuse a record that an interrupted resize of the filesystem behind
+    /// `boot` cannot have written.
+    ///
+    /// [F-02]: the resume path takes its whole size calculation from the
+    /// record. Every phase leaves the old geometry in the boot sector, since
+    /// the commit writes the new one last and clears the record after it, so
+    /// a real record's old geometry always equals the boot sector's. A stale
+    /// or foreign record behind a valid boot sector used to drive the shift
+    /// plan and the FAT extension with another volume's numbers, and could
+    /// commit a FAT too small for the volume it described.
+    pub fn check_against(&self, boot: &BootSector) -> Result<()> {
+        let matches = self.old_total_sectors == boot.total_sectors()
+            && self.old_fat_size == boot.fat_size()
+            && self.new_total_sectors > self.old_total_sectors
+            && self.new_fat_size >= self.old_fat_size;
+        if matches {
+            return Ok(());
+        }
+        Err(Error::CheckpointMismatch {
+            old_total_sectors: self.old_total_sectors,
+            new_total_sectors: self.new_total_sectors,
+            old_fat_size: self.old_fat_size,
+            new_fat_size: self.new_fat_size,
+            boot_total_sectors: boot.total_sectors(),
+            boot_fat_size: boot.fat_size(),
+        })
+    }
+
     /// Serialize checkpoint to bytes with specified sector size
     pub fn to_bytes(&self, sector_size: usize) -> Vec<u8> {
         let mut data = vec![0u8; sector_size];
@@ -641,6 +669,43 @@ mod tests {
 
         clear_checkpoint(&device).unwrap();
         assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+    }
+
+    /// [F-02]: only a record whose old geometry is the boot sector's, and
+    /// whose new geometry grows it, can come from an interrupted resize of
+    /// that filesystem.
+    #[test]
+    fn checkpoint_must_describe_the_filesystem_behind_the_boot_sector() {
+        let boot = test_boot_sector(2000, 100);
+        let record = |old_total, new_total, old_fat, new_fat| {
+            ResizeCheckpoint::new(
+                ResizePhase::DataCopied,
+                old_total,
+                new_total,
+                old_fat,
+                new_fat,
+            )
+            .check_against(&boot)
+        };
+
+        assert!(record(2000, 4000, 100, 104).is_ok(), "FAT growth");
+        assert!(record(2000, 4000, 100, 100).is_ok(), "no FAT growth");
+
+        for (old_total, new_total, old_fat, new_fat, what) in [
+            (1999, 4000, 100, 104, "old size differs"),
+            (2000, 4000, 99, 104, "old FAT size differs"),
+            (2000, 2000, 100, 104, "volume does not grow"),
+            (2000, 1000, 100, 104, "volume shrinks"),
+            (2000, 4000, 100, 96, "FAT shrinks"),
+        ] {
+            assert!(
+                matches!(
+                    record(old_total, new_total, old_fat, new_fat),
+                    Err(Error::CheckpointMismatch { .. })
+                ),
+                "{what}: the record must be refused"
+            );
+        }
     }
 
     /// Crash detection reads the same last sector. It must find a checkpoint

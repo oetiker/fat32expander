@@ -161,11 +161,13 @@ pub(crate) fn affected_cluster_range(
         return (0, 0);
     }
 
-    let total_growth = (new_fat_size - old_fat_size) * boot.num_fats() as u32;
-    let affected_clusters = total_growth.div_ceil(boot.sectors_per_cluster() as u32);
+    // [F-02]: on a resume these sizes come from a checkpoint record, so the
+    // arithmetic saturates rather than trusting them not to overflow.
+    let total_growth = (new_fat_size - old_fat_size).saturating_mul(boot.num_fats() as u32);
+    let affected_clusters = total_growth.div_ceil(boot.sectors_per_cluster().max(1) as u32);
 
     let first = 2u32;
-    (first, first + affected_clusters - 1)
+    (first, first.saturating_add(affected_clusters - 1))
 }
 
 /// Calculate the required FAT size in sectors

@@ -271,7 +271,8 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
         Error::BootSectorInvalidated
         | Error::InvalidatedFilesystem
         | Error::CheckpointCorrupted
-        | Error::ResizeSizeMismatch(_) => exit::NEEDS_RECOVERY,
+        | Error::ResizeSizeMismatch(_)
+        | Error::CheckpointMismatch { .. } => exit::NEEDS_RECOVERY,
 
         Error::DeviceIo { .. }
         | Error::DeviceSync { .. }

@@ -223,6 +223,7 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
     };
 
     if let Some(ref checkpoint) = incomplete_resize {
+        checkpoint.check_against(&boot)?;
         eprintln!(
             "Resuming interrupted resize from phase {:?}...",
             checkpoint.phase
