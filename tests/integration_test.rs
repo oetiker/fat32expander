@@ -64,11 +64,9 @@ fn test_info_command() {
 #[test]
 #[ignore] // Requires mkfs.fat and dosfsck
 fn test_resize_without_fat_growth() {
-    // Create a 128MB FAT32 image
-    let image = create_fat32_image(128);
-
-    // Extend to 150MB (small increase, shouldn't require FAT growth)
-    extend_image(image.path(), 150);
+    // [F-12]: 128 -> 150 MB, which this test used before, grows the FAT. See
+    // the fixture for why a fresh mkfs.fat image always does.
+    let image = image_ready_for_a_resize_without_fat_growth();
 
     // Get info before resize
     let info_before = get_fs_info(image.path()).expect("Failed to get fs info");
@@ -80,6 +78,10 @@ fn test_resize_without_fat_growth() {
         .verbose(false);
     let result = resize_fat32(options).expect("Resize failed");
 
+    assert!(
+        !result.fat_grew,
+        "fixture drifted: this case must not grow the FAT"
+    );
     assert!(result.new_size_bytes > result.old_size_bytes);
 
     // Get info after resize

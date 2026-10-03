@@ -101,7 +101,7 @@ The test script (`scripts/test-resize.sh`) creates FAT32 images using `mkfs.fat`
 
 Key test scenarios:
 - Empty filesystem resize
-- Resize without FAT growth (small increase)
+- Resize without FAT growth (a filesystem this tool already grew, enlarged by 32 sectors; a fresh `mkfs.fat` image always grows the FAT)
 - Resize with FAT growth (requires relocation)
 - Files in root directory
 - Nested subdirectories

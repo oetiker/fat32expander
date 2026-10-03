@@ -240,8 +240,15 @@ test_simple_resize() {
     log_test "Simple Resize (No FAT Growth)"
 
     local img="$WORK_DIR/test_simple.img"
+    # mkfs.fat sizes the FAT tighter than the resize does, so growing a fresh
+    # image always grows the FAT ([F-12]: this used 128 -> 140 MB, which did).
+    # 128 MiB grown to 129 MiB by this tool has a FAT that still covers
+    # 264224 sectors, so the second step does not grow it.
     create_image "$img" 128
-    extend_image "$img" 140
+    extend_image "$img" 129
+    run_resize "$img" > /dev/null
+    log_info "Extending image to 264224 sectors"
+    truncate -s $((264224 * 512)) "$img"
 
     log_info "Before resize:"
     show_info "$img" | grep -E "(Total sectors|FAT size|Can grow)"
@@ -249,7 +256,13 @@ test_simple_resize() {
     check_fs "$img" "before resize"
 
     log_info "Running resize..."
-    run_resize "$img" --verbose
+    local output
+    output=$(run_resize "$img" --verbose)
+    echo "$output"
+    if ! grep -q "FAT tables grew: false" <<< "$output"; then
+        log_error "Fixture drifted: this resize grew the FAT"
+        return 1
+    fi
 
     log_info "After resize:"
     show_info "$img" | grep -E "(Total sectors|FAT size|Can grow)"

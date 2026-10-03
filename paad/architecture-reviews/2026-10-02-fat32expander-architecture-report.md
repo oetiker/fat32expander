@@ -196,6 +196,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** `test_resize_without_fat_growth` and `no_valid_checkpoint_survives_a_resize_without_fat_growth` use 128 → 150 MB, which takes the growth path, and neither asserts `!fat_grew`. No test anywhere asserts `fat_grew == false`, so the checkpoint-less commit ([F-04]) runs untested.
 - **Evidence:** `tests/integration_test.rs:66-73`, excerpt: "Extend to 150MB (small increase, shouldn't require FAT growth)"; `tests/durability_test.rs:362-366`; only `fat_grew` asserts are `true` (`integration_test.rs:230,715`); `scripts/test-resize.sh:95` uses default `mkfs.fat -F 32`
 - **Found by:** Security & Code Quality. Follow-up to [F-R56].
+- **Status:** Fixed
+- **Status reason:** `test_resize_without_fat_growth`, `no_valid_checkpoint_survives_a_resize_without_fat_growth` and the shell scenario "Simple Resize (No FAT Growth)" now grow a filesystem this tool already resized by 32 sectors, which keeps the FAT size, and each asserts that the FAT did not grow. A fresh `mkfs.fat` image cannot be used: its FAT is smaller than the resize formula's, so any increase grows it. The safety-net test `a_resize_without_fat_growth_adds_the_new_clusters_and_keeps_files` covers the free count and file contents on this path.
+- **Status date:** 2026-10-03 UTC
+- **Status commit:** PENDING
 
 ### [F-13] No negative or fuzz tests for crash-recovery and untrusted-input paths
 - **Category:** 32 Missing test coverage for critical paths
@@ -203,6 +207,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** No test feeds a checkpoint that disagrees with the boot sector ([F-02]), a moved device ([F-03]), a bad `backup_boot_sector` ([F-10]), or a sparse in-use pattern to the shift resume ([F-01]). No fuzz or property harness exists; FAT1/FAT2 equality is checked only via dosfsck.
 - **Evidence:** `Cargo.toml` `[dev-dependencies]` — `tempfile = "3.0"` only; `grep ResizeSizeMismatch tests/` → none; `src/resize/relocator.rs:~598` "in_use = [2u32, 3, 4, 5, 6, 7, 8, 9]"
 - **Found by:** Security & Code Quality. Continues [F-R12].
+- **Status:** Partially fixed
+- **Status reason:** The sparse in-use pattern for the shift resume ([F-01]) is now tested (`execute_relocation_resumes_safely_across_free_clusters`). Still open: negative tests for [F-02], [F-03], [F-10], and any fuzz or property harness.
+- **Status date:** 2026-10-03 UTC
+- **Status commit:** 9c8ecfd
 
 ### [F-14] A machine-specific `target` symlink is tracked in git
 - **Category:** 22 Configuration sprawl

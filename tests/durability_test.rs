@@ -114,6 +114,25 @@ fn growable_image() -> NamedTempFile {
     image
 }
 
+/// A filesystem whose FAT already has room for the grown volume.
+///
+/// `mkfs.fat` sizes the FAT tighter than the formula the resize uses, so a
+/// freshly made image always takes the FAT-growth path. 128 MiB grown to
+/// 129 MiB (264192 sectors) by this tool has a FAT of 2048 sectors, which
+/// still covers 264224 sectors, so growing by those 32 sectors does not grow
+/// the FAT. The same fixture lives in `integration_test.rs`.
+fn image_ready_for_a_resize_without_fat_growth() -> NamedTempFile {
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 129);
+    resize(image.path());
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(image.path())
+        .expect("Failed to open image");
+    file.set_len(264224 * 512).expect("Failed to extend image");
+    image
+}
+
 fn resize(path: &Path) {
     let options = ResizeOptions::new(path).dry_run(false).verbose(false);
     resize_fat32(options).expect("resize failed");
@@ -360,9 +379,14 @@ fn no_valid_checkpoint_survives_a_fat_growth_resize() {
 #[test]
 #[ignore] // Requires mkfs.fat and dosfsck
 fn no_valid_checkpoint_survives_a_resize_without_fat_growth() {
-    let image = create_fat32_image(128);
-    extend_image(image.path(), 150);
-    resize(image.path());
+    // [F-12]: 128 -> 150 MB, which this test used before, grows the FAT.
+    let image = image_ready_for_a_resize_without_fat_growth();
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("resize failed");
+    assert!(
+        !result.fat_grew,
+        "fixture drifted: this case must not grow the FAT"
+    );
 
     let l = layout_of(image.path());
     let last = read_sector(image.path(), l.checkpoint, l.sector_size);
