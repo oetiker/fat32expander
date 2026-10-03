@@ -143,7 +143,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Partially fixed
 - **Status reason:** The FSInfo free count is now derived from the FAT (`free_clusters_after_resize`), not added to the on-disk hint, so a rerun of the commit gives the same value; reproduced first by `rerunning_an_interrupted_commit_counts_the_new_clusters_once` (260127 instead of 260095). Still open: the no-growth path writes no checkpoint, so a crash between the backup and primary boot sector writes still ends in `BackupMismatch` (exit 8) and needs `--ignore-backup-mismatch`, which is now safe. A recovery record there depends on the CLI's own backup check ([F-05]).
 - **Status date:** 2026-10-03 UTC
-- **Status commit:** PENDING
+- **Status commit:** 020b53f
 
 ### [F-05] CLI re-implements library policy and so returns wrong exit codes
 - **Category:** 25 Business logic in the UI
