@@ -199,7 +199,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** `test_resize_without_fat_growth`, `no_valid_checkpoint_survives_a_resize_without_fat_growth` and the shell scenario "Simple Resize (No FAT Growth)" now grow a filesystem this tool already resized by 32 sectors, which keeps the FAT size, and each asserts that the FAT did not grow. A fresh `mkfs.fat` image cannot be used: its FAT is smaller than the resize formula's, so any increase grows it. The safety-net test `a_resize_without_fat_growth_adds_the_new_clusters_and_keeps_files` covers the free count and file contents on this path.
 - **Status date:** 2026-10-03 UTC
-- **Status commit:** PENDING
+- **Status commit:** 81d7ea3
 
 ### [F-13] No negative or fuzz tests for crash-recovery and untrusted-input paths
 - **Category:** 32 Missing test coverage for critical paths
