@@ -129,7 +129,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** `ResizeCheckpoint::check_against` refuses a record whose old geometry is not the boot sector's, or whose new geometry does not grow it, with `Error::CheckpointMismatch` (exit 9), before anything is written or a resume is announced. Reproduced first by `a_checkpoint_that_disagrees_with_the_boot_sector_is_refused` (exit 0 and a committed foreign geometry). `affected_cluster_range` saturates instead of overflowing. Not done: a volume identity in the record, which needs a format version bump and belongs with [F-16].
 - **Status date:** 2026-10-03 UTC
-- **Status commit:** PENDING
+- **Status commit:** 85aa5ee
 
 ### [F-03] Checkpoint location follows the current device size; `ResizeSizeMismatch` cannot fire
 - **Category:** 26 Poor transactional boundaries
@@ -218,7 +218,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Partially fixed
 - **Status reason:** The sparse in-use pattern for the shift resume ([F-01]) is now tested (`execute_relocation_resumes_safely_across_free_clusters`). A checkpoint that disagrees with the boot sector ([F-02]) is now tested (`a_checkpoint_that_disagrees_with_the_boot_sector_is_refused`, `checkpoint_must_describe_the_filesystem_behind_the_boot_sector`). Still open: negative tests for [F-03], [F-10], and any fuzz or property harness.
 - **Status date:** 2026-10-03 UTC
-- **Status commit:** PENDING
+- **Status commit:** 85aa5ee
 
 ### [F-14] A machine-specific `target` symlink is tracked in git
 - **Category:** 22 Configuration sprawl
