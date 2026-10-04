@@ -230,6 +230,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** `target` → `/scratch/oetiker/rust-targets/fat32expander` was committed in dc162d7 and exists only on this branch; on a fresh clone or CI runner it dangles, which breaks target-directory creation unless `CARGO_TARGET_DIR` is set. `.gitignore`'s `/target/` matches only directories.
 - **Evidence:** `git ls-files target` → `target`; `ls -la target` → "target -> /scratch/oetiker/rust-targets/fat32expander"; `.gitignore:2` "/target/"; `git ls-tree main -- target` → empty
 - **Found by:** Security & Code Quality
+- **Status:** Fixed
+- **Status reason:** The symlink is untracked (`git rm --cached`; the local link stays) and `.gitignore` says `/target`, which matches a symlink as well as a directory. A fresh clone of the commit builds with `CARGO_TARGET_DIR` unset.
+- **Status date:** 2026-10-04 UTC
+- **Status commit:** pending
 
 ### [F-15] Executor writes FAT areas as raw sectors and repeats FAT layout arithmetic
 - **Category:** 13 Inconsistent boundaries
