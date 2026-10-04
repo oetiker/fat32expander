@@ -233,7 +233,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** The symlink is untracked (`git rm --cached`; the local link stays) and `.gitignore` says `/target`, which matches a symlink as well as a directory. A fresh clone of the commit builds with `CARGO_TARGET_DIR` unset.
 - **Status date:** 2026-10-04 UTC
-- **Status commit:** pending
+- **Status commit:** 3f9274f
 
 ### [F-15] Executor writes FAT areas as raw sectors and repeats FAT layout arithmetic
 - **Category:** 13 Inconsistent boundaries
