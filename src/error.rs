@@ -43,7 +43,11 @@ pub enum Error {
     #[error("FSInfo sector validation failed: {0}")]
     FSInfoValidation(String),
 
-    #[error("Backup boot sector does not match primary boot sector")]
+    #[error(
+        "Backup boot sector does not match primary boot sector. This could indicate \
+         filesystem corruption. Use --ignore-backup-mismatch to trust the primary and rewrite \
+         the backup from it."
+    )]
     BackupMismatch,
 
     #[error(

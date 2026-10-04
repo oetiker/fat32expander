@@ -242,6 +242,37 @@ fn a_dry_run_reports_the_current_and_the_new_size() {
     );
 }
 
+/// [F-05]: a device smaller than the filesystem on it is a truncated image or
+/// the wrong device. The CLI used to read that as "already at maximum size"
+/// and exit 0; the documented code is 7.
+#[test]
+fn a_device_smaller_than_its_filesystem_exits_7() {
+    let image = valid_image(64, 96);
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "a device smaller than its filesystem must exit 7.\noutput:\n{combined}"
+    );
+    assert!(
+        !combined.contains("Nothing to do"),
+        "a truncated device is not a no-op.\noutput:\n{combined}"
+    );
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resize must not modify the image"
+    );
+}
+
 /// Write a version-1 checkpoint record into the last sector of `path`.
 ///
 /// Built by hand from the documented layout (TECHGUIDE, `checkpoint.rs`), so

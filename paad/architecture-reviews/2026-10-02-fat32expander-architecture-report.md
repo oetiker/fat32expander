@@ -145,7 +145,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Evidence:** `src/resize/executor.rs:609-631` (`commit_new_geometry`), excerpt: "let old_free = fsinfo.free_count(); ... old_free.saturating_add(additional_clusters)"; `executor.rs:348-349` "if !calculation.fat_needs_growth { return Ok((FatOnDisk::NotWritten(boot), 0)); }"
 - **Found by:** Integration & Data. Continues [F-R26] (Partially fixed) and [F-R45].
 - **Status:** Partially fixed
-- **Status reason:** The FSInfo free count is now derived from the FAT (`free_clusters_after_resize`), not added to the on-disk hint, so a rerun of the commit gives the same value; reproduced first by `rerunning_an_interrupted_commit_counts_the_new_clusters_once` (260127 instead of 260095). Still open: the no-growth path writes no checkpoint, so a crash between the backup and primary boot sector writes still ends in `BackupMismatch` (exit 8) and needs `--ignore-backup-mismatch`, which is now safe. A recovery record there depends on the CLI's own backup check ([F-05]).
+- **Status reason:** The FSInfo free count is now derived from the FAT (`free_clusters_after_resize`), not added to the on-disk hint, so a rerun of the commit gives the same value; reproduced first by `rerunning_an_interrupted_commit_counts_the_new_clusters_once` (260127 instead of 260095). Still open: the no-growth path writes no checkpoint, so a crash between the backup and primary boot sector writes still ends in `BackupMismatch` (exit 8) and needs `--ignore-backup-mismatch`, which is now safe. A recovery record there was blocked by the CLI's own backup check, which [F-05]'s fix removed, so it can now be added in the library alone.
 - **Status date:** 2026-10-03 UTC
 - **Status commit:** 020b53f
 
@@ -155,6 +155,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** `run()` opens the device a second time via `get_fs_info` and decides "can grow" and "backup mismatch" itself, duplicating `calculate_new_size` and `prepare_resize`. Because `can_grow()` is `device_sectors > total_sectors`, a device *smaller* than the filesystem prints "already at maximum size ... Nothing to do." and exits 0 instead of the documented 7. `exit::ALREADY_MAX_SIZE` (6) is unreachable, and "Nothing to do" exists twice.
 - **Evidence:** `src/main.rs:344-375`, excerpt: "if !info.can_grow() { println!(\"Filesystem is already at maximum size"; `src/resize/fsinfo.rs:120-121` "self.device_sectors > self.boot.total_sectors() as u64"; `main.rs:265,297-299`
 - **Found by:** Structure & Boundaries, Coupling & Dependencies, Error Handling & Observability, Integration & Data. Continues [F-R41].
+- **Status:** Fixed
+- **Status reason:** `run()` no longer decides "can grow" or "backup mismatch"; the library's `AlreadyMaxSize`, `DeviceTooSmall` and `BackupMismatch` set the outcome, and `get_fs_info` is used only for display and to fail early, with the old message, on a filesystem that cannot be read. Reproduced first by `a_device_smaller_than_its_filesystem_exits_7` (exit 0, "Nothing to do"). Exit code 6 is retired like 11, the `--ignore-backup-mismatch` hint is part of the `BackupMismatch` message, and the size lines moved to the closing summary, from `ResizeResult`.
+- **Status date:** 2026-10-04 UTC
+- **Status commit:** PENDING
 
 ### [F-06] Recovery refusals and environment failures map to the wrong exit codes
 - **Category:** 20 Weak error handling strategy

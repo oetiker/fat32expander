@@ -235,11 +235,13 @@ mod exit {
     pub const DEVICE_UNOPENABLE: u8 = 3;
     pub const DEVICE_MOUNTED: u8 = 4;
     pub const NOT_USABLE_FAT32: u8 = 5;
-    pub const ALREADY_MAX_SIZE: u8 = 6;
     pub const DEVICE_TOO_SMALL: u8 = 7;
     pub const BACKUP_MISMATCH: u8 = 8;
     pub const NEEDS_RECOVERY: u8 = 9;
     pub const IO_FAILURE: u8 = 10;
+    // 6 was ALREADY_MAX_SIZE and was never returned: "nothing to do" exits
+    // 0 ([F-R31]), and [F-05] removed the last code path that could have
+    // produced it. Not reused, for the same reason as 11 below.
     // 11 was ROOT_REQUIRED, removed with the privilege gate in [F-R46]. A
     // caller who cannot write the device now gets DEVICE_UNOPENABLE, which is
     // what the kernel actually reported. The number is not reused: a script
@@ -262,7 +264,8 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
         | Error::FSInfoValidation(_)
         | Error::UnsupportedSectorSize(_) => exit::NOT_USABLE_FAT32,
 
-        Error::AlreadyMaxSize => exit::ALREADY_MAX_SIZE,
+        // Nothing to do is success; `main` prints why.
+        Error::AlreadyMaxSize => exit::OK,
         Error::DeviceTooSmall { .. } => exit::DEVICE_TOO_SMALL,
         Error::BackupMismatch => exit::BACKUP_MISMATCH,
 
@@ -341,94 +344,42 @@ fn run() -> Result<()> {
             // privilege guess also switched off the backup-mismatch check,
             // which is a data-loss decision. One flag, one meaning.
 
-            // Try to show current state - may fail if boot sector is invalidated from crash
-            let info_result = get_fs_info(&device);
-            let (show_pre_info, current_size, new_size) = match info_result {
+            // [F-05]: whether and how to resize is the library's decision
+            // alone. This used to decide "nothing to do" and "backup mismatch"
+            // here too, from a second open of the device, and got the first
+            // one wrong: a device smaller than its filesystem was reported as
+            // "already at maximum size" with exit 0 instead of exit 7. The
+            // filesystem is now read only for display. A filesystem that
+            // cannot be read at all still stops here, with the same error the
+            // library would raise, so the message keeps naming the read.
+            match get_fs_info(&device) {
                 Ok(info) => {
                     if verbose {
                         println!("Current filesystem state:");
                         println!("{}", render_fs_info(&info));
                         println!();
                     }
-
-                    // Nothing to do is not a failure -- the tool must be safe to
-                    // re-run from a script that does not track whether it has
-                    // already run ([F-R31]).
-                    if !info.can_grow() {
-                        println!(
-                            "Filesystem is already at maximum size for the device ({} bytes). \
-                             Nothing to do.",
-                            info.current_size_bytes()
-                        );
-                        return Ok(());
-                    }
-
-                    if !info.backup_matches() && !ignore_backup_mismatch {
-                        eprintln!(
-                            "Warning: Backup boot sector does not match primary boot sector."
-                        );
-                        eprintln!("         This could indicate filesystem corruption.");
-                        eprintln!(
-                            "         Use --ignore-backup-mismatch to trust the primary and \
-                             rewrite the backup from it."
-                        );
-                        return Err(Error::BackupMismatch.into());
-                    }
-
-                    let new_size = info
-                        .max_new_size_bytes()
-                        .unwrap_or(info.current_size_bytes());
-                    (true, info.current_size_bytes(), new_size)
+                }
+                // A zeroed boot signature is the marker this tool writes
+                // across the unsafe window, so it means "our own resize was
+                // interrupted" -- not "this filesystem is damaged".
+                //
+                // The gate is deliberately this narrow. A boot sector
+                // damaged beyond its signature fails earlier (on its
+                // declared sector size) and never arrives here, which is
+                // correct: this tool guards against its own process dying,
+                // not against arbitrary corruption.
+                Err(Error::BootSectorInvalidated) => {
+                    eprintln!("Warning: Boot sector appears to be invalidated.");
+                    eprintln!("         This may indicate an interrupted resize operation.");
+                    eprintln!("         Attempting recovery...");
+                    eprintln!();
                 }
                 Err(e) => {
-                    // A zeroed boot signature is the marker this tool writes
-                    // across the unsafe window, so it means "our own resize was
-                    // interrupted" -- not "this filesystem is damaged".
-                    //
-                    // The gate is deliberately this narrow. A boot sector
-                    // damaged beyond its signature fails earlier (on its
-                    // declared sector size) and never arrives here, which is
-                    // correct: this tool guards against its own process dying,
-                    // not against arbitrary corruption, and driving the resize
-                    // machinery over a filesystem it never touched would be
-                    // worse than refusing.
-                    if matches!(e, Error::BootSectorInvalidated) {
-                        eprintln!("Warning: Boot sector appears to be invalidated.");
-                        eprintln!("         This may indicate an interrupted resize operation.");
-                        eprintln!("         Attempting recovery...");
-                        eprintln!();
-                        // We can't show info, but resize_fat32 will handle recovery
-                        (false, 0, 0)
-                    } else {
-                        return Err(e).with_context(|| {
-                            format!("Failed to read filesystem info from {}", device)
-                        });
-                    }
+                    return Err(e).with_context(|| {
+                        format!("Failed to read filesystem info from {}", device)
+                    });
                 }
-            };
-
-            // Calculate size increase (if we have the info)
-            let increase = new_size.saturating_sub(current_size);
-
-            if show_pre_info {
-                println!("Resize operation:");
-                println!("  Device: {}", device);
-                println!(
-                    "  Current size: {:.2} MB ({} bytes)",
-                    current_size as f64 / (1024.0 * 1024.0),
-                    current_size
-                );
-                println!(
-                    "  New size: {:.2} MB ({} bytes)",
-                    new_size as f64 / (1024.0 * 1024.0),
-                    new_size
-                );
-                println!(
-                    "  Size increase: {:.2} MB ({} bytes)",
-                    increase as f64 / (1024.0 * 1024.0),
-                    increase
-                );
-                println!();
             }
 
             if dry_run {
@@ -462,13 +413,22 @@ fn run() -> Result<()> {
             }
             println!();
             println!("Summary:");
+            println!("  Device: {}", device);
             println!(
-                "  Old size: {:.2} MB",
-                result.old_size_bytes as f64 / (1024.0 * 1024.0)
+                "  Old size: {:.2} MB ({} bytes)",
+                result.old_size_bytes as f64 / (1024.0 * 1024.0),
+                result.old_size_bytes
             );
             println!(
-                "  New size: {:.2} MB",
-                result.new_size_bytes as f64 / (1024.0 * 1024.0)
+                "  New size: {:.2} MB ({} bytes)",
+                result.new_size_bytes as f64 / (1024.0 * 1024.0),
+                result.new_size_bytes
+            );
+            let increase = result.new_size_bytes.saturating_sub(result.old_size_bytes);
+            println!(
+                "  Size increase: {:.2} MB ({} bytes)",
+                increase as f64 / (1024.0 * 1024.0),
+                increase
             );
             println!("  FAT tables grew: {}", result.fat_grew);
             if result.clusters_relocated > 0 {
