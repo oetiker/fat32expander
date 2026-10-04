@@ -333,6 +333,46 @@ fn a_checkpoint_that_disagrees_with_the_boot_sector_is_refused() {
     );
 }
 
+/// Safety net for [F-06]: a checkpoint that matches the boot sector but whose
+/// new geometry cannot hold a filesystem is not one a resume can use. It must
+/// be refused, say why, and leave the image alone. The exit code is not pinned
+/// here: which code this refusal gets is what [F-06] changes.
+#[test]
+fn a_checkpoint_whose_new_geometry_does_not_fit_is_refused() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    // DataCopied (1) from this very filesystem, but with a FAT so large that
+    // the two copies alone overrun the new volume.
+    plant_checkpoint(
+        image.path(),
+        1,
+        [fs_sectors, device_sectors, 1024, device_sectors / 2],
+    );
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert!(
+        !output.status.success(),
+        "an unusable checkpoint must not be resumed.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("does not fit"),
+        "the refusal must say the checkpoint geometry does not fit.\noutput:\n{combined}"
+    );
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resume must not modify the image by a single byte"
+    );
+}
+
 /// [F-R4]: the override must actually reach the library.
 ///
 /// The CLI used to print "Use --force to proceed anyway" and then hand

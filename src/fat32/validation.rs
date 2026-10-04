@@ -275,6 +275,44 @@ mod tests {
         }
     }
 
+    /// Safety net for [F-10]. Every other fixture puts FSInfo at sector 1 and
+    /// the backup boot sector at 6. A validator that starts checking those
+    /// pointers must keep accepting every location the FAT32 specification
+    /// allows: any sector of the reserved area, and a backup of 0 for "none".
+    #[test]
+    fn validation_accepts_legitimate_fsinfo_and_backup_locations() {
+        // (reserved sectors, FSInfo sector, backup boot sector)
+        let cases: [(u16, u16, u16); 6] = [
+            (32, 1, 6),
+            (32, 1, 0),
+            (32, 2, 6),
+            (32, 1, 12),
+            (64, 1, 12),
+            (4096, 1, 6),
+        ];
+
+        for (reserved, fs_info, backup) in cases {
+            let base = valid_boot_sector_with(512, 8, reserved, 2, 2_000_000, 7813);
+            let mut data = base.as_bytes().to_vec();
+            data[48..50].copy_from_slice(&fs_info.to_le_bytes());
+            data[50..52].copy_from_slice(&backup.to_le_bytes());
+            let boot = BootSector::from_bytes(&data).unwrap();
+            assert_eq!(boot.fs_info_sector(), fs_info);
+            assert_eq!(boot.backup_boot_sector(), backup);
+
+            let label = format!("reserved={reserved} fsinfo={fs_info} backup={backup}");
+            assert!(
+                validate_boot_sector(&boot).is_ok(),
+                "validation rejected a legitimate layout: {label} -> {:?}",
+                validate_boot_sector(&boot)
+            );
+            assert!(
+                validate_boot_sector_for_recovery(&boot).is_ok(),
+                "recovery validation rejected a legitimate layout: {label}"
+            );
+        }
+    }
+
     /// Safety net for [F-R52]. `validation_accepts_legitimate_geometries`
     /// pins the four supported sector sizes on the *accept* side only, so a
     /// widened set -- the exact way a literal-to-constant substitution can go

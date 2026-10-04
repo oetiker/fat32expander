@@ -651,6 +651,7 @@ Available crash points:
 - `after_boot_invalidate`
 - `after_fat_write`
 - `after_checkpoint_fat_written`
+- `before_primary_boot_write`
 
 **Note:** Fault injection is only available when built with `--features fault-injection` and is never included in production builds.
 

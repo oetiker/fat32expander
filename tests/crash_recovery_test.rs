@@ -310,6 +310,75 @@ fn a_crash_after_the_fat_written_checkpoint_resumes_from_fat_written() {
     );
 }
 
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_before_the_primary_boot_write_resumes_from_fat_written() {
+    // Safety net for [F-04]: the commit itself is interrupted, after the
+    // backup boot sector and FSInfo landed but before the primary did. The
+    // FatWritten checkpoint is still on disk, so the commit runs again.
+    assert_eq!(crash_then_resume("before_primary_boot_write"), "FatWritten");
+}
+
+/// An image with `FILES` on it that a resize grows without growing the FAT.
+///
+/// A fresh `mkfs.fat` image always grows the FAT, so this one is resized once
+/// first, from 128 MiB to 129 MiB, and then grown by 32 sectors: the FAT the
+/// first resize sized still covers them (see `integration_test.rs`).
+fn image_ready_for_a_resize_without_fat_growth() -> NamedTempFile {
+    let image = image_with_files(128, 129);
+    resize_expecting_success(image.path());
+    let status = Command::new("truncate")
+        .args(["-s", "132112K"]) // 264224 sectors
+        .arg(image.path())
+        .status()
+        .expect("failed to run truncate");
+    assert!(status.success(), "truncate failed");
+    image
+}
+
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_inside_a_commit_without_fat_growth_is_recoverable() {
+    // Safety net for [F-04]: without FAT growth no checkpoint is written, so
+    // a crash between the backup and the primary boot sector leaves only the
+    // two disagreeing boot sectors. However the next run gets there, the
+    // result must equal an uninterrupted resize. How the plain rerun answers
+    // is not pinned: that is what [F-04] changes. The documented escape,
+    // `--ignore-backup-mismatch`, must work.
+    let reference = image_ready_for_a_resize_without_fat_growth();
+    let output = resize_expecting_success(reference.path());
+    assert!(
+        output.contains("FAT tables grew: false") && !output.contains("Resuming"),
+        "fixture drifted: the reference resize must neither resume nor grow \
+         the FAT:\n{}",
+        output
+    );
+    let expected = geometry(reference.path());
+
+    let image = image_ready_for_a_resize_without_fat_growth();
+    resize_crashing_at(image.path(), "before_primary_boot_write");
+    let out = run(Command::new(BIN)
+        .arg("resize")
+        .arg(image.path())
+        .arg("--ignore-backup-mismatch"));
+    assert!(
+        out.status.success(),
+        "the override rerun failed with {:?}:\n{}{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_filesystem_is_clean(image.path());
+    assert_files_are_intact(image.path());
+    assert_eq!(
+        geometry(image.path()),
+        expected,
+        "a commit rerun after a crash produced different geometry than an \
+         uninterrupted one"
+    );
+}
+
 // --- Cross-cutting properties -----------------------------------------------
 
 #[test]
@@ -331,6 +400,7 @@ fn a_resumed_resize_lands_on_the_same_geometry_as_an_uninterrupted_one() {
         "after_boot_invalidate",
         "after_fat_write",
         "after_checkpoint_fat_written",
+        "before_primary_boot_write",
     ] {
         let image = image_with_files(128, 200);
         resize_crashing_at(image.path(), crash_point);

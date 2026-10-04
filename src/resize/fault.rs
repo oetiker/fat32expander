@@ -14,6 +14,8 @@
 //   - "after_boot_invalidate" - after boot sector invalidated, before FAT operations
 //   - "after_fat_write" - after FAT written, before phase 2 checkpoint
 //   - "after_checkpoint_fat_written" - after phase 2 checkpoint, before boot restore
+//   - "before_primary_boot_write" - after backup boot sector and FSInfo are
+//     flushed, before the primary boot sector commits the new geometry
 //
 // Build: cargo build --release --features fault-injection
 // Usage: FAT32_CRASH_AT=after_boot_invalidate fat32expander resize image.img

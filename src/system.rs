@@ -6,10 +6,15 @@ use std::path::Path;
 ///
 /// On Linux, this parses /proc/mounts to check if the device is mounted.
 pub fn check_not_mounted(device_path: impl AsRef<Path>) -> Result<()> {
-    let device_path = resolve_device_path(device_path.as_ref())?;
+    check_against_mounts(device_path.as_ref(), fs::read_to_string("/proc/mounts"))
+}
 
-    // Read /proc/mounts
-    let mounts = fs::read_to_string("/proc/mounts").map_err(|e| {
+/// The decision behind [`check_not_mounted`], given the result of reading the
+/// mount table, so tests can hand it a table or a read failure.
+fn check_against_mounts(device_path: &Path, mounts: std::io::Result<String>) -> Result<()> {
+    let device_path = resolve_device_path(device_path)?;
+
+    let mounts = mounts.map_err(|e| {
         Error::Io(std::io::Error::other(format!(
             "Failed to read /proc/mounts: {}",
             e
@@ -149,6 +154,59 @@ mod tests {
         // Should succeed since temp files aren't mounted
         let result = check_not_mounted(file.path());
         assert!(result.is_ok());
+    }
+
+    /// Safety net for [F-06]: the mount check, driven through a mount table
+    /// the test controls.
+    #[test]
+    fn a_device_listed_in_the_mount_table_is_refused() {
+        let file = NamedTempFile::new().unwrap();
+        let table = format!("{} /mnt/stick vfat rw 0 0\n", file.path().display());
+
+        match check_against_mounts(file.path(), Ok(table)) {
+            Err(Error::DeviceMounted(device, mount_point)) => {
+                assert_eq!(device, resolve_device_path(file.path()).unwrap());
+                assert_eq!(mount_point, "/mnt/stick");
+            }
+            other => panic!("a mounted device must be refused, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_mount_table_entry_naming_the_device_through_a_symlink_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let device = dir.path().join("device");
+        std::fs::write(&device, b"").unwrap();
+        let link = dir.path().join("by-uuid");
+        std::os::unix::fs::symlink(&device, &link).unwrap();
+        let table = format!("{} /mnt/stick vfat rw 0 0\n", link.display());
+
+        assert!(matches!(
+            check_against_mounts(&device, Ok(table)),
+            Err(Error::DeviceMounted(..))
+        ));
+    }
+
+    #[test]
+    fn a_device_absent_from_the_mount_table_passes() {
+        let file = NamedTempFile::new().unwrap();
+        let table = "/dev/sda1 / ext4 rw 0 0\nproc /proc proc rw 0 0\n\n".to_string();
+
+        assert!(check_against_mounts(file.path(), Ok(table)).is_ok());
+    }
+
+    #[test]
+    fn an_unreadable_mount_table_is_a_failure_that_names_it() {
+        let file = NamedTempFile::new().unwrap();
+        let unreadable = Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+
+        let err = check_against_mounts(file.path(), unreadable)
+            .expect_err("a mount check that could not look must not pass");
+        assert!(
+            err.to_string().contains("/proc/mounts"),
+            "the failure must say what could not be read: {}",
+            err
+        );
     }
 
     #[test]

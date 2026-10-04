@@ -611,6 +611,8 @@ fn commit_new_geometry(
     device.sync()?;
     operations.push("Flushed supporting structures".to_string());
 
+    maybe_crash_at("before_primary_boot_write");
+
     write_boot_sector(device, &boot)?;
     operations.push("Updated boot sector (signature restored)".to_string());
 

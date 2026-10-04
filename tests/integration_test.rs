@@ -363,6 +363,45 @@ fn rerunning_an_interrupted_commit_counts_the_new_clusters_once() {
     assert!(check_filesystem(image.path()), "Filesystem check failed");
 }
 
+/// Safety net for [F-10]: a backup boot sector away from the usual sector 6
+/// is legitimate. A relocating resize must accept it and rewrite the backup
+/// where the boot sector says it is.
+#[test]
+#[ignore] // Requires mkfs.fat and dosfsck
+fn a_backup_boot_sector_outside_sector_6_is_resized_in_place() {
+    let image = NamedTempFile::new().expect("Failed to create temp file");
+    Command::new("truncate")
+        .args(["-s", "128M"])
+        .arg(image.path())
+        .status()
+        .expect("Failed to truncate file");
+    let status = Command::new("mkfs.fat")
+        .args(["-F", "32", "-R", "64", "-b", "12"])
+        .arg(image.path())
+        .status()
+        .expect("Failed to run mkfs.fat");
+    assert!(status.success(), "mkfs.fat failed");
+    extend_image(image.path(), 192);
+
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(before.boot().backup_boot_sector(), 12, "fixture drifted");
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        result.fat_grew,
+        "fixture drifted: this case must grow the FAT"
+    );
+
+    let data = std::fs::read(image.path()).expect("Failed to read image");
+    assert_eq!(
+        data[12 * 512..13 * 512],
+        data[..512],
+        "the backup at sector 12 must match the new primary"
+    );
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+}
+
 #[test]
 #[ignore] // Requires mkfs.fat
 fn test_dry_run() {
