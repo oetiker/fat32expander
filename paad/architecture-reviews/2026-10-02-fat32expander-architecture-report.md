@@ -158,7 +158,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** `run()` no longer decides "can grow" or "backup mismatch"; the library's `AlreadyMaxSize`, `DeviceTooSmall` and `BackupMismatch` set the outcome, and `get_fs_info` is used only for display and to fail early, with the old message, on a filesystem that cannot be read. Reproduced first by `a_device_smaller_than_its_filesystem_exits_7` (exit 0, "Nothing to do"). Exit code 6 is retired like 11, the `--ignore-backup-mismatch` hint is part of the `BackupMismatch` message, and the size lines moved to the closing summary, from `ResizeResult`.
 - **Status date:** 2026-10-04 UTC
-- **Status commit:** PENDING
+- **Status commit:** a9199b4
 
 ### [F-06] Recovery refusals and environment failures map to the wrong exit codes
 - **Category:** 20 Weak error handling strategy
