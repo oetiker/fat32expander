@@ -239,6 +239,7 @@ mod exit {
     pub const BACKUP_MISMATCH: u8 = 8;
     pub const NEEDS_RECOVERY: u8 = 9;
     pub const IO_FAILURE: u8 = 10;
+    pub const MOUNT_STATE_UNKNOWN: u8 = 12;
     // 6 was ALREADY_MAX_SIZE and was never returned: "nothing to do" exits
     // 0 ([F-R31]), and [F-05] removed the last code path that could have
     // produced it. Not reused, for the same reason as 11 below.
@@ -258,6 +259,8 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
     match e {
         Error::DeviceOpen { .. } => exit::DEVICE_UNOPENABLE,
         Error::DeviceMounted(..) => exit::DEVICE_MOUNTED,
+        // The mount check could not look; no device was touched ([F-06]).
+        Error::MountTableUnreadable { .. } => exit::MOUNT_STATE_UNKNOWN,
 
         Error::InvalidFAT32(_)
         | Error::BootSectorValidation(_)
@@ -275,7 +278,9 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
         | Error::InvalidatedFilesystem
         | Error::CheckpointCorrupted
         | Error::ResizeSizeMismatch(_)
-        | Error::CheckpointMismatch { .. } => exit::NEEDS_RECOVERY,
+        | Error::CheckpointMismatch { .. }
+        | Error::CheckpointGeometryUnusable { .. }
+        | Error::ShiftProgressMissing => exit::NEEDS_RECOVERY,
 
         Error::DeviceIo { .. }
         | Error::DeviceSync { .. }
@@ -443,4 +448,39 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn code(e: Error) -> u8 {
+        exit_code_for(&anyhow::Error::new(e))
+    }
+
+    /// [F-06]: a resume the tool refuses is a filesystem that needs recovery,
+    /// not an internal failure.
+    #[test]
+    fn recovery_refusals_exit_with_needs_recovery() {
+        assert_eq!(code(Error::ShiftProgressMissing), exit::NEEDS_RECOVERY);
+        assert_eq!(
+            code(Error::CheckpointGeometryUnusable {
+                new_total_sectors: 1000,
+                new_fat_size: 900,
+            }),
+            exit::NEEDS_RECOVERY
+        );
+    }
+
+    /// [F-06]: failing to read the mount table touched no device, so it is
+    /// not a device I/O failure.
+    #[test]
+    fn an_unreadable_mount_table_has_its_own_exit_code() {
+        let e = Error::MountTableUnreadable {
+            device: "/dev/sdx1".to_string(),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        assert_eq!(code(e), exit::MOUNT_STATE_UNKNOWN);
+        assert_eq!(exit::MOUNT_STATE_UNKNOWN, 12);
+    }
 }

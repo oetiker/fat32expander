@@ -120,6 +120,7 @@ as the tool changes.
 | 8 | Backup boot sector does not match the primary — re-run with `--ignore-backup-mismatch` to trust the primary and rewrite the backup from it |
 | 9 | An interrupted resize needs recovery and could not be recovered automatically |
 | 10 | I/O failure reading or writing the device |
+| 12 | Could not check whether the device is mounted — `/proc/mounts` is unreadable |
 
 Code 11 previously meant "root privileges required". The tool no longer guesses
 at write access from the effective uid — it attempts the open and reports what

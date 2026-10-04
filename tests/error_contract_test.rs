@@ -373,6 +373,28 @@ fn a_checkpoint_whose_new_geometry_does_not_fit_is_refused() {
     );
 }
 
+/// [F-06]: an unusable checkpoint is a filesystem that needs recovery, so it
+/// exits 9, not 1.
+#[test]
+fn a_checkpoint_whose_new_geometry_does_not_fit_exits_9() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    plant_checkpoint(
+        image.path(),
+        1,
+        [fs_sectors, device_sectors, 1024, device_sectors / 2],
+    );
+
+    let output = run_resize(image.path());
+    assert_eq!(
+        output.status.code(),
+        Some(9),
+        "an unusable checkpoint must exit 9.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+}
+
 /// [F-R4]: the override must actually reach the library.
 ///
 /// The CLI used to print "Use --force to proceed anyway" and then hand

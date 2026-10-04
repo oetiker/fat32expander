@@ -379,6 +379,32 @@ fn a_crash_inside_a_commit_without_fat_growth_is_recoverable() {
     );
 }
 
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn an_interrupted_sub_cluster_shift_exits_9() {
+    // [F-06]: the refusal in `an_interrupted_sub_cluster_shift_refuses_to_resume`
+    // is a filesystem that needs recovery, so it exits 9, not 1. Same fixture.
+    let image = NamedTempFile::new().expect("temp file");
+    truncate(image.path(), 2200);
+    let status = Command::new("mkfs.fat")
+        .args(["-F", "32", "-s", "64"])
+        .arg(image.path())
+        .status()
+        .expect("failed to run mkfs.fat");
+    assert!(status.success(), "mkfs.fat failed");
+    truncate(image.path(), 2308);
+
+    resize_crashing_at(image.path(), "after_checkpoint_start");
+
+    let out = run(Command::new(BIN).arg("resize").arg(image.path()));
+    assert_eq!(
+        out.status.code(),
+        Some(9),
+        "a shift with no progress record needs recovery:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 // --- Cross-cutting properties -----------------------------------------------
 
 #[test]

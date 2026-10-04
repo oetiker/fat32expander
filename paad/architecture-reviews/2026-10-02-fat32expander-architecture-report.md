@@ -166,6 +166,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** "Interrupted data shift left no progress record" and "Checkpoint geometry does not fit" are recovery states but are raised as `Error::Relocation`/`Error::Calculation` and exit 1 (internal) instead of 9 (needs recovery); the crash test for that path only checks `!success` and a substring. A `/proc/mounts` read failure is flattened into `Error::Io` and exits 10 ("device I/O") although no device was touched.
 - **Evidence:** `src/resize/executor.rs:432-440`, excerpt: "Error::Relocation(\"interrupted data shift left no progress record"; `executor.rs:281-286` "Checkpoint geometry does not fit"; `src/main.rs:285` "Error::Calculation(_) | Error::Relocation(_) => exit::INTERNAL"; `tests/crash_recovery_test.rs:417-426`; `src/system.rs:12-17`
 - **Found by:** Error Handling & Observability, Integration & Data
+- **Status:** Fixed
+- **Status reason:** New variants `ShiftProgressMissing` and `CheckpointGeometryUnusable` exit 9; `MountTableUnreadable` exits with the new code 12 (documented in the README) instead of 10. Reproduced first by `an_interrupted_sub_cluster_shift_exits_9` and `a_checkpoint_whose_new_geometry_does_not_fit_exits_9` (both exit 1). The mount check takes the mount table as an argument (`check_against_mounts`), so the read failure is unit-tested.
+- **Status date:** 2026-10-05 UTC
+- **Status commit:** pending
 
 ### [F-07] The operations log is lost on every failure path
 - **Category:** 21 No observability plan

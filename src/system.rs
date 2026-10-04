@@ -14,11 +14,9 @@ pub fn check_not_mounted(device_path: impl AsRef<Path>) -> Result<()> {
 fn check_against_mounts(device_path: &Path, mounts: std::io::Result<String>) -> Result<()> {
     let device_path = resolve_device_path(device_path)?;
 
-    let mounts = mounts.map_err(|e| {
-        Error::Io(std::io::Error::other(format!(
-            "Failed to read /proc/mounts: {}",
-            e
-        )))
+    let mounts = mounts.map_err(|source| Error::MountTableUnreadable {
+        device: device_path.clone(),
+        source,
     })?;
 
     // Check each mount entry
@@ -207,6 +205,18 @@ mod tests {
             "the failure must say what could not be read: {}",
             err
         );
+    }
+
+    /// [F-06]: an unreadable mount table is its own failure, not device I/O.
+    #[test]
+    fn an_unreadable_mount_table_is_reported_as_such() {
+        let file = NamedTempFile::new().unwrap();
+        let unreadable = Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+
+        assert!(matches!(
+            check_against_mounts(file.path(), unreadable),
+            Err(Error::MountTableUnreadable { .. })
+        ));
     }
 
     #[test]

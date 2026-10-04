@@ -161,6 +161,35 @@ pub enum Error {
         boot_total_sectors: u32,
         boot_fat_size: u32,
     },
+
+    /// [F-06]: the record matches the boot sector, but the geometry it would
+    /// commit cannot hold a filesystem.
+    #[error(
+        "Resize checkpoint geometry does not fit: {new_total_sectors} sectors with a FAT of \
+         {new_fat_size} sectors. Cannot safely resume."
+    )]
+    CheckpointGeometryUnusable {
+        new_total_sectors: u32,
+        new_fat_size: u32,
+    },
+
+    /// [F-06]: the data shift was interrupted, but recorded no progress, so
+    /// the point it reached is unknown.
+    #[error(
+        "Interrupted data shift left no progress record, so the point it reached is unknown; \
+         resuming would copy already-shifted data over itself. The filesystem is intact but \
+         must be recovered from backup or repaired by hand."
+    )]
+    ShiftProgressMissing,
+
+    /// [F-06]: the mount check could not look, so it cannot vouch for the
+    /// device. No device was touched.
+    #[error("Cannot tell whether {device} is mounted: failed to read /proc/mounts: {source}")]
+    MountTableUnreadable {
+        device: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

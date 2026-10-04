@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - used `let-else` pattern for cleaner checkpoint parsing
 
 ### Fixed
+- When `fat32expander resize` refused to resume an interrupted resize because "Interrupted data shift left no progress record" or "Resize checkpoint geometry does not fit", it exited 1 ("unexpected internal failure"). Both now exit 9, the code for a filesystem that needs recovery, and the messages no longer start with "Relocation failed:" or "Calculation error:".
+- When `/proc/mounts` could not be read, `fat32expander resize` exited 10, the code for a device I/O failure, although no device had been touched. It now exits with the new code 12, "Could not check whether the device is mounted", and the message names the device.
 - A resize that was interrupted while moving data, and then resumed, could write the wrong contents into files on a filesystem with free space between used clusters. Progress is now recorded often enough that a resumed run always copies intact data.
 - A leftover resize record from another filesystem, or from an earlier size of this one, could make `fat32expander resize` "resume" an operation that never ran, write a new size computed for the wrong volume, and exit 0. Such a record is now refused with "Resize checkpoint does not match this filesystem", exit code 9, and nothing is written.
 - `fat32expander resize` on a device smaller than its filesystem (a truncated image or the wrong device) printed "Filesystem is already at maximum size for the device ... Nothing to do." and exited 0. It now fails with exit code 7, as documented. A full-size filesystem whose backup boot sector does not match now exits 8 instead of reporting "Nothing to do".

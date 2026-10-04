@@ -280,11 +280,9 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
         let new_data_clusters = boot
             .with_geometry(checkpoint.new_total_sectors, checkpoint.new_fat_size)
             .data_clusters()
-            .ok_or_else(|| {
-                Error::Calculation(format!(
-                    "Checkpoint geometry does not fit: {} sectors with a FAT of {} sectors",
-                    checkpoint.new_total_sectors, checkpoint.new_fat_size
-                ))
+            .ok_or(Error::CheckpointGeometryUnusable {
+                new_total_sectors: checkpoint.new_total_sectors,
+                new_fat_size: checkpoint.new_fat_size,
             })?;
 
         SizeCalculation {
@@ -431,15 +429,7 @@ fn shift_cluster_data(
     // re-read source sectors the previous pass overwrote.
     let resume_from = match incomplete_resize {
         None => plan.highest_cluster(),
-        Some(cp) => cp.shift_progress.ok_or_else(|| {
-            Error::Relocation(
-                "interrupted data shift left no progress record, so the point \
-                 it reached is unknown; resuming would copy already-shifted \
-                 data over itself. The filesystem is intact but must be \
-                 recovered from backup or repaired by hand."
-                    .to_string(),
-            )
-        })?,
+        Some(cp) => cp.shift_progress.ok_or(Error::ShiftProgressMissing)?,
     };
 
     // How often progress is recorded is decided by `ShiftProgress::new`,
