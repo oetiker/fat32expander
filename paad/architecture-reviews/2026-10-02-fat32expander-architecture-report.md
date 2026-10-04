@@ -169,7 +169,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** New variants `ShiftProgressMissing` and `CheckpointGeometryUnusable` exit 9; `MountTableUnreadable` exits with the new code 12 (documented in the README) instead of 10. Reproduced first by `an_interrupted_sub_cluster_shift_exits_9` and `a_checkpoint_whose_new_geometry_does_not_fit_exits_9` (both exit 1). The mount check takes the mount table as an argument (`check_against_mounts`), so the read failure is unit-tested.
 - **Status date:** 2026-10-05 UTC
-- **Status commit:** pending
+- **Status commit:** 716cc37
 
 ### [F-07] The operations log is lost on every failure path
 - **Category:** 21 No observability plan
