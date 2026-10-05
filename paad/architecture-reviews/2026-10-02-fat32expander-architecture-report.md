@@ -151,7 +151,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** The FSInfo free count is derived from the FAT (`free_clusters_after_resize`, 020b53f), so a rerun of the commit gives the same value. A commit with no FAT phase behind it (no FAT growth, or an empty plan) now first writes a `FatWritten` checkpoint and marks it in FSInfo, so a crash between the backup and primary boot sector writes is resumed by a plain rerun; reproduced first by `a_crash_inside_a_commit_without_fat_growth_resumes_on_its_own` (exit 8). A resume no longer checks the backup against the primary, because the verified record names the primary's geometry and the commit rewrites the backup; this also applies to phase-0 resumes on the growth path. [F-20] itself is not fixed: an empty plan still commits the new FAT geometry.
 - **Status date:** 2026-10-05 UTC
-- **Status commit:** pending
+- **Status commit:** 03fc7eb
 
 ### [F-05] CLI re-implements library policy and so returns wrong exit codes
 - **Category:** 25 Business logic in the UI
