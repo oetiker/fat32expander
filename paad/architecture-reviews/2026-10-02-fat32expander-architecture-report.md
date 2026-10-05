@@ -198,6 +198,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** Validation range-checks neither `backup_boot_sector` nor `fs_info_sector`. A corrupt pointer into the FAT or data area produces `BackupMismatch`; the README's advice, `--ignore-backup-mismatch`, then makes the commit write a boot sector over that FAT or data sector. FSInfo is less exposed because its signatures are checked.
 - **Evidence:** `src/fat32/validation.rs:17-160` (`validate_boot_sector_impl`) — no reference to `backup_boot_sector`; `src/fat32/operations.rs:77-80`, excerpt: "let data = device.read_sector(sector as u64)?; BootSector::from_bytes(&data)"; `operations.rs:96-97` (`write_backup_boot_sector`); `src/resize/executor.rs:242-255,609`
 - **Found by:** Security & Code Quality
+- **Status:** Fixed
+- **Status reason:** `validate_boot_sector_impl` refuses an FSInfo sector outside `1..reserved_sectors`, and a backup boot sector that is neither 0 nor inside the reserved area, or that sits on FSInfo, with `BootSectorValidation` (exit 5) before any write. Reproduced first by `a_backup_pointer_into_the_fat_is_refused_even_with_the_override` (exit 0, boot sector written into the FAT) and `validation_rejects_fsinfo_and_backup_outside_the_reserved_area`.
+- **Status date:** 2026-10-05 UTC
+- **Status commit:** pending
 
 ### [F-11] Mount guard is racy, opens without `O_EXCL`, and misses loop-mounted images
 - **Category:** 30 Security as an afterthought
@@ -224,7 +228,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Evidence:** `Cargo.toml` `[dev-dependencies]` — `tempfile = "3.0"` only; `grep ResizeSizeMismatch tests/` → none; `src/resize/relocator.rs:~598` "in_use = [2u32, 3, 4, 5, 6, 7, 8, 9]"
 - **Found by:** Security & Code Quality. Continues [F-R12].
 - **Status:** Partially fixed
-- **Status reason:** The sparse in-use pattern for the shift resume ([F-01]) is now tested (`execute_relocation_resumes_safely_across_free_clusters`). A checkpoint that disagrees with the boot sector ([F-02]) is now tested (`a_checkpoint_that_disagrees_with_the_boot_sector_is_refused`, `checkpoint_must_describe_the_filesystem_behind_the_boot_sector`). Still open: negative tests for [F-03], [F-10], and any fuzz or property harness.
+- **Status reason:** The sparse in-use pattern for the shift resume ([F-01]) is now tested (`execute_relocation_resumes_safely_across_free_clusters`). A checkpoint that disagrees with the boot sector ([F-02]) is now tested (`a_checkpoint_that_disagrees_with_the_boot_sector_is_refused`, `checkpoint_must_describe_the_filesystem_behind_the_boot_sector`). A corrupt backup boot sector pointer ([F-10]) is now tested (`a_backup_pointer_into_the_fat_is_refused_even_with_the_override`). Still open: a negative test for [F-03], and any fuzz or property harness.
 - **Status date:** 2026-10-03 UTC
 - **Status commit:** 85aa5ee
 

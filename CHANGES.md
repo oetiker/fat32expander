@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - used `let-else` pattern for cleaner checkpoint parsing
 
 ### Fixed
+- A boot sector whose backup copy location pointed outside the reserved area (into the FAT or the data area) was reported as a backup mismatch, and the advised rerun with `--ignore-backup-mismatch` then wrote a boot sector over that FAT or data sector. Such a filesystem is now refused with "Invalid backup boot sector" and exit code 5 before anything is written. An FSInfo location outside the reserved area is refused the same way, with "Invalid FSInfo sector".
 - When `fat32expander resize` refused to resume an interrupted resize because "Interrupted data shift left no progress record" or "Resize checkpoint geometry does not fit", it exited 1 ("unexpected internal failure"). Both now exit 9, the code for a filesystem that needs recovery, and the messages no longer start with "Relocation failed:" or "Calculation error:".
 - When `/proc/mounts` could not be read, `fat32expander resize` exited 10, the code for a device I/O failure, although no device had been touched. It now exits with the new code 12, "Could not check whether the device is mounted", and the message names the device.
 - A resize that was interrupted while moving data, and then resumed, could write the wrong contents into files on a filesystem with free space between used clusters. Progress is now recorded often enough that a resumed run always copies intact data.

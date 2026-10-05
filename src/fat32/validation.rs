@@ -63,6 +63,28 @@ fn validate_boot_sector_impl(boot: &BootSector, allow_invalidated: bool) -> Resu
         ));
     }
 
+    // [F-10]: FSInfo and the backup boot sector must lie in the reserved area.
+    // The resize writes a boot sector to the backup location and FSInfo to
+    // its own, so a corrupt pointer would otherwise aim those writes at a FAT
+    // or data sector. Backup 0 means "no backup"; FSInfo is always read, so
+    // it has no such value.
+    let reserved = boot.reserved_sectors();
+    let fs_info = boot.fs_info_sector();
+    if fs_info == 0 || fs_info >= reserved {
+        return Err(Error::BootSectorValidation(format!(
+            "Invalid FSInfo sector: {} (must be within the {} reserved sectors, after sector 0)",
+            fs_info, reserved
+        )));
+    }
+    let backup = boot.backup_boot_sector();
+    if backup >= reserved || (backup != 0 && backup == fs_info) {
+        return Err(Error::BootSectorValidation(format!(
+            "Invalid backup boot sector: {} (must be 0 or within the {} reserved sectors, \
+             apart from FSInfo at sector {})",
+            backup, reserved, fs_info
+        )));
+    }
+
     // Check number of FATs (typically 2, but 1 is allowed)
     let num_fats = boot.num_fats();
     if num_fats == 0 || num_fats > 2 {
@@ -309,6 +331,47 @@ mod tests {
             assert!(
                 validate_boot_sector_for_recovery(&boot).is_ok(),
                 "recovery validation rejected a legitimate layout: {label}"
+            );
+        }
+    }
+
+    /// [F-10]: FSInfo and the backup boot sector live in the reserved area. A
+    /// pointer outside it, or a backup on top of FSInfo, names a sector the
+    /// resize would overwrite with a boot sector.
+    #[test]
+    fn validation_rejects_fsinfo_and_backup_outside_the_reserved_area() {
+        // (FSInfo sector, backup boot sector), with 32 reserved sectors
+        let cases: [(u16, u16); 6] = [
+            (1, 32),     // backup on the first FAT sector
+            (1, 5000),   // backup in the data area
+            (1, 1),      // backup on top of FSInfo
+            (0, 6),      // no FSInfo, which this tool always reads
+            (32, 6),     // FSInfo on the first FAT sector
+            (0xFFFF, 6), // FSInfo far outside the volume's start
+        ];
+
+        for (fs_info, backup) in cases {
+            let base = valid_boot_sector_with(512, 8, 32, 2, 2_000_000, 7813);
+            let mut data = base.as_bytes().to_vec();
+            data[48..50].copy_from_slice(&fs_info.to_le_bytes());
+            data[50..52].copy_from_slice(&backup.to_le_bytes());
+            let boot = BootSector::from_bytes(&data).unwrap();
+
+            let label = format!("fsinfo={fs_info} backup={backup}");
+            assert!(
+                matches!(
+                    validate_boot_sector(&boot),
+                    Err(Error::BootSectorValidation(_))
+                ),
+                "validation accepted {label}: {:?}",
+                validate_boot_sector(&boot)
+            );
+            assert!(
+                matches!(
+                    validate_boot_sector_for_recovery(&boot),
+                    Err(Error::BootSectorValidation(_))
+                ),
+                "recovery validation accepted {label}"
             );
         }
     }

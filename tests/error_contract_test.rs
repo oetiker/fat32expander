@@ -395,6 +395,33 @@ fn a_checkpoint_whose_new_geometry_does_not_fit_exits_9() {
     );
 }
 
+/// [F-10]: a backup boot sector pointer into the FAT is a corrupt boot
+/// sector, not a backup that disagrees. `--ignore-backup-mismatch` must not
+/// turn it into a boot sector written over a FAT sector.
+#[test]
+fn a_backup_pointer_into_the_fat_is_refused_even_with_the_override() {
+    let image = valid_image(96, 64);
+    let mut data = std::fs::read(image.path()).expect("read image");
+    // Sector 100 lies inside the first FAT (sectors 32..1056).
+    data[50..52].copy_from_slice(&100u16.to_le_bytes());
+    std::fs::write(image.path(), &data).expect("write image");
+    let before = data;
+
+    let output = run_resize_ignoring_backup_mismatch(image.path());
+
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "a corrupt backup pointer is not a usable FAT32 filesystem.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resize must not modify the image by a single byte"
+    );
+}
+
 /// [F-R4]: the override must actually reach the library.
 ///
 /// The CLI used to print "Use --force to proceed anyway" and then hand
