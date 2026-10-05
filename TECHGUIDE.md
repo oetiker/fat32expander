@@ -495,7 +495,7 @@ before the mark was written, or a run of an older build) the rerun looks in
 the device's current last sector. The commit writes FSInfo without the mark.
 
 The checkpoint contains:
-- Magic signature (0xFA32CHKP)
+- Magic signature (`FAT32RSZ`)
 - Current phase (Started, DataCopied, FatWritten)
 - Old and new filesystem parameters (total_sectors, fat_size)
 

@@ -9,6 +9,7 @@
 #   - after_boot_invalidate
 #   - after_fat_write
 #   - after_checkpoint_fat_written
+#   - before_primary_boot_write
 #
 # For each crash point:
 # 1. Creates FAT32 image with test data
@@ -143,7 +144,7 @@ MOUNT_POINT="/mnt/fat"
 mkdir -p "$MOUNT_POINT"
 
 # All crash points to test (in order they occur during resize)
-CRASH_POINTS="after_checkpoint_start after_data_shift after_checkpoint_data_copied after_boot_invalidate after_fat_write after_checkpoint_fat_written"
+CRASH_POINTS="after_checkpoint_start after_data_shift after_checkpoint_data_copied after_boot_invalidate after_fat_write after_checkpoint_fat_written before_primary_boot_write"
 
 # Track results
 TESTS_PASSED=0
@@ -295,8 +296,10 @@ test_crash_point() {
                 echo "WARNING: Boot sector unexpectedly invalidated at $crash_point"
             fi
             ;;
-        after_boot_invalidate|after_fat_write)
-            # Crash in danger zone - boot sector should be invalidated
+        after_boot_invalidate|after_fat_write|before_primary_boot_write)
+            # Crash in danger zone - boot sector should be invalidated. At
+            # before_primary_boot_write the backup and FSInfo are already new,
+            # but the primary is still the invalidated old one.
             if [ "$BOOT_SIG" != "0000" ]; then
                 echo "ERROR: Boot sector should be invalidated (0000) at $crash_point but is $BOOT_SIG"
                 return 1

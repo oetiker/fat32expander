@@ -138,7 +138,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Evidence:** `src/resize/checkpoint.rs:249,266,273,292`, excerpt: "let sector = device.total_sectors() - 1;"; `grep ResizeSizeMismatch tests/` → no hits
 - **Found by:** Coupling & Dependencies, Integration & Data, Structure & Boundaries
 - **Status:** Fixed
-- **Status reason:** The checkpoint sector is chosen once per resize (`CheckpointSlot`, the device's last sector at the start) and marked in FSInfo's reserved bytes at 0x1F0 before any data moves; reruns follow the mark, and the commit's FSInfo write retires it. A device that shrank past the record is refused as `CheckpointOutsideDevice` (exit 9). Reproduced first by `a_crash_in_the_data_shift_resumes_after_the_device_grew` (fresh replan), `a_crash_in_the_danger_zone_resumes_after_the_device_grew` (exit 9) and `a_crash_in_the_data_shift_is_refused_after_the_device_shrank` (exit 0). `ResizeSizeMismatch` remains unreachable: the record always lies at or past the planned size, so a shrunk device hits `CheckpointOutsideDevice` first.
+- **Status reason:** The checkpoint sector is chosen once per resize (`CheckpointSlot`, the device's last sector at the start) and marked in FSInfo's reserved bytes at 0x1F0 before any data moves; reruns follow the mark, and the commit's FSInfo write retires it. A device that shrank past the record is refused as `CheckpointOutsideDevice` (exit 9). Reproduced first by `a_crash_in_the_data_shift_resumes_after_the_device_grew` (fresh replan), `a_crash_in_the_danger_zone_resumes_after_the_device_grew` (exit 9) and `a_crash_in_the_data_shift_is_refused_after_the_device_shrank` (exit 0). After a real shrink, `CheckpointOutsideDevice` fires first. `ResizeSizeMismatch` is still reachable through a record that plans more sectors than the device has, and is a needed guard: without it such a record is committed with exit 0. It is now tested (`a_checkpoint_planning_beyond_the_device_is_refused`, follow-up commit).
 - **Status date:** 2026-10-05 UTC
 - **Status commit:** 63c8312
 
@@ -351,6 +351,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** CLAUDE.md's tree omits `checkpoint`, `fault`, `fsinfo`, `options`, `testutil`; it says the tool refuses maximum-size filesystems and mismatched backups (now exit 0 and `--ignore-backup-mismatch`) and that "All errors use thiserror" (CLI uses anyhow). TECHGUIDE shows non-`Option` accessor signatures, magic "0xFA32CHKP" (code: `b"FAT32RSZ"`), the old commit write order, and "Re-run entire resize" for `Started`. `checkpoint.rs:64` names the wrong checkpoint sector; `executor.rs:692-693` says nothing enforces the FAT order although the witnesses now do.
 - **Evidence:** `CLAUDE.md` "Architecture" and "Error Handling" sections; `TECHGUIDE.md:366-367,488,578`; `src/resize/checkpoint.rs:64`, excerpt: "written to sector `old_total_sectors`"; `src/resize/executor.rs:692-693`, excerpt: "Nothing enforces the order but the call site in `resize_fat32`"
 - **Found by:** all five specialists
+- **Status:** Partially fixed
+- **Status reason:** TECHGUIDE now gives the checkpoint magic as `FAT32RSZ`, and the `ResizeCheckpoint` doc in `checkpoint.rs` names its real location (the [F-03] slot). The rest is open: CLAUDE.md's tree and error-handling claims, TECHGUIDE's accessor signatures, commit write order and `Started` recovery text, and the `executor.rs` comment on FAT ordering.
+- **Status date:** 2026-10-05 UTC
+- **Status commit:** pending
 
 ## Coverage Checklist
 

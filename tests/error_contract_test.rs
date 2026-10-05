@@ -422,6 +422,41 @@ fn a_backup_pointer_into_the_fat_is_refused_even_with_the_override() {
     );
 }
 
+/// [F-03]: a record that plans a filesystem larger than the device cannot be
+/// resumed: the commit would describe sectors the device does not have. It
+/// must be refused as needing recovery, without a write.
+#[test]
+fn a_checkpoint_planning_beyond_the_device_is_refused() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    plant_checkpoint(
+        image.path(),
+        2,
+        [fs_sectors, device_sectors + 2048, 1024, 1024],
+    );
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+
+    assert_eq!(
+        output.status.code(),
+        Some(9),
+        "a record larger than the device needs recovery.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        stderr_of(&output).contains("device size changed"),
+        "the refusal must say why.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resume must not modify the image by a single byte"
+    );
+}
+
 /// [F-R4]: the override must actually reach the library.
 ///
 /// The CLI used to print "Use --force to proceed anyway" and then hand
