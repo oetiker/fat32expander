@@ -265,10 +265,19 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
         }
     }
 
-    // Read backup boot sector (skip match check if boot sector is invalidated)
+    // Read backup boot sector. The match check is skipped on a resume and
+    // behind an invalidated boot sector, both of which rewrite the backup.
     let backup_sector = boot.backup_boot_sector();
     let backup_boot = read_backup_boot_sector(&device, backup_sector)?;
-    if boot.is_signature_valid() && !boot_sectors_match(&boot, &backup_boot) {
+    // A verified checkpoint means the disagreement may be this tool's own
+    // interrupted commit, which writes the backup first and rewrites it on
+    // resume ([F-04]).
+    if incomplete_resize.is_some() {
+        operations.push(format!(
+            "Backup boot sector at sector {} will be rewritten by the resumed resize",
+            backup_sector
+        ));
+    } else if boot.is_signature_valid() && !boot_sectors_match(&boot, &backup_boot) {
         // [F-R4]: refusing is the default, and the override has to be an
         // explicit act by the caller -- it commits to the primary being the
         // correct copy, and the resize then rewrites the backup from it.
@@ -598,6 +607,24 @@ fn commit_new_geometry(
     record: &ResizeRecord,
     operations: &mut Vec<String>,
 ) -> Result<()> {
+    // [F-04]: without a FAT phase there is no checkpoint yet, and a crash
+    // between the backup and primary boot sector writes would leave two
+    // disagreeing boot sectors and nothing to say why. Record that only the
+    // commit remains, so a rerun finishes it. The FAT phase already left
+    // this record on the growth path.
+    if let FatOnDisk::NotWritten(_) = fat_on_disk {
+        let checkpoint = ResizeCheckpoint::new(
+            ResizePhase::FatWritten,
+            calculation.old_total_sectors,
+            calculation.new_total_sectors,
+            calculation.old_fat_size,
+            calculation.new_fat_size,
+        );
+        write_checkpoint(device, record.slot, &checkpoint)?;
+        mark_checkpoint_slot(device, record.fsinfo_sector, record.slot)?;
+        operations.push("Wrote checkpoint (phase 2: commit pending)".to_string());
+    }
+
     // Update boot sector with new values and restore signature
     let mut boot = fat_on_disk
         .into_boot()

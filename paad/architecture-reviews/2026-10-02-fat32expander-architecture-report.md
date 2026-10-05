@@ -148,10 +148,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** `commit_new_geometry` re-reads the on-disk FSInfo free count and adds the new clusters, so any rerun after FSInfo landed (a `FatWritten` resume, or a no-growth rerun) counts them twice. On the no-growth path no checkpoint is written; a crash between the backup and primary boot sector writes leaves a `BackupMismatch` (exit 8), and the documented `--ignore-backup-mismatch` rerun then double-counts FSInfo.
 - **Evidence:** `src/resize/executor.rs:609-631` (`commit_new_geometry`), excerpt: "let old_free = fsinfo.free_count(); ... old_free.saturating_add(additional_clusters)"; `executor.rs:348-349` "if !calculation.fat_needs_growth { return Ok((FatOnDisk::NotWritten(boot), 0)); }"
 - **Found by:** Integration & Data. Continues [F-R26] (Partially fixed) and [F-R45].
-- **Status:** Partially fixed
-- **Status reason:** The FSInfo free count is now derived from the FAT (`free_clusters_after_resize`), not added to the on-disk hint, so a rerun of the commit gives the same value; reproduced first by `rerunning_an_interrupted_commit_counts_the_new_clusters_once` (260127 instead of 260095). Still open: the no-growth path writes no checkpoint, so a crash between the backup and primary boot sector writes still ends in `BackupMismatch` (exit 8) and needs `--ignore-backup-mismatch`, which is now safe. A recovery record there was blocked by the CLI's own backup check, which [F-05]'s fix removed, so it can now be added in the library alone.
-- **Status date:** 2026-10-03 UTC
-- **Status commit:** 020b53f
+- **Status:** Fixed
+- **Status reason:** The FSInfo free count is derived from the FAT (`free_clusters_after_resize`, 020b53f), so a rerun of the commit gives the same value. A commit with no FAT phase behind it (no FAT growth, or an empty plan) now first writes a `FatWritten` checkpoint and marks it in FSInfo, so a crash between the backup and primary boot sector writes is resumed by a plain rerun; reproduced first by `a_crash_inside_a_commit_without_fat_growth_resumes_on_its_own` (exit 8). A resume no longer checks the backup against the primary, because the verified record names the primary's geometry and the commit rewrites the backup; this also applies to phase-0 resumes on the growth path. [F-20] itself is not fixed: an empty plan still commits the new FAT geometry.
+- **Status date:** 2026-10-05 UTC
+- **Status commit:** pending
 
 ### [F-05] CLI re-implements library policy and so returns wrong exit codes
 - **Category:** 25 Business logic in the UI

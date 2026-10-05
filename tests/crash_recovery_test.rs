@@ -405,6 +405,25 @@ fn an_interrupted_sub_cluster_shift_exits_9() {
     );
 }
 
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_inside_a_commit_without_fat_growth_resumes_on_its_own() {
+    // [F-04]: the commit without FAT growth leaves a record too, so a plain
+    // rerun finishes it. No `--ignore-backup-mismatch` needed.
+    let reference = image_ready_for_a_resize_without_fat_growth();
+    resize_expecting_success(reference.path());
+    let expected = geometry(reference.path());
+
+    let image = image_ready_for_a_resize_without_fat_growth();
+    resize_crashing_at(image.path(), "before_primary_boot_write");
+    let output = resize_expecting_success(image.path());
+
+    assert_eq!(resumed_phase(&output), "FatWritten");
+    assert_filesystem_is_clean(image.path());
+    assert_files_are_intact(image.path());
+    assert_eq!(geometry(image.path()), expected);
+}
+
 // --- The device changes size between the crash and the rerun [F-03] -------
 //
 // The record of an interrupted resize sits at the last sector the device had
