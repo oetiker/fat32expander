@@ -162,6 +162,14 @@ pub enum Error {
         boot_fat_size: u32,
     },
 
+    /// [F-03]: the device shrank past the record since the resize started.
+    #[error(
+        "An interrupted resize left its checkpoint at sector {sector}, but the device now has \
+         only {device_sectors} sectors. Restore the device to its size at the time of the \
+         crash to resume."
+    )]
+    CheckpointOutsideDevice { sector: u64, device_sectors: u64 },
+
     /// [F-06]: the record matches the boot sector, but the geometry it would
     /// commit cannot hold a filesystem.
     #[error(

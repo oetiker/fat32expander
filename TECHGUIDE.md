@@ -61,6 +61,7 @@ Contains hints for the operating system:
 | 0x1E4 | 4 | signature2 | 0x61417272 |
 | 0x1E8 | 4 | free_count | Number of free clusters |
 | 0x1EC | 4 | next_free | Hint for next free cluster |
+| 0x1F0 | 12 | reserved | During a resize only: `RSZP` and the checkpoint sector (u64) |
 | 0x1FC | 4 | signature3 | 0xAA550000 |
 
 #### File Allocation Table (FAT)
@@ -475,7 +476,8 @@ Filesystem resize operations are inherently dangerous. If power is lost or the s
 
 #### Checkpoint Storage
 
-A checkpoint is stored in the **last sector of the device** (beyond the filesystem boundary):
+A checkpoint is stored in the **last sector the device had when the resize
+started** (beyond the filesystem boundary):
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -483,6 +485,14 @@ A checkpoint is stored in the **last sector of the device** (beyond the filesyst
 └─────────────────────────────────────────────────────────────────┘
                                                       └─► Last sector
 ```
+
+Right after the first checkpoint is written, and before any data moves, the
+sector number is marked in FSInfo's reserved bytes at offset 0x1F0 (see
+below). A rerun reads the checkpoint from the marked sector, so it finds it
+even if the device has grown since the crash. If the device has shrunk past
+the marked sector, the rerun refuses with exit code 9. Without a mark (a crash
+before the mark was written, or a run of an older build) the rerun looks in
+the device's current last sector. The commit writes FSInfo without the mark.
 
 The checkpoint contains:
 - Magic signature (0xFA32CHKP)

@@ -397,6 +397,8 @@ impl FSInfo {
     pub const TRAIL_SIG: u32 = 0xAA550000;
     /// Unknown free count value
     pub const UNKNOWN_FREE: u32 = 0xFFFFFFFF;
+    /// Marks the reserved bytes at offset 496 as holding a checkpoint location.
+    const RESIZE_RECORD_MARK: [u8; 4] = *b"RSZP";
 
     /// Parse FSInfo from raw bytes
     /// The input must be at least 512 bytes and will be stored in full
@@ -461,6 +463,32 @@ impl FSInfo {
     pub fn set_next_free(&mut self, cluster: u32) {
         let bytes = cluster.to_le_bytes();
         self.raw[492..496].copy_from_slice(&bytes);
+    }
+
+    /// Where an interrupted resize left its checkpoint, if it marked one.
+    ///
+    /// [F-03]: kept in the 12 reserved bytes at offset 496, as a 4-byte
+    /// marker followed by the sector number. The checkpoint sits at the
+    /// device's last sector *when the resize started*, which a later run
+    /// cannot work out if the device has changed size since.
+    pub fn resize_record_sector(&self) -> Option<u64> {
+        if self.raw[496..500] != Self::RESIZE_RECORD_MARK {
+            return None;
+        }
+        let mut sector = [0u8; 8];
+        sector.copy_from_slice(&self.raw[500..508]);
+        Some(u64::from_le_bytes(sector))
+    }
+
+    /// Mark where the checkpoint is, or clear the mark with `None`.
+    pub fn set_resize_record_sector(&mut self, sector: Option<u64>) {
+        match sector {
+            Some(sector) => {
+                self.raw[496..500].copy_from_slice(&Self::RESIZE_RECORD_MARK);
+                self.raw[500..508].copy_from_slice(&sector.to_le_bytes());
+            }
+            None => self.raw[496..508].fill(0),
+        }
     }
 
     /// Trail signature (offset 508, 4 bytes) - must be 0xAA550000

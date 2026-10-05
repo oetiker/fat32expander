@@ -7,7 +7,7 @@
 
 use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::fat32::BootSector;
+use crate::fat32::{read_fsinfo, write_fsinfo, BootSector, FSInfo};
 
 // ===== Crash-Safe Checkpoint Support =====
 
@@ -61,8 +61,8 @@ impl ResizePhase {
 
 /// Checkpoint stored in new space for crash recovery
 ///
-/// This is written to sector `old_total_sectors` (first sector of new space)
-/// and allows resuming an interrupted resize operation.
+/// This is written to its [`CheckpointSlot`], the device's last sector when
+/// the resize started, and allows resuming an interrupted resize operation.
 #[derive(Debug, Clone)]
 pub struct ResizeCheckpoint {
     /// Current resize phase
@@ -267,40 +267,105 @@ impl ResizeCheckpoint {
     }
 }
 
-/// Write checkpoint to the last sector of the device
+/// The sector that holds the checkpoint of one resize, fixed for the whole
+/// life of that resize.
 ///
-/// We use the last sector of the device (not the first sector of new space)
-/// because when data is shifted forward during FAT growth, some clusters
-/// will be written to sectors starting at old_total_sectors. Using the last
-/// sector ensures the checkpoint won't be overwritten by shifted cluster data.
-pub(crate) fn write_checkpoint(device: &Device, checkpoint: &ResizeCheckpoint) -> Result<()> {
-    let sector = device.total_sectors() - 1;
+/// [F-03]: a resize puts its checkpoint at the device's last sector, which
+/// the shift never writes to. Recomputing that sector on every run loses the
+/// record as soon as the device changes size between a crash and the rerun.
+/// The slot is therefore chosen once, when the resize starts, and marked in
+/// FSInfo, so a later run follows the mark instead of the device size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CheckpointSlot(u64);
+
+impl CheckpointSlot {
+    /// The slot for a resize that starts now: the device's last sector.
+    pub(crate) fn at_device_end(device: &Device) -> Self {
+        Self(device.total_sectors() - 1)
+    }
+
+    /// The slot an interrupted resize marked in FSInfo, or the device's last
+    /// sector if none is marked: a resize that crashed before it could mark
+    /// one, or a build that predates the mark.
+    pub(crate) fn locate(device: &Device, fsinfo: &FSInfo) -> Self {
+        match fsinfo.resize_record_sector() {
+            Some(sector) => Self(sector),
+            None => Self::at_device_end(device),
+        }
+    }
+
+    pub(crate) fn sector(self) -> u64 {
+        self.0
+    }
+
+    /// Whether the slot can hold the record of a resize of `boot`.
+    ///
+    /// A record always sits beyond the filesystem it belongs to. A slot
+    /// inside the filesystem is user data: a filesystem that already fills
+    /// the device, or a mark a completed resize did not get to clear.
+    fn is_beyond(self, boot: &BootSector) -> bool {
+        self.0 >= boot.total_sectors() as u64
+    }
+
+    /// The device has shrunk past the slot since the resize started.
+    fn outside_device(self, device: &Device) -> Result<()> {
+        if self.0 >= device.total_sectors() {
+            return Err(Error::CheckpointOutsideDevice {
+                sector: self.0,
+                device_sectors: device.total_sectors(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Write checkpoint to its slot
+pub(crate) fn write_checkpoint(
+    device: &Device,
+    slot: CheckpointSlot,
+    checkpoint: &ResizeCheckpoint,
+) -> Result<()> {
     let sector_size = device.sector_size() as usize;
-    device.write_sector(sector, &checkpoint.to_bytes(sector_size))?;
+    device.write_sector(slot.sector(), &checkpoint.to_bytes(sector_size))?;
     device.sync()?;
     Ok(())
 }
 
-/// Read checkpoint from the last sector of the device
+/// Record `slot` in the FSInfo sector, so a later run finds the checkpoint
+/// even if the device changes size in between ([F-03]).
+///
+/// Durable on return: the caller moves data only after this, and the mark is
+/// what makes that move resumable.
+pub(crate) fn mark_checkpoint_slot(
+    device: &Device,
+    fsinfo_sector: u16,
+    slot: CheckpointSlot,
+) -> Result<()> {
+    let mut fsinfo = read_fsinfo(device, fsinfo_sector)?;
+    fsinfo.set_resize_record_sector(Some(slot.sector()));
+    write_fsinfo(device, &fsinfo, fsinfo_sector)?;
+    device.sync()?;
+    Ok(())
+}
+
+/// Read the checkpoint from its slot, if the slot can hold one
 pub(crate) fn read_checkpoint(
     device: &Device,
     boot: &BootSector,
+    slot: CheckpointSlot,
 ) -> Result<Option<ResizeCheckpoint>> {
-    // Only check if device is larger than filesystem
-    if device.total_sectors() <= boot.total_sectors() as u64 {
+    if !slot.is_beyond(boot) {
         return Ok(None);
     }
-
-    let checkpoint_sector = device.total_sectors() - 1;
-    let data = device.read_sector(checkpoint_sector)?;
+    slot.outside_device(device)?;
+    let data = device.read_sector(slot.sector())?;
     ResizeCheckpoint::from_bytes(&data)
 }
 
-/// Clear checkpoint by zeroing the last sector of the device
-pub(crate) fn clear_checkpoint(device: &Device) -> Result<()> {
-    let sector = device.total_sectors() - 1;
+/// Clear the checkpoint by zeroing its slot
+pub(crate) fn clear_checkpoint(device: &Device, slot: CheckpointSlot) -> Result<()> {
     let zeros = vec![0u8; device.sector_size() as usize];
-    device.write_sector(sector, &zeros)?;
+    device.write_sector(slot.sector(), &zeros)?;
     Ok(())
 }
 
@@ -308,24 +373,20 @@ pub(crate) fn clear_checkpoint(device: &Device) -> Result<()> {
 pub(crate) fn check_for_incomplete_resize(
     device: &Device,
     boot: &BootSector,
+    slot: CheckpointSlot,
 ) -> Result<Option<ResizeCheckpoint>> {
-    // First check if boot sector is invalidated
-    if !boot.is_signature_valid() {
-        // Boot sector was invalidated - we MUST find a valid checkpoint
-        // Checkpoint is at last sector of device
-        if device.total_sectors() <= boot.total_sectors() as u64 {
-            return Err(Error::InvalidatedFilesystem);
-        }
-
-        let checkpoint_sector = device.total_sectors() - 1;
-        let data = device.read_sector(checkpoint_sector)?;
-        match ResizeCheckpoint::from_bytes(&data)? {
-            Some(cp) => Ok(Some(cp)),
-            None => Err(Error::InvalidatedFilesystem),
-        }
-    } else {
+    if boot.is_signature_valid() {
         // Boot sector valid - check for checkpoint anyway (phase 0 crash)
-        read_checkpoint(device, boot)
+        return read_checkpoint(device, boot, slot);
+    }
+
+    // Boot sector was invalidated - we MUST find a valid checkpoint
+    if !slot.is_beyond(boot) {
+        return Err(Error::InvalidatedFilesystem);
+    }
+    match read_checkpoint(device, boot, slot)? {
+        Some(cp) => Ok(Some(cp)),
+        None => Err(Error::InvalidatedFilesystem),
     }
 }
 
@@ -605,9 +666,13 @@ mod tests {
         let boot = test_boot_sector(2000, 100);
         let checkpoint = test_checkpoint(ResizePhase::DataCopied);
 
-        assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+        assert!(
+            read_checkpoint(&device, &boot, CheckpointSlot::at_device_end(&device))
+                .unwrap()
+                .is_none()
+        );
 
-        write_checkpoint(&device, &checkpoint).unwrap();
+        write_checkpoint(&device, CheckpointSlot::at_device_end(&device), &checkpoint).unwrap();
 
         let last = device.total_sectors() - 1;
         assert_eq!(
@@ -617,12 +682,18 @@ mod tests {
         );
 
         assert_checkpoint_eq(
-            &read_checkpoint(&device, &boot).unwrap().unwrap(),
+            &read_checkpoint(&device, &boot, CheckpointSlot::at_device_end(&device))
+                .unwrap()
+                .unwrap(),
             &checkpoint,
         );
 
-        clear_checkpoint(&device).unwrap();
-        assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+        clear_checkpoint(&device, CheckpointSlot::at_device_end(&device)).unwrap();
+        assert!(
+            read_checkpoint(&device, &boot, CheckpointSlot::at_device_end(&device))
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// [F-R23]'s cited consequence: `write_checkpoint`, `read_checkpoint` and
@@ -643,9 +714,13 @@ mod tests {
         assert_eq!(device.sector_size(), 4096);
         assert_eq!(device.total_sectors(), 4000);
 
-        assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+        assert!(
+            read_checkpoint(&device, &boot, CheckpointSlot::at_device_end(&device))
+                .unwrap()
+                .is_none()
+        );
 
-        write_checkpoint(&device, &checkpoint).unwrap();
+        write_checkpoint(&device, CheckpointSlot::at_device_end(&device), &checkpoint).unwrap();
 
         // The record must be at byte 3999 * 4096, not 3999 * 512.
         let expected_offset = 3999u64 * 4096;
@@ -656,7 +731,9 @@ mod tests {
         );
 
         assert_checkpoint_eq(
-            &read_checkpoint(&device, &boot).unwrap().unwrap(),
+            &read_checkpoint(&device, &boot, CheckpointSlot::at_device_end(&device))
+                .unwrap()
+                .unwrap(),
             &checkpoint,
         );
 
@@ -667,8 +744,12 @@ mod tests {
             "the checkpoint write must stay inside the device"
         );
 
-        clear_checkpoint(&device).unwrap();
-        assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+        clear_checkpoint(&device, CheckpointSlot::at_device_end(&device)).unwrap();
+        assert!(
+            read_checkpoint(&device, &boot, CheckpointSlot::at_device_end(&device))
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// [F-02]: only a record whose old geometry is the boot sector's, and
@@ -717,11 +798,12 @@ mod tests {
         let boot = test_boot_sector_with_sector_size(2000, 100, 4096);
         let checkpoint = test_checkpoint(ResizePhase::DataCopied);
 
-        write_checkpoint(&device, &checkpoint).unwrap();
+        write_checkpoint(&device, CheckpointSlot::at_device_end(&device), &checkpoint).unwrap();
 
-        let found = check_for_incomplete_resize(&device, &boot)
-            .unwrap()
-            .expect("an interrupted resize must be detected");
+        let found =
+            check_for_incomplete_resize(&device, &boot, CheckpointSlot::at_device_end(&device))
+                .unwrap()
+                .expect("an interrupted resize must be detected");
         assert_checkpoint_eq(&found, &checkpoint);
     }
 
@@ -733,10 +815,19 @@ mod tests {
         let (_file, device) = temp_device(2000);
 
         // Plant a valid checkpoint in the last sector.
-        write_checkpoint(&device, &test_checkpoint(ResizePhase::Started)).unwrap();
+        write_checkpoint(
+            &device,
+            CheckpointSlot::at_device_end(&device),
+            &test_checkpoint(ResizePhase::Started),
+        )
+        .unwrap();
 
         let boot = test_boot_sector(2000, 100);
-        assert!(read_checkpoint(&device, &boot).unwrap().is_none());
+        assert!(
+            read_checkpoint(&device, &boot, CheckpointSlot::at_device_end(&device))
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// An invalidated boot sector means the resize was interrupted inside the
@@ -749,15 +840,15 @@ mod tests {
         boot.invalidate_signature();
 
         assert!(matches!(
-            check_for_incomplete_resize(&device, &boot),
+            check_for_incomplete_resize(&device, &boot, CheckpointSlot::at_device_end(&device)),
             Err(Error::InvalidatedFilesystem)
         ));
 
         let checkpoint = test_checkpoint(ResizePhase::DataCopied);
-        write_checkpoint(&device, &checkpoint).unwrap();
+        write_checkpoint(&device, CheckpointSlot::at_device_end(&device), &checkpoint).unwrap();
 
         assert_checkpoint_eq(
-            &check_for_incomplete_resize(&device, &boot)
+            &check_for_incomplete_resize(&device, &boot, CheckpointSlot::at_device_end(&device))
                 .unwrap()
                 .unwrap(),
             &checkpoint,
@@ -772,18 +863,116 @@ mod tests {
         let (_file, device) = temp_device(4000);
         let boot = test_boot_sector(2000, 100);
 
-        assert!(check_for_incomplete_resize(&device, &boot)
-            .unwrap()
-            .is_none());
+        assert!(check_for_incomplete_resize(
+            &device,
+            &boot,
+            CheckpointSlot::at_device_end(&device)
+        )
+        .unwrap()
+        .is_none());
 
         let checkpoint = test_checkpoint(ResizePhase::Started);
-        write_checkpoint(&device, &checkpoint).unwrap();
+        write_checkpoint(&device, CheckpointSlot::at_device_end(&device), &checkpoint).unwrap();
 
         assert_checkpoint_eq(
-            &check_for_incomplete_resize(&device, &boot)
+            &check_for_incomplete_resize(&device, &boot, CheckpointSlot::at_device_end(&device))
                 .unwrap()
                 .unwrap(),
             &checkpoint,
         );
+    }
+
+    // ===== [F-03]: the slot is fixed when the resize starts =====
+
+    fn fsinfo_marking(sector: Option<u64>) -> FSInfo {
+        let mut data = vec![0u8; 512];
+        data[0..4].copy_from_slice(&FSInfo::LEAD_SIG.to_le_bytes());
+        data[484..488].copy_from_slice(&FSInfo::STRUC_SIG.to_le_bytes());
+        data[508..512].copy_from_slice(&FSInfo::TRAIL_SIG.to_le_bytes());
+        let mut fsinfo = FSInfo::from_bytes(&data).unwrap();
+        fsinfo.set_resize_record_sector(sector);
+        fsinfo
+    }
+
+    #[test]
+    fn the_fsinfo_mark_round_trips_and_clears() {
+        let mut fsinfo = fsinfo_marking(None);
+        assert_eq!(fsinfo.resize_record_sector(), None);
+
+        fsinfo.set_resize_record_sector(Some(0x1_2345_6789));
+        assert_eq!(fsinfo.resize_record_sector(), Some(0x1_2345_6789));
+        assert_eq!(fsinfo.trail_sig(), FSInfo::TRAIL_SIG, "mark overran");
+
+        fsinfo.set_resize_record_sector(None);
+        assert_eq!(fsinfo.resize_record_sector(), None);
+        assert!(fsinfo.as_bytes()[496..508].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn a_marked_slot_is_found_after_the_device_grew() {
+        // The resize started on a 3000-sector device; it now has 4000.
+        let (_file, device) = temp_device(4000);
+        let boot = test_boot_sector(2000, 100);
+        let slot = CheckpointSlot::locate(&device, &fsinfo_marking(Some(2999)));
+        assert_eq!(slot.sector(), 2999);
+
+        let checkpoint = test_checkpoint(ResizePhase::Started);
+        write_checkpoint(&device, slot, &checkpoint).unwrap();
+
+        assert_checkpoint_eq(
+            &check_for_incomplete_resize(&device, &boot, slot)
+                .unwrap()
+                .unwrap(),
+            &checkpoint,
+        );
+        // The device's last sector, where an unmarked run would look, has
+        // nothing.
+        assert!(
+            read_checkpoint(&device, &boot, CheckpointSlot::at_device_end(&device))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_unmarked_fsinfo_falls_back_to_the_device_end() {
+        let (_file, device) = temp_device(4000);
+        let slot = CheckpointSlot::locate(&device, &fsinfo_marking(None));
+        assert_eq!(slot, CheckpointSlot::at_device_end(&device));
+    }
+
+    #[test]
+    fn a_mark_inside_the_filesystem_is_not_a_record() {
+        // A completed resize that crashed before clearing its mark: the
+        // marked sector now holds user data of the grown filesystem.
+        let (_file, device) = temp_device(4000);
+        let boot = test_boot_sector(4000, 100);
+        let slot = CheckpointSlot::locate(&device, &fsinfo_marking(Some(2999)));
+        write_checkpoint(&device, slot, &test_checkpoint(ResizePhase::Started)).unwrap();
+
+        assert!(check_for_incomplete_resize(&device, &boot, slot)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn a_mark_beyond_a_shrunk_device_needs_recovery() {
+        let (_file, device) = temp_device(2500);
+        let boot = test_boot_sector(2000, 100);
+        let slot = CheckpointSlot::locate(&device, &fsinfo_marking(Some(2999)));
+
+        assert!(matches!(
+            check_for_incomplete_resize(&device, &boot, slot),
+            Err(Error::CheckpointOutsideDevice {
+                sector: 2999,
+                device_sectors: 2500
+            })
+        ));
+        let mut invalidated = boot.clone();
+        invalidated.invalidate_signature();
+        assert!(matches!(
+            check_for_incomplete_resize(&device, &invalidated, slot),
+            Err(Error::CheckpointOutsideDevice { .. })
+        ));
     }
 }

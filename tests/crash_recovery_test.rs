@@ -405,6 +405,73 @@ fn an_interrupted_sub_cluster_shift_exits_9() {
     );
 }
 
+// --- The device changes size between the crash and the rerun [F-03] -------
+//
+// The record of an interrupted resize sits at the last sector the device had
+// when the resize started. A rerun must find it there whatever size the
+// device has now, or it plans a fresh shift over data the first run already
+// moved.
+
+/// Crash at `crash_point`, change the image to `rerun_mb`, and resume.
+fn crash_resize_to_then_resume(crash_point: &str, rerun_mb: u32) -> String {
+    let image = image_with_files(128, 200);
+    resize_crashing_at(image.path(), crash_point);
+    truncate(image.path(), rerun_mb);
+
+    let output = resize_expecting_success(image.path());
+    let phase = resumed_phase(&output);
+
+    assert_filesystem_is_clean(image.path());
+    assert_files_are_intact(image.path());
+    // The resume completes the resize it was interrupted in; a second run
+    // takes the filesystem the rest of the way.
+    resize_expecting_success(image.path());
+    assert_filesystem_is_clean(image.path());
+    assert_files_are_intact(image.path());
+    phase
+}
+
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_in_the_data_shift_resumes_after_the_device_grew() {
+    assert_eq!(
+        crash_resize_to_then_resume("after_data_shift", 250),
+        "Started"
+    );
+}
+
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_in_the_danger_zone_resumes_after_the_device_grew() {
+    assert_eq!(
+        crash_resize_to_then_resume("after_boot_invalidate", 250),
+        "DataCopied"
+    );
+}
+
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_in_the_data_shift_is_refused_after_the_device_shrank() {
+    let image = image_with_files(128, 200);
+    resize_crashing_at(image.path(), "after_data_shift");
+    truncate(image.path(), 180);
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let out = run(Command::new(BIN).arg("resize").arg(image.path()));
+    assert_eq!(
+        out.status.code(),
+        Some(9),
+        "a resume onto a device smaller than its plan needs recovery:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resume must not modify the image"
+    );
+}
+
 // --- Cross-cutting properties -----------------------------------------------
 
 #[test]

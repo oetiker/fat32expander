@@ -137,6 +137,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** Write, read, clear and check each compute `device.total_sectors() - 1`, so if the device size changes between a crash and the next run the record is not found. After a phase-0 crash with a valid boot sector the next run replans the shift over partly shifted data; with an invalidated boot sector it fails as `InvalidatedFilesystem`. The size-mismatch guard compares against a record that could only be found at the new last sector, so it is unreachable in practice; no test constructs it.
 - **Evidence:** `src/resize/checkpoint.rs:249,266,273,292`, excerpt: "let sector = device.total_sectors() - 1;"; `grep ResizeSizeMismatch tests/` → no hits
 - **Found by:** Coupling & Dependencies, Integration & Data, Structure & Boundaries
+- **Status:** Fixed
+- **Status reason:** The checkpoint sector is chosen once per resize (`CheckpointSlot`, the device's last sector at the start) and marked in FSInfo's reserved bytes at 0x1F0 before any data moves; reruns follow the mark, and the commit's FSInfo write retires it. A device that shrank past the record is refused as `CheckpointOutsideDevice` (exit 9). Reproduced first by `a_crash_in_the_data_shift_resumes_after_the_device_grew` (fresh replan), `a_crash_in_the_danger_zone_resumes_after_the_device_grew` (exit 9) and `a_crash_in_the_data_shift_is_refused_after_the_device_shrank` (exit 0). `ResizeSizeMismatch` remains unreachable: the record always lies at or past the planned size, so a shrunk device hits `CheckpointOutsideDevice` first.
+- **Status date:** 2026-10-05 UTC
+- **Status commit:** pending
 
 ### [F-04] Commit phase is not idempotent; the no-growth path has no recovery record
 - **Category:** 19 Lack of idempotency
@@ -228,7 +232,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Evidence:** `Cargo.toml` `[dev-dependencies]` — `tempfile = "3.0"` only; `grep ResizeSizeMismatch tests/` → none; `src/resize/relocator.rs:~598` "in_use = [2u32, 3, 4, 5, 6, 7, 8, 9]"
 - **Found by:** Security & Code Quality. Continues [F-R12].
 - **Status:** Partially fixed
-- **Status reason:** The sparse in-use pattern for the shift resume ([F-01]) is now tested (`execute_relocation_resumes_safely_across_free_clusters`). A checkpoint that disagrees with the boot sector ([F-02]) is now tested (`a_checkpoint_that_disagrees_with_the_boot_sector_is_refused`, `checkpoint_must_describe_the_filesystem_behind_the_boot_sector`). A corrupt backup boot sector pointer ([F-10]) is now tested (`a_backup_pointer_into_the_fat_is_refused_even_with_the_override`). Still open: a negative test for [F-03], and any fuzz or property harness.
+- **Status reason:** The sparse in-use pattern for the shift resume ([F-01]) is now tested (`execute_relocation_resumes_safely_across_free_clusters`). A checkpoint that disagrees with the boot sector ([F-02]) is now tested (`a_checkpoint_that_disagrees_with_the_boot_sector_is_refused`, `checkpoint_must_describe_the_filesystem_behind_the_boot_sector`). A corrupt backup boot sector pointer ([F-10]) is now tested (`a_backup_pointer_into_the_fat_is_refused_even_with_the_override`). A device that changed size between the crash and the rerun ([F-03]) is now tested (`a_crash_in_the_data_shift_resumes_after_the_device_grew`, `a_crash_in_the_data_shift_is_refused_after_the_device_shrank`). Still open: any fuzz or property harness.
 - **Status date:** 2026-10-05 UTC
 - **Status commit:** d0a0f56
 

@@ -280,6 +280,7 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
         | Error::ResizeSizeMismatch(_)
         | Error::CheckpointMismatch { .. }
         | Error::CheckpointGeometryUnusable { .. }
+        | Error::CheckpointOutsideDevice { .. }
         | Error::ShiftProgressMissing => exit::NEEDS_RECOVERY,
 
         Error::DeviceIo { .. }
