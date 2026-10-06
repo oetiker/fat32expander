@@ -163,6 +163,35 @@ pub fn count_free_clusters(fat: &[u32], max_cluster: u32) -> u32 {
 mod tests {
     use super::*;
 
+    /// Safety net for [F-22]. The probe that addresses the device must accept
+    /// every sector size FAT32 permits -- 1024 and 2048 included, though the
+    /// error text has only ever named 512 and 4096 -- and reject the rest as
+    /// `UnsupportedSectorSize`, carrying the size it found.
+    #[test]
+    fn bootstrap_accepts_exactly_the_four_fat32_sector_sizes() {
+        let leading = |bps: u16| {
+            let mut data = vec![0u8; 4096];
+            data[11..13].copy_from_slice(&bps.to_le_bytes());
+            data
+        };
+        for bps in [512u16, 1024, 2048, 4096] {
+            assert_eq!(
+                bootstrap_sector_size(&leading(bps)).unwrap(),
+                bps as u32,
+                "bytes_per_sector={bps}"
+            );
+        }
+        for bps in [0u16, 256, 511, 513, 3072, 8192] {
+            assert!(
+                matches!(
+                    bootstrap_sector_size(&leading(bps)),
+                    Err(Error::UnsupportedSectorSize(n)) if n == bps as u32
+                ),
+                "bytes_per_sector={bps} was not rejected as unsupported"
+            );
+        }
+    }
+
     #[test]
     fn test_count_free_clusters() {
         let fat = vec![

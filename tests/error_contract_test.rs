@@ -758,6 +758,59 @@ fn failure_modes_get_distinct_exit_codes() {
     );
 }
 
+/// Safety net for [F-22]. A boot sector declaring a sector size FAT32 does
+/// not permit is refused as an unusable filesystem (exit 5), the message
+/// names the size it found, and nothing is written. The wording of the rest
+/// of the message is what [F-22] changes, so it is not pinned here.
+#[test]
+fn an_unsupported_sector_size_exits_5_names_the_size_and_writes_nothing() {
+    let image = valid_image(64, 64);
+    let mut data = std::fs::read(image.path()).unwrap();
+    data[11..13].copy_from_slice(&8192u16.to_le_bytes());
+    std::fs::write(image.path(), &data).unwrap();
+
+    let output = run_resize(image.path());
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "an unsupported sector size must exit 5.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        stderr_of(&output).contains("8192"),
+        "the error must name the sector size it found.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        std::fs::read(image.path()).unwrap(),
+        data,
+        "a refused device must not be written"
+    );
+}
+
+/// Safety net for [F-28]. `version` reports the package version and a
+/// `git:` provenance field, whatever [F-28] changes about when that field is
+/// refreshed.
+#[test]
+fn version_names_the_package_version_and_a_git_hash() {
+    let output = run(&[std::ffi::OsStr::new("version")]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "`version` must name the package version, got:\n{stdout}"
+    );
+    let hash = stdout
+        .split("git:")
+        .nth(1)
+        .unwrap_or_else(|| panic!("`version` must carry a git: field, got:\n{stdout}"));
+    assert!(
+        !hash
+            .trim_end_matches(|c: char| c == ')' || c.is_whitespace())
+            .is_empty(),
+        "the git: field must not be empty, got:\n{stdout}"
+    );
+}
+
 /// A resize that finds nothing to do is not a failure. Running the tool twice
 /// must succeed twice, which is what makes it safe to put in a provisioning
 /// script that does not track whether it has already run.

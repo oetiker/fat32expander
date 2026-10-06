@@ -395,6 +395,34 @@ mod tests {
         }
     }
 
+    /// Safety net for [F-19]. The FAT type is decided by cluster count, never
+    /// by the label at offset 82: formatters write "FAT32   ", "FAT     ",
+    /// blanks or nothing at all there. Whatever the empty `if` around that
+    /// label turns into, a valid volume must stay accepted under any label.
+    #[test]
+    fn validation_ignores_the_fs_type_label() {
+        for label in [
+            b"FAT32   ",
+            b"FAT     ",
+            b"FAT16   ",
+            b"        ",
+            b"NO NAME ",
+            b"\0\0\0\0\0\0\0\0",
+        ] {
+            let mut raw = valid_boot_sector_with(512, 1, 32, 2, 1_000_000, 7813)
+                .as_bytes()
+                .to_vec();
+            raw[82..90].copy_from_slice(label);
+            let boot = BootSector::from_bytes(&raw).unwrap();
+            assert!(
+                validate_boot_sector(&boot).is_ok(),
+                "label {:?} was rejected: {:?}",
+                String::from_utf8_lossy(label),
+                validate_boot_sector(&boot)
+            );
+        }
+    }
+
     /// Safety net for [F-R52]. The 65525-cluster floor separating FAT32 from
     /// FAT16 has no test of its own: `test_not_fat32` reaches
     /// `Error::InvalidFAT32` through the root-entry-count check instead, and

@@ -462,6 +462,43 @@ mod tests {
         );
     }
 
+    /// Safety net for [F-16]. A version-1 record, built byte by byte rather
+    /// than by `to_bytes`, as builds up to now leave it after a crash. A
+    /// version bump must not strand those: a user who upgrades between the
+    /// crash and the rerun still has to get a resume, with and without the
+    /// shift-progress tail.
+    #[test]
+    fn a_version_1_record_from_an_earlier_build_is_still_read() {
+        let mut v1 = vec![0u8; 512];
+        v1[0..8].copy_from_slice(b"FAT32RSZ");
+        v1[8] = 1; // version
+        v1[9] = 1; // phase DataCopied
+        v1[12..16].copy_from_slice(&0x1111_2222u32.to_le_bytes());
+        v1[16..20].copy_from_slice(&0x3333_4444u32.to_le_bytes());
+        v1[20..24].copy_from_slice(&0x5555_6666u32.to_le_bytes());
+        v1[24..28].copy_from_slice(&0x7777_8888u32.to_le_bytes());
+        let crc = crc32fast::hash(&v1[0..28]);
+        v1[28..32].copy_from_slice(&crc.to_le_bytes());
+
+        let parsed = ResizeCheckpoint::from_bytes(&v1)
+            .expect("a version-1 record must parse")
+            .expect("a version-1 record must be found");
+        assert_checkpoint_eq(&parsed, &test_checkpoint(ResizePhase::DataCopied));
+        assert_eq!(parsed.shift_progress, None);
+
+        let mut with_tail = v1.clone();
+        with_tail[32..36].copy_from_slice(b"PRG1");
+        with_tail[36..40].copy_from_slice(&0x0000_4321u32.to_le_bytes());
+        let crc = crc32fast::hash(&with_tail[32..40]);
+        with_tail[40..44].copy_from_slice(&crc.to_le_bytes());
+
+        let parsed = ResizeCheckpoint::from_bytes(&with_tail)
+            .expect("a version-1 record with progress must parse")
+            .expect("a version-1 record with progress must be found");
+        assert_checkpoint_eq(&parsed, &test_checkpoint(ResizePhase::DataCopied));
+        assert_eq!(parsed.shift_progress, Some(0x4321));
+    }
+
     /// A corrupted record must be reported, never parsed into a plausible
     /// resume plan. Each data byte is covered, so a field left outside the CRC
     /// range would be caught.

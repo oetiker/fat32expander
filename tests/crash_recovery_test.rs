@@ -254,6 +254,45 @@ fn crash_then_resume(crash_point: &str) -> String {
     phase
 }
 
+/// Crash at `crash_point`, then dry-run against the interrupted filesystem.
+/// The dry run must not write a single byte, and the real run after it must
+/// still resume from `phase` and finish with the files intact.
+fn dry_run_after_crash_changes_nothing(crash_point: &str, phase: &str) {
+    let image = image_with_files(128, 200);
+    resize_crashing_at(image.path(), crash_point);
+    let before = std::fs::read(image.path()).expect("read image");
+
+    // The exit code is not pinned: what a dry run reports here is what [F-21]
+    // changes. That it leaves the device alone is not.
+    run(Command::new(BIN)
+        .arg("resize")
+        .arg("--dry-run")
+        .arg(image.path()));
+    assert!(
+        std::fs::read(image.path()).expect("read image") == before,
+        "a dry run after a crash at {crash_point} changed the device"
+    );
+
+    let output = resize_expecting_success(image.path());
+    assert_eq!(resumed_phase(&output), phase);
+    assert_filesystem_is_clean(image.path());
+    assert_files_are_intact(image.path());
+}
+
+/// Safety net for [F-21], before the boot sector is invalidated.
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_dry_run_after_an_early_crash_changes_nothing() {
+    dry_run_after_crash_changes_nothing("after_checkpoint_start", "Started");
+}
+
+/// Safety net for [F-21], inside the danger zone.
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_dry_run_inside_the_danger_zone_changes_nothing() {
+    dry_run_after_crash_changes_nothing("after_boot_invalidate", "DataCopied");
+}
+
 // --- One test per injectable crash point ------------------------------------
 //
 // The phase each one resumes from is asserted because it is the contract the
