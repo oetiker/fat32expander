@@ -1,4 +1,4 @@
-use crate::device::Device;
+use crate::device::{Device, PROBE_BYTES};
 use crate::error::{Error, Result};
 use crate::fat32::structs::{fat_entry, BootSector, FSInfo};
 use crate::fat32::validation::{
@@ -6,8 +6,16 @@ use crate::fat32::validation::{
 };
 use std::path::Path;
 
-/// Maximum sector size supported by FAT32 (4096 bytes)
-const MAX_SECTOR_SIZE: usize = 4096;
+// The open-time probe must see a whole boot sector at every size FAT32
+// permits, or `bootstrap_sector_size` would parse a truncated one.
+const _: () = {
+    let sizes = BootSector::VALID_SECTOR_SIZES;
+    let mut i = 0;
+    while i < sizes.len() {
+        assert!(sizes[i] as usize <= PROBE_BYTES);
+        i += 1;
+    }
+};
 
 /// Determine the sector size a FAT32 boot sector declares.
 ///
@@ -57,20 +65,20 @@ pub fn read_boot_sector_for_recovery(device: &Device) -> Result<BootSector> {
 
 /// The parsing both readers share, without either one's validation policy.
 fn read_boot_sector_unvalidated(device: &Device) -> Result<BootSector> {
-    // Read max sector size bytes to ensure we have the complete boot sector
-    let data = device.read_bytes_at(0, MAX_SECTOR_SIZE)?;
-
-    // Parse the boot sector (validates minimum 512 bytes)
-    let boot = BootSector::from_bytes(&data)?;
-
-    // Validate the sector size is a valid FAT32 size
-    let sector_size = boot.bytes_per_sector();
-    if !BootSector::VALID_SECTOR_SIZES.contains(&sector_size) {
-        return Err(Error::UnsupportedSectorSize(sector_size as u32));
+    // The device addresses sectors at the size this boot sector declared when
+    // it was opened ([`bootstrap_sector_size`] checked it then), so sector 0
+    // is exactly the boot sector. A device opened at some other size is
+    // refused rather than parsed from a misaddressed read ([F-22]).
+    let boot = BootSector::from_bytes(&device.read_sector(0)?)?;
+    let declared = boot.bytes_per_sector() as u32;
+    if declared != device.sector_size() {
+        return Err(Error::BootSectorValidation(format!(
+            "Boot sector declares {}-byte sectors, but the device is addressed with {}-byte sectors",
+            declared,
+            device.sector_size()
+        )));
     }
-
-    // Re-parse with the correct sector size (trimmed to actual size)
-    BootSector::from_bytes(&data[..sector_size as usize])
+    Ok(boot)
 }
 
 /// Read and parse the backup boot sector
@@ -189,6 +197,29 @@ mod tests {
                 ),
                 "bytes_per_sector={bps} was not rejected as unsupported"
             );
+        }
+    }
+
+    /// [F-22]: the boot sector is read as sector 0 of the device, so a device
+    /// addressed at a size other than the one the boot sector declares is
+    /// refused instead of parsed from a misaddressed read.
+    #[test]
+    fn a_boot_sector_is_read_only_at_the_size_it_declares() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut data = vec![0u8; 64 * 4096];
+        data[11..13].copy_from_slice(&4096u16.to_le_bytes());
+        std::fs::write(file.path(), &data).unwrap();
+
+        let matching = Device::open_with_sector_size(file.path(), 4096).unwrap();
+        let boot = read_boot_sector_unvalidated(&matching).unwrap();
+        assert_eq!(boot.bytes_per_sector(), 4096);
+
+        let mismatched = Device::open_with_sector_size(file.path(), 512).unwrap();
+        match read_boot_sector_unvalidated(&mismatched) {
+            Err(Error::BootSectorValidation(msg)) => {
+                assert!(msg.contains("4096") && msg.contains("512"), "{msg}")
+            }
+            other => panic!("expected BootSectorValidation, got {other:?}"),
         }
     }
 

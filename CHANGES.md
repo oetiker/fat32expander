@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - used `let-else` pattern for cleaner checkpoint parsing
 
 ### Fixed
+- The error for an unsupported sector size said "(expected 512 or 4096)", although filesystems with 1024- and 2048-byte sectors are supported too. It now lists all four sizes.
 - If a resize that did not need to enlarge the FAT was interrupted in its last step, the next run failed with "Backup boot sector does not match primary boot sector" and exit code 8 and needed `--ignore-backup-mismatch`. Such a resize now leaves a recovery record as well, and a plain rerun finishes it.
 - If a resize was interrupted while moving data and the device was then enlarged again before the rerun, the rerun did not find the record of the interrupted resize, started over, and could write wrong contents into files. A rerun now finds the record wherever the device ends, finishes the interrupted resize, and a further run uses the added space. If the device has shrunk since, the rerun refuses with "An interrupted resize left its checkpoint at sector ...", exit code 9, and changes nothing.
 - An interrupted resize that had already marked the filesystem as being resized could not be resumed after the device was enlarged again; it failed with "Filesystem has been invalidated by an interrupted resize operation". It now resumes.

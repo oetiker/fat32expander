@@ -130,7 +130,10 @@ pub enum Error {
     #[error("Relocation failed: {0}")]
     Relocation(String),
 
-    #[error("Device sector size {0} is not supported (expected 512 or 4096)")]
+    #[error(
+        "Device sector size {0} is not supported (expected one of {sizes:?})",
+        sizes = crate::fat32::BootSector::VALID_SECTOR_SIZES
+    )]
     UnsupportedSectorSize(u32),
 
     #[error("Resize checkpoint is corrupted (CRC mismatch)")]
@@ -201,3 +204,17 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [F-22]: the message listed two of the four sizes FAT32 permits.
+    #[test]
+    fn the_unsupported_sector_size_message_names_every_valid_size() {
+        let message = Error::UnsupportedSectorSize(8192).to_string();
+        for size in ["512", "1024", "2048", "4096"] {
+            assert!(message.contains(size), "{size} missing from: {message}");
+        }
+    }
+}

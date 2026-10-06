@@ -306,6 +306,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** The user-visible error lists two of the four valid sizes; 4096 is defined twice; the sector-size check runs three times.
 - **Evidence:** `src/error.rs:129`, excerpt: "Device sector size {0} is not supported (expected 512 or 4096)"; `src/fat32/operations.rs:10` "MAX_SECTOR_SIZE: usize = 4096"; `src/device.rs:71` "PROBE_BYTES: usize = 4096"; checks at `operations.rs:20-24,66-69`, `validation.rs:42-48`
 - **Found by:** Structure & Boundaries, Coupling & Dependencies. [F-R52] is marked Fixed but is incomplete.
+- **Status:** Fixed
+- **Status reason:** The message takes its list from `BootSector::VALID_SECTOR_SIZES`. `MAX_SECTOR_SIZE` is gone: `read_boot_sector_unvalidated` reads sector 0 of a device already opened at the declared size and refuses a device addressed at another size, so the size list is checked at open and in the validator only. A const assertion ties `PROBE_BYTES` to the largest valid size. Red test `the_unsupported_sector_size_message_names_every_valid_size`; mismatch pinned by `a_boot_sector_is_read_only_at_the_size_it_declares`.
+- **Status date:** 2026-10-06 UTC
+- **Status commit:** see the following docs commit
 
 ### [F-23] Crash-point names are bare strings across five files
 - **Category:** 9 Shotgun surgery
