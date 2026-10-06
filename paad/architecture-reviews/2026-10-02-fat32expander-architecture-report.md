@@ -309,7 +309,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** The message takes its list from `BootSector::VALID_SECTOR_SIZES`. `MAX_SECTOR_SIZE` is gone: `read_boot_sector_unvalidated` reads sector 0 of a device already opened at the declared size and refuses a device addressed at another size, so the size list is checked at open and in the validator only. A const assertion ties `PROBE_BYTES` to the largest valid size. Red test `the_unsupported_sector_size_message_names_every_valid_size`; mismatch pinned by `a_boot_sector_is_read_only_at_the_size_it_declares`.
 - **Status date:** 2026-10-06 UTC
-- **Status commit:** see the following docs commit
+- **Status commit:** 7543fcd
 
 ### [F-23] Crash-point names are bare strings across five files
 - **Category:** 9 Shotgun surgery
