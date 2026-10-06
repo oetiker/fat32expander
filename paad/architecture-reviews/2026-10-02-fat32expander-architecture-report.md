@@ -281,6 +281,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** The condition is computed and its body is only a comment.
 - **Evidence:** `src/fat32/validation.rs:152-157`, excerpt: "if !fs_type.starts_with(b\"FAT32\") && !fs_type.starts_with(b\"FAT\") { // This is a warning-level issue, not an error }"
 - **Found by:** Security & Code Quality. Continues [F-R49].
+- **Status:** Fixed
+- **Status reason:** The empty `if` is gone; a comment says the label is not checked because the cluster count decides the FAT type. No behaviour change, pinned by `validation_ignores_the_fs_type_label`. `BootSector::fs_type` is left without callers and joins [F-17].
+- **Status date:** 2026-10-06 UTC
+- **Status commit:** a7d66af
 
 ### [F-20] An empty relocation plan still commits the new FAT geometry
 - **Category:** 26 Poor transactional boundaries

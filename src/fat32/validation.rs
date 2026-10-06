@@ -171,12 +171,8 @@ fn validate_boot_sector_impl(boot: &BootSector, allow_invalidated: bool) -> Resu
         )));
     }
 
-    // Check FS type string (optional but recommended)
-    let fs_type = boot.fs_type();
-    if !fs_type.starts_with(b"FAT32") && !fs_type.starts_with(b"FAT") {
-        // This is a warning-level issue, not an error
-        // Some tools don't set this correctly
-    }
+    // The FS type label at offset 82 is not checked: the cluster count above
+    // decides the FAT type, and formatters write all sorts of labels there.
 
     Ok(())
 }
