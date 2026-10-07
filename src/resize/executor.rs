@@ -228,7 +228,34 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
     // reads, and it has to preview the resume the real run would do, not a
     // fresh resize built from the boot sector a crash left behind ([F-21]).
     let marked_slot = CheckpointSlot::locate(&device, &fsinfo);
-    let incomplete_resize = check_for_incomplete_resize(&device, &boot, marked_slot)?;
+    let incomplete_resize = match check_for_incomplete_resize(&device, &boot, marked_slot)? {
+        // Every phase that leaves the boot sector valid also leaves the old
+        // geometry and volume in it, so a record that disagrees with a valid
+        // boot sector is not this filesystem's: typically one left behind by
+        // the filesystem that was on the device before it was reformatted.
+        // There is nothing to resume, and a fresh resize overwrites it.
+        Some(checkpoint) if boot.is_signature_valid() => match checkpoint.check_against(&boot) {
+            Ok(()) => Some(checkpoint),
+            Err(_) => {
+                eprintln!(
+                    "Ignoring a resize checkpoint at sector {}: it was left by another filesystem",
+                    marked_slot.sector()
+                );
+                operations.push(format!(
+                    "Ignored a stale resize checkpoint at sector {}",
+                    marked_slot.sector()
+                ));
+                None
+            }
+        },
+        // Behind an invalidated boot sector the record is the only way back,
+        // so one that does not match is refused, never ignored ([F-02]).
+        Some(checkpoint) => {
+            checkpoint.check_against(&boot)?;
+            Some(checkpoint)
+        }
+        None => None,
+    };
     // A resume keeps the slot the interrupted run chose; a fresh run takes
     // the device's last sector, whatever a stale mark says.
     let checkpoint_slot = if incomplete_resize.is_some() {
@@ -238,7 +265,6 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
     };
 
     if let Some(ref checkpoint) = incomplete_resize {
-        checkpoint.check_against(&boot)?;
         if options.is_dry_run() {
             eprintln!(
                 "Dry run: an interrupted resize would be resumed from phase {:?}",

@@ -502,10 +502,15 @@ The checkpoint contains:
 - From format version 2, at byte 44, the volume serial of the filesystem (boot
   sector offset 67) and its CRC32
 
-A record whose volume serial differs from the boot sector's is refused, so a
-record left in the last sector of a reformatted device is not resumed. Version
-1 records, which have no serial, are still read. A record with any other
-version comes from a newer build and is refused with exit code 9.
+A record whose volume serial or old geometry differs from the boot sector's
+was not written for this filesystem, so a record left in the last sector of a
+reformatted device is never resumed. Behind a valid boot sector such a record
+is ignored and a fresh resize overwrites it: every phase that keeps the boot
+sector valid also keeps the old geometry and serial in it. Behind an
+invalidated boot sector the record is the only way back, so a mismatch is
+refused with exit code 9. Version 1 records, which have no serial, are still
+read. A record with any other version comes from a newer build and is refused
+with exit code 9.
 
 #### The Three Phases
 

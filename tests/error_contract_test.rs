@@ -293,12 +293,37 @@ fn plant_checkpoint(path: &std::path::Path, phase: u8, geometry: [u32; 4]) {
     std::fs::write(path, &data).expect("write image");
 }
 
-/// [F-02]: a checkpoint whose old geometry is not the geometry in the boot
+/// Write a version-2 checkpoint record, which names its volume, into the last
+/// sector of `path`. Same hand-built layout as [`plant_checkpoint`], plus the
+/// volume serial and its CRC at bytes 44..52.
+fn plant_checkpoint_for_volume(path: &std::path::Path, phase: u8, geometry: [u32; 4], volume: u32) {
+    plant_checkpoint(path, phase, geometry);
+    let mut data = std::fs::read(path).expect("read image");
+    let at = data.len() - 512;
+    let record = &mut data[at..];
+    record[8] = 2; // version
+    let crc = crc32fast::hash(&record[0..28]);
+    record[28..32].copy_from_slice(&crc.to_le_bytes());
+    record[44..48].copy_from_slice(&volume.to_le_bytes());
+    let crc = crc32fast::hash(&record[44..48]);
+    record[48..52].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(path, &data).expect("write image");
+}
+
+/// The total sector count in the boot sector of `path`.
+fn boot_total_sectors(path: &std::path::Path) -> u32 {
+    let data = std::fs::read(path).expect("read image");
+    u32::from_le_bytes([data[32], data[33], data[34], data[35]])
+}
+
+/// [F-02]: a checkpoint whose old geometry is not the geometry in a valid boot
 /// sector next to it was not written by an interrupted resize of this
-/// filesystem. Resuming from it would commit a geometry computed for another
-/// volume, so it must be refused as needing recovery, without a single write.
+/// filesystem: every phase that keeps the boot sector valid keeps the old
+/// geometry in it. Such a record is left over from an earlier filesystem on
+/// the device. It must not be resumed, and it must not block a resize either:
+/// the run ignores it, says so, and resizes the filesystem it found.
 #[test]
-fn a_checkpoint_that_disagrees_with_the_boot_sector_is_refused() {
+fn a_stale_checkpoint_behind_a_valid_boot_sector_is_ignored() {
     let image = valid_image(96, 64);
     let fs_sectors = 64 * 1024 * 1024 / 512;
     let device_sectors = 96 * 1024 * 1024 / 512;
@@ -308,7 +333,83 @@ fn a_checkpoint_that_disagrees_with_the_boot_sector_is_refused() {
         2,
         [fs_sectors - 2048, device_sectors, 1024, 1024],
     );
-    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a stale checkpoint must not block the resize.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("Ignoring a resize checkpoint"),
+        "the run must say it ignored the checkpoint.\noutput:\n{combined}"
+    );
+    assert!(
+        !combined.contains("Resuming"),
+        "a stale checkpoint must not be resumed.\noutput:\n{combined}"
+    );
+    assert_eq!(boot_total_sectors(image.path()), device_sectors);
+}
+
+/// [F-16]: a checkpoint for another volume, behind a valid boot sector, is
+/// left over from the filesystem that was on the device before it was
+/// reformatted. It is ignored like any other stale record.
+#[test]
+fn a_checkpoint_from_another_volume_is_ignored() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    // Geometry that matches this filesystem; only the volume differs.
+    plant_checkpoint_for_volume(
+        image.path(),
+        2,
+        [fs_sectors, device_sectors, 1024, 1024],
+        0xDEAD_BEEF,
+    );
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a checkpoint for another volume must not block the resize.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("Ignoring a resize checkpoint"),
+        "the run must say it ignored the checkpoint.\noutput:\n{combined}"
+    );
+    assert_eq!(boot_total_sectors(image.path()), device_sectors);
+}
+
+/// [F-02]: behind an invalidated boot sector the checkpoint is the only way
+/// back to a usable filesystem, so a record that does not match is not
+/// ignored: the run refuses as needing recovery, without a single write.
+#[test]
+fn a_mismatched_checkpoint_behind_an_invalidated_boot_sector_is_refused() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    plant_checkpoint(
+        image.path(),
+        2,
+        [fs_sectors - 2048, device_sectors, 1024, 1024],
+    );
+    let mut data = std::fs::read(image.path()).expect("read image");
+    data[510] = 0x00;
+    data[511] = 0x00;
+    std::fs::write(image.path(), &data).expect("write image");
+    let before = data;
 
     let output = run_resize(image.path());
     let combined = format!(
@@ -320,10 +421,10 @@ fn a_checkpoint_that_disagrees_with_the_boot_sector_is_refused() {
     assert_eq!(
         output.status.code(),
         Some(9),
-        "a mismatched checkpoint must exit 9.\noutput:\n{combined}"
+        "a mismatched checkpoint behind an invalidated boot sector must exit 9.\noutput:\n{combined}"
     );
     assert!(
-        combined.to_lowercase().contains("checkpoint"),
+        combined.contains("does not match this filesystem"),
         "the refusal must name the checkpoint.\noutput:\n{combined}"
     );
     let after = std::fs::read(image.path()).expect("read image");
