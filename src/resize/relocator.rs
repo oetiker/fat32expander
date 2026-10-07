@@ -37,6 +37,8 @@ pub struct RelocationPlan {
 }
 
 impl RelocationPlan {
+    /// Test-only since [F-20]: the resize treats an empty plan like any other.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.moves.is_empty()
     }

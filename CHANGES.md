@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - used `let-else` pattern for cleaner checkpoint parsing
 
 ### Fixed
+- Resizing a filesystem whose FAT marked no cluster as in use, not even the root directory, enlarged the FAT without writing it. The two FAT copies then differed, and the first could mark a cluster as in use that held no data. Both copies are now written in full, as in every other resize that enlarges the FAT.
 - After an interrupted resize, `fat32expander resize --dry-run` showed a fresh resize plan instead of the recovery the real run then performs. It now says "Dry run: an interrupted resize would be resumed from phase ..." and shows the sizes of that recovery. When the real run would refuse to recover, the dry run now refuses the same way, with exit code 9.
 - `fat32expander version` could show the git hash and build time of an older commit when the program was rebuilt from a later commit on the same branch. It now shows the commit it was built from.
 - The error for an unsupported sector size said "(expected 512 or 4096)", although filesystems with 1024- and 2048-byte sectors are supported too. It now lists all four sizes.

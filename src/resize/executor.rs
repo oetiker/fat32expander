@@ -88,18 +88,10 @@ impl FatExtended {
 /// about to publish.
 #[must_use]
 enum FatOnDisk {
-    /// No extension was written and the boot sector was never invalidated.
-    ///
-    /// Two situations reach this. Either the FAT is not growing, in which case
-    /// there is nothing to write; or the FAT is growing but the relocation
-    /// plan came back empty, in which case the growth path did no work at all
-    /// and the commit still publishes the new FAT geometry -- over an
-    /// unwritten FAT, with FAT2 left at its old offset.
-    ///
-    /// That second case is [F-R25]. Naming the state here does not fix it;
-    /// fixing it is [F-R25]'s own job. It is currently unreachable in
-    /// practice, because a `mkfs`'d root directory always occupies cluster 2
-    /// and so the plan is never empty.
+    /// No extension was written and the boot sector was never invalidated,
+    /// because the FAT is not growing, or because this is a dry run, which
+    /// commits nothing. A real resize with a growing FAT always goes through
+    /// the FAT phase, even with no cluster data to shift ([F-20]).
     NotWritten(BootSector),
     /// The extension is written and flushed, and the boot sector is invalidated.
     Written(FatExtended),
@@ -401,12 +393,8 @@ fn run_fat_phases(
     // Plan cluster data shift
     let plan = plan_relocation(&boot, &new_boot, fat, calculation.first_affected_cluster)?;
 
-    if plan.is_empty() {
-        // See [`FatOnDisk::NotWritten`]: the commit publishes the new geometry
-        // anyway, which is [F-R25].
-        return Ok((FatOnDisk::NotWritten(boot), 0));
-    }
-
+    // An empty plan still goes through both phases: the FAT has to grow and
+    // FAT2 has to move even when no cluster data does ([F-20]).
     operations.push(format!(
         "Planned data shift for {} clusters ({} bytes)",
         plan.cluster_count(),

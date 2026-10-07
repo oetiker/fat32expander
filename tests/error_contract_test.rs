@@ -574,6 +574,46 @@ fn a_cli_resize_of_a_growable_filesystem_succeeds_and_grows_it() {
     );
 }
 
+/// [F-20]: with no cluster in use there is nothing to shift, and the resize
+/// used to skip the FAT phase yet still commit the larger FAT. FAT1 then grew
+/// over the head of the old FAT2, and FAT2 at its new offset was never
+/// written. Both copies must come out identical, with nothing from cluster 2
+/// up marked in use.
+#[test]
+fn a_resize_with_nothing_to_shift_still_writes_both_fats() {
+    let image = valid_image(96, 64);
+    let mut data = std::fs::read(image.path()).unwrap();
+    // FAT entries 0 and 1 (media and end-of-chain marker) in both copies,
+    // root cluster left free: nothing for the shift to move.
+    for fat_start in [32 * 512, (32 + 1024) * 512] {
+        data[fat_start..fat_start + 4].copy_from_slice(&0x0FFF_FFF8u32.to_le_bytes());
+        data[fat_start + 4..fat_start + 8].copy_from_slice(&0x0FFF_FFFFu32.to_le_bytes());
+    }
+    std::fs::write(image.path(), &data).unwrap();
+
+    let output = run_resize(image.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the resize must succeed.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+
+    let after = std::fs::read(image.path()).unwrap();
+    let fat_size = u32::from_le_bytes(after[36..40].try_into().unwrap()) as usize;
+    assert!(fat_size > 1024, "the FAT must have grown, got {fat_size}");
+    let fat1 = &after[32 * 512..(32 + fat_size) * 512];
+    let fat2 = &after[(32 + fat_size) * 512..(32 + 2 * fat_size) * 512];
+    assert!(fat1 == fat2, "FAT2 must mirror FAT1 after the resize");
+    assert_eq!(&fat1[0..8], &data[32 * 512..32 * 512 + 8]);
+    if let Some(i) = fat1[8..]
+        .chunks(4)
+        .position(|e| u32::from_le_bytes(e.try_into().unwrap()) & 0x0FFF_FFFF != 0)
+    {
+        panic!("FAT1 marks cluster {} in use", i + 2);
+    }
+}
+
 /// A zeroed boot signature is how this tool marks a filesystem mid-resize, so
 /// the CLI must treat it as a possible interrupted resize and enter recovery.
 ///

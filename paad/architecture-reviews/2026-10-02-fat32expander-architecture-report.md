@@ -292,6 +292,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** With no in-use cluster in the affected range (root cluster marked free, i.e. a corrupt FAT, which validation does not reject), the FAT phase is skipped but the commit publishes `new_fat_size` over an unwritten FAT extension.
 - **Evidence:** `src/resize/executor.rs:365-368`, excerpt: "if plan.is_empty() { ... return Ok((FatOnDisk::NotWritten(boot), 0)); }"
 - **Found by:** Security & Code Quality, Coupling & Dependencies. Continues [F-R25].
+- **Status:** Fixed
+- **Status reason:** The early return on an empty plan is gone: a growing FAT always goes through phase 0 (nothing to move, checkpoints and FSInfo mark still written) and phase 1 (extension and FAT copies written), then the commit. `RelocationPlan::is_empty` is test-only now. The path was not unreachable as documented: the zero-FAT fixture `valid_image` took it in `a_cli_resize_of_a_growable_filesystem_succeeds_and_grows_it`. Red test `a_resize_with_nothing_to_shift_still_writes_both_fats`.
+- **Status date:** 2026-10-07 UTC
+- **Status commit:** see the following docs commit
 
 ### [F-21] Dry run skips crash detection
 - **Category:** 24 Inconsistent API contracts
