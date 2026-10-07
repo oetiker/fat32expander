@@ -14,16 +14,32 @@ use crate::fat32::{read_fsinfo, write_fsinfo, BootSector, FSInfo};
 /// Magic bytes for resize checkpoint identification
 const CHECKPOINT_MAGIC: &[u8; 8] = b"FAT32RSZ";
 
-/// Current checkpoint version
-const CHECKPOINT_VERSION: u8 = 1;
+/// Current checkpoint version.
+///
+/// Version 2 adds the volume record at [`VOLUME_OFFSET`]; it is otherwise
+/// version 1, which is still read ([F-16]). Any other version is refused:
+/// it comes from a newer build, and replanning its resize would be unsafe.
+const CHECKPOINT_VERSION: u8 = 2;
+
+/// The version written by builds before the volume record existed.
+const CHECKPOINT_VERSION_1: u8 = 1;
+
+/// Offset of the volume record: volume serial (4) + CRC32 (4), behind the
+/// shift-progress record so the version-1 layout stays untouched.
+const VOLUME_OFFSET: usize = PROGRESS_OFFSET + PROGRESS_SIZE;
+
+/// volume serial (4) + CRC32 (4)
+const VOLUME_SIZE: usize = 8;
 
 /// Magic bytes for the shift-progress record.
 ///
 /// The record is appended *after* the version-1 checkpoint body rather than
 /// folded into it, so the first 32 bytes stay byte-for-byte what version 1
-/// always was. A build that predates the record ignores the tail and still
-/// reads the checkpoint; a build that expects it and finds none refuses to
+/// always was. A build that expects the record and finds none refuses to
 /// resume a data shift instead of guessing how far the previous pass got.
+/// Builds before version 2 fail open on a version they do not know and take
+/// this build's records for "no checkpoint"; that cannot be fixed from here.
+/// This build refuses unknown versions instead ([F-16]).
 const PROGRESS_MAGIC: &[u8; 4] = b"PRG1";
 
 /// Offset of the shift-progress record within the checkpoint sector
@@ -81,6 +97,9 @@ pub struct ResizeCheckpoint {
     /// "nothing moved yet": a shift may have run to an unknown point. Only a
     /// recorded `Some` makes a phase-`Started` resume safe.
     pub shift_progress: Option<u32>,
+    /// Serial number of the volume the resize started on (boot sector
+    /// offset 67). `None` only for a version-1 record, which predates it.
+    pub volume_id: Option<u32>,
 }
 
 impl ResizeCheckpoint {
@@ -90,6 +109,7 @@ impl ResizeCheckpoint {
     /// Create a new checkpoint
     pub fn new(
         phase: ResizePhase,
+        volume_id: u32,
         old_total_sectors: u32,
         new_total_sectors: u32,
         old_fat_size: u32,
@@ -102,6 +122,7 @@ impl ResizeCheckpoint {
             old_fat_size,
             new_fat_size,
             shift_progress: None,
+            volume_id: Some(volume_id),
         }
     }
 
@@ -128,6 +149,16 @@ impl ResizeCheckpoint {
     /// plan and the FAT extension with another volume's numbers, and could
     /// commit a FAT too small for the volume it described.
     pub fn check_against(&self, boot: &BootSector) -> Result<()> {
+        // [F-16]: geometry alone cannot tell a reformatted volume from the
+        // one the record was written for.
+        if let Some(record) = self.volume_id {
+            if record != boot.volume_id() {
+                return Err(Error::CheckpointVolumeMismatch {
+                    record,
+                    boot: boot.volume_id(),
+                });
+            }
+        }
         let matches = self.old_total_sectors == boot.total_sectors()
             && self.old_fat_size == boot.fat_size()
             && self.new_total_sectors > self.old_total_sectors
@@ -152,8 +183,17 @@ impl ResizeCheckpoint {
         // Magic (8 bytes)
         data[0..8].copy_from_slice(CHECKPOINT_MAGIC);
 
-        // Version (1 byte)
-        data[8] = CHECKPOINT_VERSION;
+        // Version (1 byte). A record without a volume is a version-1 record;
+        // so is one in a sector too small to hold the volume record, which no
+        // sector size FAT32 permits is.
+        let volume_id = self
+            .volume_id
+            .filter(|_| sector_size >= VOLUME_OFFSET + VOLUME_SIZE);
+        data[8] = if volume_id.is_some() {
+            CHECKPOINT_VERSION
+        } else {
+            CHECKPOINT_VERSION_1
+        };
 
         // Phase (1 byte)
         data[9] = self.phase as u8;
@@ -190,7 +230,28 @@ impl ResizeCheckpoint {
             }
         }
 
+        // Volume record, version 2 only.
+        if let Some(volume_id) = volume_id {
+            let v = VOLUME_OFFSET;
+            data[v..v + 4].copy_from_slice(&volume_id.to_le_bytes());
+            let crc = crc32fast::hash(&data[v..v + 4]);
+            data[v + 4..v + 8].copy_from_slice(&crc.to_le_bytes());
+        }
+
         data
+    }
+
+    /// Parse the volume record a version-2 checkpoint must carry.
+    fn parse_volume_id(data: &[u8]) -> Result<u32> {
+        let v = VOLUME_OFFSET;
+        let field = data
+            .get(v..v + VOLUME_SIZE)
+            .ok_or(Error::CheckpointCorrupted)?;
+        let stored = u32::from_le_bytes([field[4], field[5], field[6], field[7]]);
+        if stored != crc32fast::hash(&field[0..4]) {
+            return Err(Error::CheckpointCorrupted);
+        }
+        Ok(u32::from_le_bytes([field[0], field[1], field[2], field[3]]))
     }
 
     /// Parse the optional shift-progress record trailing the checkpoint body.
@@ -232,10 +293,11 @@ impl ResizeCheckpoint {
             return Ok(None);
         }
 
-        // Check version
+        // Check version. Our magic with an unknown version is a newer
+        // build's record, not a foreign sector ([F-16]).
         let version = data[8];
-        if version != CHECKPOINT_VERSION {
-            return Ok(None);
+        if version != CHECKPOINT_VERSION && version != CHECKPOINT_VERSION_1 {
+            return Err(Error::CheckpointVersionUnsupported(version));
         }
 
         // Verify CRC
@@ -263,6 +325,11 @@ impl ResizeCheckpoint {
             old_fat_size,
             new_fat_size,
             shift_progress: Self::parse_shift_progress(data)?,
+            volume_id: if version == CHECKPOINT_VERSION_1 {
+                None
+            } else {
+                Some(Self::parse_volume_id(data)?)
+            },
         }))
     }
 }
@@ -410,7 +477,14 @@ mod tests {
     /// A checkpoint carrying values that are distinct from one another, so a
     /// field written to or read from the wrong offset cannot go unnoticed.
     fn test_checkpoint(phase: ResizePhase) -> ResizeCheckpoint {
-        ResizeCheckpoint::new(phase, 0x1111_2222, 0x3333_4444, 0x5555_6666, 0x7777_8888)
+        ResizeCheckpoint::new(
+            phase,
+            0xCAFE_F00D,
+            0x1111_2222,
+            0x3333_4444,
+            0x5555_6666,
+            0x7777_8888,
+        )
     }
 
     fn assert_checkpoint_eq(actual: &ResizeCheckpoint, expected: &ResizeCheckpoint) {
@@ -512,8 +586,10 @@ mod tests {
 
             match ResizeCheckpoint::from_bytes(&corrupt) {
                 // Magic and version are checked before the CRC; a sector that
-                // fails those is foreign data, not a damaged checkpoint.
-                Ok(None) if offset < 9 => {}
+                // fails the magic is foreign data, not a damaged checkpoint;
+                // our magic with an unknown version is refused ([F-16]).
+                Ok(None) if offset < 8 => {}
+                Err(Error::CheckpointVersionUnsupported(_)) if offset == 8 => {}
                 Err(Error::CheckpointCorrupted) => {}
                 other => panic!(
                     "flipping byte {} should have been rejected, got {:?}",
@@ -548,20 +624,85 @@ mod tests {
         let mut wrong_magic = test_checkpoint(ResizePhase::Started).to_bytes(512);
         wrong_magic[0] = b'X';
 
-        let mut wrong_version = test_checkpoint(ResizePhase::Started).to_bytes(512);
-        wrong_version[8] = CHECKPOINT_VERSION.wrapping_add(1);
-
         for (label, data) in [
             ("all zeroes", vec![0u8; 512]),
             ("arbitrary data", vec![0xA5u8; 512]),
             ("truncated", vec![0u8; 31]),
             ("wrong magic", wrong_magic),
-            ("wrong version", wrong_version),
         ] {
             let parsed = ResizeCheckpoint::from_bytes(&data)
                 .unwrap_or_else(|e| panic!("{} returned an error: {:?}", label, e));
             assert!(parsed.is_none(), "{} parsed as a checkpoint", label);
         }
+    }
+
+    /// [F-16]: a record carrying our magic but a version this build does not
+    /// know was read as "no checkpoint", so behind a valid boot sector a
+    /// newer build's half-done resize was replanned from scratch. It is
+    /// refused now. (This case used to sit in
+    /// `checkpoint_reads_foreign_sectors_as_absent`, asserting the flaw.)
+    #[test]
+    fn a_checkpoint_of_an_unknown_version_is_refused() {
+        for version in [0u8, 3, 0xFF] {
+            let mut data = test_checkpoint(ResizePhase::Started).to_bytes(512);
+            data[8] = version;
+            assert!(
+                matches!(
+                    ResizeCheckpoint::from_bytes(&data),
+                    Err(Error::CheckpointVersionUnsupported(v)) if v == version
+                ),
+                "version {version} was not refused"
+            );
+        }
+    }
+
+    /// [F-16]: a version-2 record names the volume it belongs to, at offset
+    /// 44 behind the progress tail, under a CRC of its own.
+    #[test]
+    fn a_checkpoint_records_the_volume_it_belongs_to() {
+        let checkpoint = test_checkpoint(ResizePhase::DataCopied);
+        let bytes = checkpoint.to_bytes(512);
+        assert_eq!(bytes[8], 2);
+        assert_eq!(&bytes[44..48], &0xCAFE_F00Du32.to_le_bytes());
+        assert_eq!(
+            &bytes[48..52],
+            &crc32fast::hash(&bytes[44..48]).to_le_bytes()
+        );
+        let parsed = ResizeCheckpoint::from_bytes(&bytes).unwrap().unwrap();
+        assert_eq!(parsed.volume_id, Some(0xCAFE_F00D));
+
+        let mut damaged = bytes.clone();
+        damaged[45] ^= 0x01;
+        assert!(matches!(
+            ResizeCheckpoint::from_bytes(&damaged),
+            Err(Error::CheckpointCorrupted)
+        ));
+    }
+
+    /// [F-16]: a record of another volume is refused even when its geometry
+    /// matches, as it does after `mkfs.fat` with the same parameters over a
+    /// device whose last sector still holds an old record. A version-1 record
+    /// has no volume to compare and is judged on its geometry alone.
+    #[test]
+    fn a_checkpoint_of_another_volume_is_refused() {
+        let mut raw = test_boot_sector(2000, 100).as_bytes().to_vec();
+        raw[67..71].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        let boot = BootSector::from_bytes(&raw).unwrap();
+        let record = |volume_id| {
+            ResizeCheckpoint::new(ResizePhase::DataCopied, volume_id, 2000, 4000, 100, 104)
+        };
+
+        assert!(record(0x1234_5678).check_against(&boot).is_ok());
+        assert!(matches!(
+            record(0x8765_4321).check_against(&boot),
+            Err(Error::CheckpointVolumeMismatch {
+                record: 0x8765_4321,
+                boot: 0x1234_5678
+            })
+        ));
+        let mut v1 = record(0x8765_4321);
+        v1.volume_id = None;
+        assert!(v1.check_against(&boot).is_ok());
     }
 
     /// The record occupies a whole sector but its content is sector-size
@@ -576,9 +717,10 @@ mod tests {
 
         assert_eq!(small.len(), 512);
         assert_eq!(large.len(), 4096);
-        assert_eq!(small[0..32], large[0..32]);
+        // Body, progress tail and volume record ([F-16]) end at byte 52.
+        assert_eq!(small[0..52], large[0..52]);
         assert!(
-            large[32..].iter().all(|&b| b == 0),
+            large[52..].iter().all(|&b| b == 0),
             "trailing sector space must stay zeroed"
         );
 
@@ -798,6 +940,7 @@ mod tests {
         let record = |old_total, new_total, old_fat, new_fat| {
             ResizeCheckpoint::new(
                 ResizePhase::DataCopied,
+                boot.volume_id(),
                 old_total,
                 new_total,
                 old_fat,

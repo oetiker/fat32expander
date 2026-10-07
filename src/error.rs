@@ -165,6 +165,23 @@ pub enum Error {
         boot_fat_size: u32,
     },
 
+    /// [F-16]: the record carries our magic but a format version this build
+    /// does not know. Reading it as "no checkpoint" would replan a half-done
+    /// resize from scratch.
+    #[error(
+        "An interrupted resize left a checkpoint in format version {0}, which this build does \
+         not know. Finish the resize with the build that started it."
+    )]
+    CheckpointVersionUnsupported(u8),
+
+    /// [F-16]: the record belongs to another volume, for example one that
+    /// was on the device before it was reformatted.
+    #[error(
+        "An interrupted resize left a checkpoint for volume {record:08X}, but this filesystem is \
+         volume {boot:08X}. Cannot safely resume."
+    )]
+    CheckpointVolumeMismatch { record: u32, boot: u32 },
+
     /// [F-03]: the device shrank past the record since the resize started.
     #[error(
         "An interrupted resize left its checkpoint at sector {sector}, but the device now has \

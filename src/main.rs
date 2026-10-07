@@ -279,6 +279,8 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
         | Error::CheckpointCorrupted
         | Error::ResizeSizeMismatch(_)
         | Error::CheckpointMismatch { .. }
+        | Error::CheckpointVersionUnsupported(_)
+        | Error::CheckpointVolumeMismatch { .. }
         | Error::CheckpointGeometryUnusable { .. }
         | Error::CheckpointOutsideDevice { .. }
         | Error::ShiftProgressMissing => exit::NEEDS_RECOVERY,
@@ -469,6 +471,20 @@ mod tests {
                 new_total_sectors: 1000,
                 new_fat_size: 900,
             }),
+            exit::NEEDS_RECOVERY
+        );
+    }
+
+    /// [F-16]: a record from a newer build, or of another volume, is a
+    /// refused resume like any other.
+    #[test]
+    fn checkpoint_format_refusals_exit_with_needs_recovery() {
+        assert_eq!(
+            code(Error::CheckpointVersionUnsupported(3)),
+            exit::NEEDS_RECOVERY
+        );
+        assert_eq!(
+            code(Error::CheckpointVolumeMismatch { record: 1, boot: 2 }),
             exit::NEEDS_RECOVERY
         );
     }

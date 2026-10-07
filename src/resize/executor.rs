@@ -472,6 +472,7 @@ fn shift_cluster_data(
     // Write initial checkpoint
     let mut checkpoint = ResizeCheckpoint::new(
         ResizePhase::Started,
+        boot.volume_id(),
         calculation.old_total_sectors,
         calculation.new_total_sectors,
         calculation.old_fat_size,
@@ -513,6 +514,7 @@ fn shift_cluster_data(
     // Update checkpoint to phase 1
     let checkpoint = ResizeCheckpoint::new(
         ResizePhase::DataCopied,
+        boot.volume_id(),
         calculation.old_total_sectors,
         calculation.new_total_sectors,
         calculation.old_fat_size,
@@ -573,6 +575,7 @@ fn write_fat_extension(
     // Update checkpoint to phase 2
     let checkpoint = ResizeCheckpoint::new(
         ResizePhase::FatWritten,
+        boot.volume_id(),
         calculation.old_total_sectors,
         calculation.new_total_sectors,
         calculation.old_fat_size,
@@ -605,9 +608,10 @@ fn commit_new_geometry(
     // disagreeing boot sectors and nothing to say why. Record that only the
     // commit remains, so a rerun finishes it. The FAT phase already left
     // this record on the growth path.
-    if let FatOnDisk::NotWritten(_) = fat_on_disk {
+    if let FatOnDisk::NotWritten(boot) = &fat_on_disk {
         let checkpoint = ResizeCheckpoint::new(
             ResizePhase::FatWritten,
+            boot.volume_id(),
             calculation.old_total_sectors,
             calculation.new_total_sectors,
             calculation.old_fat_size,

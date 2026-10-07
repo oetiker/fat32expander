@@ -260,6 +260,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** An unknown version returns `Ok(None)`, the same as "no checkpoint", so behind a valid boot sector a newer record is silently ignored and the shift replanned. The progress tail was added without a version bump, so an older build reads the record and replays the shift. Matters only on downgrade.
 - **Evidence:** `src/resize/checkpoint.rs:207-211`, excerpt: "if version != CHECKPOINT_VERSION { return Ok(None); }"; `checkpoint.rs:22-26` "A build that predates the record ignores the tail and still reads the checkpoint"
 - **Found by:** Error Handling & Observability, Integration & Data
+- **Status:** Fixed
+- **Status reason:** Our magic with an unknown version is refused with `CheckpointVersionUnsupported` (exit 9). The format is bumped to version 2, which appends the volume serial and its CRC at offset 44, behind the progress tail; `check_against` refuses a record of another volume with `CheckpointVolumeMismatch` (exit 9), closing the volume-identity gap [F-02] left. Version-1 records are still read (`a_version_1_record_from_an_earlier_build_is_still_read`). With approval, the "wrong version" case moved out of `checkpoint_reads_foreign_sectors_as_absent` into `a_checkpoint_of_an_unknown_version_is_refused`, and `checkpoint_rejects_corruption_in_any_covered_byte` and `checkpoint_content_is_independent_of_sector_size` follow the new behaviour and layout. Builds before this one still fail open on version 2; that cannot be fixed from here.
+- **Status date:** 2026-10-07 UTC
+- **Status commit:** see the following docs commit
 
 ### [F-17] Dead public API, including an unchecked raw write
 - **Category:** 31 Dead code / unused dependencies

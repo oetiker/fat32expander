@@ -495,9 +495,17 @@ before the mark was written, or a run of an older build) the rerun looks in
 the device's current last sector. The commit writes FSInfo without the mark.
 
 The checkpoint contains:
-- Magic signature (`FAT32RSZ`)
+- Magic signature (`FAT32RSZ`) and format version (bytes 0-8)
 - Current phase (Started, DataCopied, FatWritten)
-- Old and new filesystem parameters (total_sectors, fat_size)
+- Old and new filesystem parameters (total_sectors, fat_size), CRC32 at byte 28
+- Optionally, from byte 32, the shift progress: `PRG1`, the next cluster to move, CRC32
+- From format version 2, at byte 44, the volume serial of the filesystem (boot
+  sector offset 67) and its CRC32
+
+A record whose volume serial differs from the boot sector's is refused, so a
+record left in the last sector of a reformatted device is not resumed. Version
+1 records, which have no serial, are still read. A record with any other
+version comes from a newer build and is refused with exit code 9.
 
 #### The Three Phases
 
