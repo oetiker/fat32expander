@@ -352,6 +352,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** `.git/HEAD` holds a ref name that does not change on commit, so `version` can show an old `GIT_HASH` and build time.
 - **Evidence:** `build.rs:30`, excerpt: "println!(\"cargo:rerun-if-changed=.git/HEAD\");"
 - **Found by:** Coupling & Dependencies
+- **Status:** Fixed
+- **Status reason:** `build.rs` asks git for the paths of HEAD, the HEAD reflog, packed-refs and the current branch ref, and watches those that exist (a missing path would rebuild on every run). Works in worktrees. Red test `version_names_the_commit_it_was_built_from`, skipped without a git checkout. Needs git 2.31+ for `--path-format=absolute`; older git falls back to watching `build.rs` only.
+- **Status date:** 2026-10-07 UTC
+- **Status commit:** see the following docs commit
 
 ### [F-29] Steering files and in-code docs have drifted from the code
 - **Category:** 34 Inconsistent error/logging conventions (documentation)

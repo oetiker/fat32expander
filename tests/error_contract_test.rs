@@ -811,6 +811,29 @@ fn version_names_the_package_version_and_a_git_hash() {
     );
 }
 
+/// [F-28]: the build script watched `.git/HEAD`, which names a branch and does
+/// not change on a commit, so `version` kept an older commit's hash. Skipped
+/// where there is no git checkout to compare against, as in a source tarball.
+#[test]
+fn version_names_the_commit_it_was_built_from() {
+    let head = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output();
+    let Ok(head) = head else { return };
+    if !head.status.success() {
+        return;
+    }
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let output = run(&[std::ffi::OsStr::new("version")]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("git:{head})")),
+        "`version` must name HEAD ({head}), got:\n{stdout}"
+    );
+}
+
 /// A resize that finds nothing to do is not a failure. Running the tool twice
 /// must succeed twice, which is what makes it safe to put in a provisioning
 /// script that does not track whether it has already run.
