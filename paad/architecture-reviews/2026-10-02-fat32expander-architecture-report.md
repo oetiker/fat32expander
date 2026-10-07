@@ -263,7 +263,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** Our magic with an unknown version is refused with `CheckpointVersionUnsupported` (exit 9). The format is bumped to version 2, which appends the volume serial and its CRC at offset 44, behind the progress tail; `check_against` refuses a record of another volume with `CheckpointVolumeMismatch` (exit 9), closing the volume-identity gap [F-02] left. Version-1 records are still read (`a_version_1_record_from_an_earlier_build_is_still_read`). With approval, the "wrong version" case moved out of `checkpoint_reads_foreign_sectors_as_absent` into `a_checkpoint_of_an_unknown_version_is_refused`, and `checkpoint_rejects_corruption_in_any_covered_byte` and `checkpoint_content_is_independent_of_sector_size` follow the new behaviour and layout. Builds before this one still fail open on version 2; that cannot be fixed from here.
 - **Status date:** 2026-10-07 UTC
-- **Status commit:** see the following docs commit
+- **Status commit:** bb661e3
 
 ### [F-17] Dead public API, including an unchecked raw write
 - **Category:** 31 Dead code / unused dependencies
