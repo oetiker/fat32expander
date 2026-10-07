@@ -232,13 +232,11 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
     let fsinfo = read_fsinfo(&device, fsinfo_sector)?;
     operations.push(format!("Read FSInfo from sector {}", fsinfo_sector));
 
-    // Check for incomplete resize operation
+    // Check for incomplete resize operation. A dry run checks too: it only
+    // reads, and it has to preview the resume the real run would do, not a
+    // fresh resize built from the boot sector a crash left behind ([F-21]).
     let marked_slot = CheckpointSlot::locate(&device, &fsinfo);
-    let incomplete_resize = if !options.is_dry_run() {
-        check_for_incomplete_resize(&device, &boot, marked_slot)?
-    } else {
-        None
-    };
+    let incomplete_resize = check_for_incomplete_resize(&device, &boot, marked_slot)?;
     // A resume keeps the slot the interrupted run chose; a fresh run takes
     // the device's last sector, whatever a stale mark says.
     let checkpoint_slot = if incomplete_resize.is_some() {
@@ -249,10 +247,17 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
 
     if let Some(ref checkpoint) = incomplete_resize {
         checkpoint.check_against(&boot)?;
-        eprintln!(
-            "Resuming interrupted resize from phase {:?}...",
-            checkpoint.phase
-        );
+        if options.is_dry_run() {
+            eprintln!(
+                "Dry run: an interrupted resize would be resumed from phase {:?}",
+                checkpoint.phase
+            );
+        } else {
+            eprintln!(
+                "Resuming interrupted resize from phase {:?}...",
+                checkpoint.phase
+            );
+        }
         operations.push(format!(
             "Detected incomplete resize at phase {:?}",
             checkpoint.phase

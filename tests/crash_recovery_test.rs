@@ -293,6 +293,51 @@ fn a_dry_run_inside_the_danger_zone_changes_nothing() {
     dry_run_after_crash_changes_nothing("after_boot_invalidate", "DataCopied");
 }
 
+/// The "New size:" line of a resize summary.
+fn new_size_line(output: &str) -> String {
+    output
+        .lines()
+        .find(|l| l.contains("New size:"))
+        .unwrap_or_else(|| panic!("no New size line in output:\n{}", output))
+        .trim()
+        .to_string()
+}
+
+/// [F-21]: a dry run after a crash previewed a fresh resize built from the
+/// boot sector the crash left behind. It must preview the resume the real
+/// run then performs: same phase, same new size.
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_dry_run_after_a_crash_previews_the_resume() {
+    let image = image_with_files(128, 200);
+    resize_crashing_at(image.path(), "after_boot_invalidate");
+
+    let dry = run(Command::new(BIN)
+        .arg("resize")
+        .arg("--dry-run")
+        .arg(image.path()));
+    let dry_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&dry.stdout),
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    assert!(
+        dry.status.success(),
+        "the dry run failed with {:?}:\n{}",
+        dry.status.code(),
+        dry_text
+    );
+    assert!(
+        dry_text.contains("would be resumed from phase DataCopied"),
+        "the dry run must name the phase it would resume from:\n{}",
+        dry_text
+    );
+
+    let real = resize_expecting_success(image.path());
+    assert_eq!(resumed_phase(&real), "DataCopied");
+    assert_eq!(new_size_line(&dry_text), new_size_line(&real));
+}
+
 // --- One test per injectable crash point ------------------------------------
 //
 // The phase each one resumes from is asserted because it is the contract the

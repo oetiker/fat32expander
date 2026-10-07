@@ -299,6 +299,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** A dry run against an interrupted filesystem previews a fresh plan built from the invalidated boot sector, after the CLI printed "Attempting recovery...", so the preview is not what a real run would do.
 - **Evidence:** `src/resize/executor.rs:218-222`, excerpt: "let incomplete_resize = if !options.is_dry_run() { check_for_incomplete_resize(&device, &boot)? } else { None };"
 - **Found by:** Error Handling & Observability, Integration & Data. Continues [F-R32].
+- **Status:** Fixed
+- **Status reason:** `prepare_resize` runs `check_for_incomplete_resize` on a dry run too (it only reads; the dry run opens read-only), so the preview follows the resume path, its geometry and its refusals; the resume line reads "Dry run: an interrupted resize would be resumed from phase ...". Red test `a_dry_run_after_a_crash_previews_the_resume`; no-write pinned by `a_dry_run_after_an_early_crash_changes_nothing` and `a_dry_run_inside_the_danger_zone_changes_nothing`.
+- **Status date:** 2026-10-07 UTC
+- **Status commit:** see the following docs commit
 
 ### [F-22] Sector-size knowledge duplicated, one copy wrong
 - **Category:** 28 Magic numbers/strings
