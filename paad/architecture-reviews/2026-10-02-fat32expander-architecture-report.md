@@ -295,7 +295,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** The early return on an empty plan is gone: a growing FAT always goes through phase 0 (nothing to move, checkpoints and FSInfo mark still written) and phase 1 (extension and FAT copies written), then the commit. `RelocationPlan::is_empty` is test-only now. The path was not unreachable as documented: the zero-FAT fixture `valid_image` took it in `a_cli_resize_of_a_growable_filesystem_succeeds_and_grows_it`. Red test `a_resize_with_nothing_to_shift_still_writes_both_fats`.
 - **Status date:** 2026-10-07 UTC
-- **Status commit:** see the following docs commit
+- **Status commit:** c362455
 
 ### [F-21] Dry run skips crash detection
 - **Category:** 24 Inconsistent API contracts
