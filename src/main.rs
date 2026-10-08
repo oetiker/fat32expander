@@ -489,6 +489,15 @@ mod tests {
         );
     }
 
+    /// Safety net for [F-11]: however the mount guard learns that the device
+    /// is in use, the refusal keeps its exit code.
+    #[test]
+    fn a_mounted_device_exits_4() {
+        let e = Error::DeviceMounted("/dev/sdx1".to_string(), "/mnt".to_string());
+        assert_eq!(code(e), exit::DEVICE_MOUNTED);
+        assert_eq!(exit::DEVICE_MOUNTED, 4);
+    }
+
     /// [F-06]: failing to read the mount table touched no device, so it is
     /// not a device I/O failure.
     #[test]

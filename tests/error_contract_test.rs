@@ -1091,3 +1091,105 @@ fn a_dry_run_on_a_growable_filesystem_exits_zero_and_changes_nothing() {
         "a dry run must not modify the image by a single byte"
     );
 }
+
+// --- Safety net for [F-07] / [F-08] -----------------------------------------
+//
+// Both fixes change where the resize's progress messages and its operations
+// log come from. These pin *that* the user sees them, with or without
+// `--verbose`, and not on which stream: settling the stream is what [F-08] is
+// for, so stdout and stderr are always read joined.
+
+/// `valid_image`, with cluster 2 (the root directory) marked in use in both
+/// FATs, so a resize that grows the FAT has exactly one cluster to shift.
+fn valid_image_with_root_in_use(file_mb: u64, fs_mb: u64) -> NamedTempFile {
+    let file = valid_image(file_mb, fs_mb);
+    let mut data = std::fs::read(file.path()).expect("read image");
+    for fat_start in [32 * 512, (32 + 1024) * 512] {
+        let entries = [0x0FFF_FFF8u32, 0x0FFF_FFFF, 0x0FFF_FFFF];
+        for (i, entry) in entries.iter().enumerate() {
+            let o = fat_start + i * 4;
+            data[o..o + 4].copy_from_slice(&entry.to_le_bytes());
+        }
+    }
+    std::fs::write(file.path(), &data).expect("write image");
+    file
+}
+
+fn run_resize_verbose(path: &std::path::Path) -> Output {
+    Command::new(BIN)
+        .arg("resize")
+        .arg(path)
+        .arg("--verbose")
+        .output()
+        .expect("failed to run fat32expander")
+}
+
+fn combined_output(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr_of(output)
+    )
+}
+
+#[test]
+fn a_cli_resize_lists_the_operations_it_performed() {
+    let image = valid_image_with_root_in_use(96, 64);
+    let output = run_resize(image.path());
+    let combined = combined_output(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output:\n{combined}");
+    for expected in [
+        "Operations performed:",
+        "Verified device is not mounted",
+        "Planned data shift for 1 clusters",
+        "Resize complete!",
+    ] {
+        assert!(
+            combined.contains(expected),
+            "a resize must report {expected:?}.\noutput:\n{combined}"
+        );
+    }
+}
+
+#[test]
+fn a_verbose_cli_resize_shows_the_layout_and_the_shift() {
+    let image = valid_image_with_root_in_use(96, 64);
+    let output = run_resize_verbose(image.path());
+    let combined = combined_output(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output:\n{combined}");
+    for expected in [
+        "After resize:",
+        "FAT needs growth: true",
+        "Data shift plan",
+        "1 clusters will be moved",
+        "Old first data sector:",
+        "Moving cluster 2 from sector",
+    ] {
+        assert!(
+            combined.contains(expected),
+            "a verbose resize must show {expected:?}.\noutput:\n{combined}"
+        );
+    }
+}
+
+#[test]
+fn a_quiet_cli_resize_omits_the_verbose_detail() {
+    let image = valid_image_with_root_in_use(96, 64);
+    let output = run_resize(image.path());
+    let combined = combined_output(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output:\n{combined}");
+    for absent in [
+        "After resize:",
+        "Data shift plan",
+        "Old first data sector:",
+        "Moving cluster",
+    ] {
+        assert!(
+            !combined.contains(absent),
+            "a resize without --verbose must not show {absent:?}.\noutput:\n{combined}"
+        );
+    }
+}

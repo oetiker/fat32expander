@@ -693,3 +693,44 @@ fn an_interrupted_sub_cluster_shift_refuses_to_resume() {
     // Refusing is only the right answer if it leaves the filesystem alone.
     assert_filesystem_is_clean(image.path());
 }
+
+/// The "FAT tables grew:" line of a resize summary.
+fn fat_grew_line(output: &str) -> String {
+    output
+        .lines()
+        .find(|l| l.contains("FAT tables grew:"))
+        .unwrap_or_else(|| panic!("no FAT tables grew line in output:\n{}", output))
+        .trim()
+        .to_string()
+}
+
+/// Safety net for [F-09]. A resume rebuilds its size calculation from the
+/// checkpoint instead of from the boot sector, so the summary it reports must
+/// still match the one an uninterrupted run reports.
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_resumed_resize_reports_the_same_summary_as_an_uninterrupted_one() {
+    let reference = image_with_files(128, 200);
+    let expected = resize_expecting_success(reference.path());
+
+    for crash_point in [
+        "after_checkpoint_data_copied",
+        "after_checkpoint_fat_written",
+    ] {
+        let image = image_with_files(128, 200);
+        resize_crashing_at(image.path(), crash_point);
+        let resumed = resize_expecting_success(image.path());
+        assert_eq!(
+            new_size_line(&resumed),
+            new_size_line(&expected),
+            "a resize resumed after {} reported a different new size",
+            crash_point
+        );
+        assert_eq!(
+            fat_grew_line(&resumed),
+            fat_grew_line(&expected),
+            "a resize resumed after {} reported a different FAT growth",
+            crash_point
+        );
+    }
+}
