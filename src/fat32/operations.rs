@@ -169,48 +169,53 @@ pub(crate) fn copy_fat_to_other_copies(
     }
 
     let fat1_start = fat_copy_start(boot, 0, new_fat_size);
+    let chunk_sectors = fat_chunk_sectors(boot);
     for fat_number in 1..boot.num_fats() {
         let dest_start = fat_copy_start(boot, fat_number, new_fat_size);
-        for sector_offset in 0..new_fat_size as u64 {
-            let data = device.read_sector(fat1_start + sector_offset)?;
-            device.write_sector(dest_start + sector_offset, &data)?;
+        let mut offset = 0u32;
+        while offset < new_fat_size {
+            let count = std::cmp::min(chunk_sectors, new_fat_size - offset);
+            let data = device.read_sectors(fat1_start + offset as u64, count)?;
+            device.write_sectors(dest_start + offset as u64, &data)?;
+            offset += count;
         }
     }
 
     Ok(())
 }
 
+/// How much of a FAT is read or copied per device call.
+///
+/// [F-18]: a byte count, so the memory held is the same at every sector size;
+/// the old `256` sectors was 128 KiB at 512-byte sectors but 1 MiB at 4096.
+const FAT_CHUNK_BYTES: u32 = 128 * 1024;
+
+/// Sectors per FAT chunk at `boot`'s sector size, at least one.
+fn fat_chunk_sectors(boot: &BootSector) -> u32 {
+    (FAT_CHUNK_BYTES / boot.bytes_per_sector() as u32).max(1)
+}
+
 /// Read the entire FAT table (one copy)
+///
+/// Entries are decoded chunk by chunk, so the FAT is held once, as entries,
+/// not a second time as raw bytes ([F-18]).
 pub fn read_fat_table(device: &Device, boot: &BootSector, fat_number: u8) -> Result<Vec<u32>> {
     let fat_start = fat_copy_start(boot, fat_number, boot.fat_size());
     let fat_sectors = boot.fat_size();
-    let bytes_per_sector = boot.bytes_per_sector() as usize;
+    let chunk_sectors = fat_chunk_sectors(boot);
 
-    let total_bytes = fat_sectors as usize * bytes_per_sector;
-    let mut fat_data = Vec::with_capacity(total_bytes);
+    let entry_count = fat_sectors as usize * boot.bytes_per_sector() as usize / 4;
+    let mut entries = Vec::with_capacity(entry_count);
 
-    // Read FAT in chunks
-    const CHUNK_SECTORS: u32 = 256; // Read 128KB at a time
     let mut sector = 0u32;
     while sector < fat_sectors {
-        let count = std::cmp::min(CHUNK_SECTORS, fat_sectors - sector);
+        let count = std::cmp::min(chunk_sectors, fat_sectors - sector);
         let data = device.read_sectors(fat_start + sector as u64, count)?;
-        fat_data.extend_from_slice(&data);
+        entries.extend(
+            data.chunks_exact(4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+        );
         sector += count;
-    }
-
-    // Convert bytes to u32 entries (little-endian)
-    let entry_count = total_bytes / 4;
-    let mut entries = Vec::with_capacity(entry_count);
-    for i in 0..entry_count {
-        let offset = i * 4;
-        let entry = u32::from_le_bytes([
-            fat_data[offset],
-            fat_data[offset + 1],
-            fat_data[offset + 2],
-            fat_data[offset + 3],
-        ]);
-        entries.push(entry);
     }
 
     Ok(entries)

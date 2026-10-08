@@ -302,6 +302,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** `read_fat_table` reads into a byte buffer and then a second `Vec<u32>`; the "128KB" chunk comment is wrong for sectors larger than 512 bytes; `sync_fat_copies` copies one sector at a time. Allocation size is bounded by device size.
 - **Evidence:** `src/fat32/operations.rs:111-126`, excerpt: "const CHUNK_SECTORS: u32 = 256; // Read 128KB at a time"; `src/resize/executor.rs:730-736`
 - **Found by:** Security & Code Quality, Coupling & Dependencies. Continues [F-R6] (Partially fixed), [F-R58].
+- **Status:** Fixed
+- **Status reason:** One chunk size, `FAT_CHUNK_BYTES` (128 KiB), converted to sectors at the device's sector size, so the comment holds at every size. `read_fat_table` decodes each chunk into entries as it reads, so the FAT is held once. `copy_fat_to_other_copies` copies chunk by chunk with `read_sectors`/`write_sectors`. `zero_fat_extension` still writes one sector at a time (not named by the finding; the extension is small). No behaviour change; guarded by `tests/fat_io_test.rs` and the durability ordering tests.
+- **Status date:** 2026-10-08 UTC
+- **Status commit:** pending
 
 ### [F-19] Filesystem-type check is an empty `if`
 - **Category:** 31 Dead code
