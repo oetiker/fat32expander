@@ -250,7 +250,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** The earlier tests (F-01, F-02, F-03, F-10 cases, see the previous status) are now joined by a `proptest` harness: the checkpoint codec (no panic on any bytes, round trip at every sector size, damage never yields a different record), boot sector and FSInfo parsing and the layout accessors (no panic; every data cluster of a valid geometry inside the volume), the size calculation on any and on valid geometries, and in `tests/property_test.rs` whole resizes of generated images with random in-use patterns (FAT1 = FAT2, every FAT entry and cluster kept, FSInfo free count). The whole-resize property found a FAT-sizing defect, fixed in eaf57d2. It also showed that damage to the progress record's magic reads as "no progress record" (a safe refusal, but reported as missing rather than damaged); not fixed here.
 - **Status date:** 2026-10-08 UTC
-- **Status commit:** pending
+- **Status commit:** 90970d9
 
 ### [F-14] A machine-specific `target` symlink is tracked in git
 - **Category:** 22 Configuration sprawl
