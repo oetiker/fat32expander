@@ -224,7 +224,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** A writable open of a block device now uses `O_EXCL`, so the kernel refuses it while the device is mounted or held and refuses a mount or a second resize while it is held; `EBUSY` there is the new `Error::DeviceBusy` (exit 4). A regular file is checked against the backing files of mounted loop devices (`/sys/block/loopN/loop/backing_file`). The `/proc/mounts` check stays for its message. The kernel's refusal itself is not tested: claiming a block device needs root.
 - **Status date:** 2026-10-08 UTC
-- **Status commit:** pending
+- **Status commit:** 27f443b
 
 ### [F-12] The no-FAT-growth path is untested although two tests claim it
 - **Category:** 32 Missing test coverage for critical paths
