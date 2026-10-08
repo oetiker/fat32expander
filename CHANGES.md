@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - added `Debug` trait implementation for `Device`
 
 ### Changed
+- For programs that use `fat32expander` as a library: `ResizeResult` no longer has a `calculation` field, and `SizeCalculation` is no longer exported. `ResizeResult` now has `old_total_sectors`, `new_total_sectors`, `old_fat_size` and `new_fat_size` directly. The removed "free clusters after resize" value was wrong: it was 0 after a resumed resize.
 - `fat32expander resize` prints the device, old size, new size and size increase in its closing "Summary" instead of in a "Resize operation" block before the work starts, so the numbers are the ones the resize used. The hint to rerun with `--ignore-backup-mismatch` is now part of the error message itself.
 - replaced `String` with `PathBuf` for device paths throughout the codebase
 - public API functions now accept `impl AsRef<Path>` instead of `&str`

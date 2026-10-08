@@ -29,10 +29,9 @@
 //! one is crate-private, so an external caller could build and serialise a
 //! crash-recovery record but never act on it.
 //!
-//! `SizeCalculation` runs the same argument in reverse and so *is* exported:
-//! it is the type of `ResizeResult::calculation`, a public field, and a public
-//! field whose type a caller cannot name is the same incoherence pointing the
-//! other way.
+//! `SizeCalculation` is not exported either ([F-09]). `ResizeResult` used to
+//! hand one out, which made every member public, read or not; it now carries
+//! the four geometry numbers a caller has a use for as plain fields.
 
 mod device;
 mod error;
@@ -55,6 +54,6 @@ pub use device::journal;
 pub use fat32::{BootSector, FSInfo};
 pub use resize::{
     get_fs_info, resize_fat32, resize_fat32_with_events, FSInfoReport, ResizeEvent, ResizeOptions,
-    ResizeResult, SizeCalculation,
+    ResizeResult,
 };
 pub use system::{check_not_mounted, check_root, get_block_device_size};

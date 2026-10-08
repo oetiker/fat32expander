@@ -180,7 +180,7 @@ fn the_crate_root_resize_api_plans_a_growth_without_writing() {
     let result: ResizeResult = resize_fat32(options).expect("dry run must succeed");
 
     assert_eq!(
-        result.calculation.old_total_sectors, TOTAL_SECTORS,
+        result.old_total_sectors, TOTAL_SECTORS,
         "result must report the filesystem it started from"
     );
     assert_eq!(

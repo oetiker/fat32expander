@@ -17,9 +17,7 @@ mod relocator;
 #[cfg(test)]
 mod testutil;
 
-// The resize entry point and its data types. `SizeCalculation` is reachable
-// because `ResizeResult` hands one out.
-pub use calculator::SizeCalculation;
+// The resize entry point and its data types.
 pub use events::ResizeEvent;
 pub use executor::{resize_fat32, resize_fat32_with_events};
 pub use fsinfo::{get_fs_info, FSInfoReport};

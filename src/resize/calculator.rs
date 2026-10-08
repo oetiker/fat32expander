@@ -1,9 +1,15 @@
 use crate::error::{Error, Result};
 use crate::fat32::BootSector;
+use crate::resize::checkpoint::{ResizeCheckpoint, ResizePhase};
 
-/// Result of size calculations for a resize operation
-#[derive(Debug, Clone)]
-pub struct SizeCalculation {
+/// The geometry a resize plans, and the numbers derived from it.
+///
+/// [F-09]: crate-private. It used to be public through
+/// `ResizeResult::calculation`, which kept members no code read out of
+/// reach of the dead-code lint, among them a "free clusters after resize"
+/// that held a placeholder on a fresh run and 0 on a resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SizeCalculation {
     /// Original total sectors in the filesystem
     pub old_total_sectors: u32,
     /// New total sectors after resize
@@ -14,44 +20,84 @@ pub struct SizeCalculation {
     pub new_fat_size: u32,
     /// Number of data clusters after resize
     pub new_data_clusters: u32,
-    /// Number of free clusters after resize
-    pub new_free_clusters: u32,
     /// Whether FAT tables need to grow
     pub fat_needs_growth: bool,
     /// Number of sectors the FAT grows by
     pub fat_growth_sectors: u32,
     /// First cluster that would be overwritten if FAT grows
     pub first_affected_cluster: u32,
-    /// Last cluster that would be overwritten if FAT grows
-    pub last_affected_cluster: u32,
 }
 
 impl SizeCalculation {
-    /// Size increase in bytes
-    pub fn size_increase(&self, bytes_per_sector: u16) -> u64 {
-        let increase_sectors = self.new_total_sectors - self.old_total_sectors;
-        increase_sectors as u64 * bytes_per_sector as u64
+    /// The calculation for `old -> new` geometry on the filesystem `boot`
+    /// describes, or `None` if the new layout does not fit.
+    fn for_geometry(
+        boot: &BootSector,
+        old_total_sectors: u32,
+        new_total_sectors: u32,
+        old_fat_size: u32,
+        new_fat_size: u32,
+    ) -> Option<Self> {
+        let new_data_clusters = boot
+            .with_geometry(new_total_sectors, new_fat_size)
+            .data_clusters()?;
+        let (first_affected_cluster, _) = affected_cluster_range(boot, old_fat_size, new_fat_size);
+        Some(Self {
+            old_total_sectors,
+            new_total_sectors,
+            old_fat_size,
+            new_fat_size,
+            new_data_clusters,
+            fat_needs_growth: new_fat_size > old_fat_size,
+            fat_growth_sectors: new_fat_size.saturating_sub(old_fat_size),
+            first_affected_cluster,
+        })
     }
 
-    /// New filesystem size in bytes
-    pub fn new_size_bytes(&self, bytes_per_sector: u16) -> u64 {
-        self.new_total_sectors as u64 * bytes_per_sector as u64
+    /// The calculation an interrupted run made, rebuilt from its checkpoint.
+    ///
+    /// A checkpoint carries the geometry a previous run committed to. If that
+    /// geometry does not describe a filesystem that fits, the record is not
+    /// one we can resume from.
+    pub(crate) fn from_checkpoint(boot: &BootSector, cp: &ResizeCheckpoint) -> Result<Self> {
+        Self::for_geometry(
+            boot,
+            cp.old_total_sectors,
+            cp.new_total_sectors,
+            cp.old_fat_size,
+            cp.new_fat_size,
+        )
+        .ok_or(Error::CheckpointGeometryUnusable {
+            new_total_sectors: cp.new_total_sectors,
+            new_fat_size: cp.new_fat_size,
+        })
     }
 
-    /// Additional clusters gained
-    pub fn additional_clusters(&self, old_data_clusters: u32) -> u32 {
-        self.new_data_clusters.saturating_sub(old_data_clusters)
+    /// The checkpoint recording this calculation at `phase`; the inverse of
+    /// [`from_checkpoint`](Self::from_checkpoint).
+    pub(crate) fn checkpoint(&self, phase: ResizePhase, volume_id: u32) -> ResizeCheckpoint {
+        ResizeCheckpoint::new(
+            phase,
+            volume_id,
+            self.old_total_sectors,
+            self.new_total_sectors,
+            self.old_fat_size,
+            self.new_fat_size,
+        )
     }
 }
 
 /// Calculate the new size parameters for a resize operation
-pub fn calculate_new_size(boot: &BootSector, device_sectors: u64) -> Result<SizeCalculation> {
+pub(crate) fn calculate_new_size(
+    boot: &BootSector,
+    device_sectors: u64,
+) -> Result<SizeCalculation> {
     let old_total_sectors = boot.total_sectors();
     let old_fat_size = boot.fat_size();
     // The boot sector reaching here has passed validation, which rejects a
     // layout that does not fit - but this function is public, so it checks
     // rather than assuming.
-    let old_data_clusters = boot.data_clusters().ok_or_else(|| {
+    boot.data_clusters().ok_or_else(|| {
         Error::Calculation(format!(
             "Current filesystem layout does not fit in its own {} sectors",
             boot.total_sectors()
@@ -95,50 +141,30 @@ pub fn calculate_new_size(boot: &BootSector, device_sectors: u64) -> Result<Size
         boot.bytes_per_sector(),
     )?;
 
-    // Calculate new data clusters, from the layout the volume will actually have
-    let new_data_clusters = boot
-        .with_geometry(new_total_sectors, new_fat_size)
-        .data_clusters()
-        .ok_or_else(|| {
-            Error::Calculation(format!(
-                "Projected layout does not fit: {} sectors with a FAT of {} sectors",
-                new_total_sectors, new_fat_size
-            ))
-        })?;
-
-    // Verify the projected volume is still FAT32
-    if new_data_clusters < BootSector::MIN_FAT32_CLUSTERS {
-        return Err(Error::Calculation(format!(
-            "New cluster count {} would not be FAT32",
-            new_data_clusters
-        )));
-    }
-
-    // Check if FAT needs to grow
-    let fat_needs_growth = new_fat_size > old_fat_size;
-    let fat_growth_sectors = new_fat_size.saturating_sub(old_fat_size);
-
-    // Calculate which clusters would be affected by FAT growth
-    let (first_affected_cluster, last_affected_cluster) =
-        affected_cluster_range(boot, old_fat_size, new_fat_size);
-
-    // Calculate free clusters (will be updated based on actual FAT contents)
-    // This is an estimate; actual value depends on current usage
-    let additional_clusters = new_data_clusters.saturating_sub(old_data_clusters);
-    let new_free_clusters = additional_clusters; // Placeholder; actual = old_free + additional
-
-    Ok(SizeCalculation {
+    // Calculate the new layout, from the geometry the volume will actually have
+    let calculation = SizeCalculation::for_geometry(
+        boot,
         old_total_sectors,
         new_total_sectors,
         old_fat_size,
         new_fat_size,
-        new_data_clusters,
-        new_free_clusters,
-        fat_needs_growth,
-        fat_growth_sectors,
-        first_affected_cluster,
-        last_affected_cluster,
-    })
+    )
+    .ok_or_else(|| {
+        Error::Calculation(format!(
+            "Projected layout does not fit: {} sectors with a FAT of {} sectors",
+            new_total_sectors, new_fat_size
+        ))
+    })?;
+
+    // Verify the projected volume is still FAT32
+    if calculation.new_data_clusters < BootSector::MIN_FAT32_CLUSTERS {
+        return Err(Error::Calculation(format!(
+            "New cluster count {} would not be FAT32",
+            calculation.new_data_clusters
+        )));
+    }
+
+    Ok(calculation)
 }
 
 /// The range of clusters that currently sit where the grown FAT tables will go
@@ -215,6 +241,7 @@ pub fn calculate_fat_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resize::checkpoint::{ResizeCheckpoint, ResizePhase};
 
     fn create_test_boot_sector(total_sectors: u32, fat_size: u32) -> BootSector {
         let mut data = [0u8; 512];
@@ -306,7 +333,53 @@ mod tests {
         assert!(calc.fat_needs_growth);
         // 2 FATs x 2903 sectors = 5806 sectors of growth, spanning 726 clusters.
         assert_eq!(calc.first_affected_cluster, 2);
-        assert_eq!(calc.last_affected_cluster, 727);
+        assert_eq!(
+            affected_cluster_range(&boot, 1000, calc.new_fat_size).1,
+            727
+        );
+    }
+
+    /// [F-09]: the checkpoint is written from the calculation in one place,
+    /// and carries all four of its geometry numbers.
+    #[test]
+    fn a_checkpoint_carries_the_geometry_of_its_calculation() {
+        let boot = create_test_boot_sector(1_000_000, 1000);
+        let calc = calculate_new_size(&boot, 4_000_000).unwrap();
+
+        let cp = calc.checkpoint(ResizePhase::DataCopied, 0xCAFE);
+
+        assert_eq!(cp.phase, ResizePhase::DataCopied);
+        assert_eq!(cp.volume_id, Some(0xCAFE));
+        assert_eq!(cp.old_total_sectors, calc.old_total_sectors);
+        assert_eq!(cp.new_total_sectors, calc.new_total_sectors);
+        assert_eq!(cp.old_fat_size, calc.old_fat_size);
+        assert_eq!(cp.new_fat_size, calc.new_fat_size);
+    }
+
+    /// [F-09]: a resume rebuilds its calculation from the checkpoint. It must
+    /// be the calculation the interrupted run made -- a resume used to carry a
+    /// free count of 0 where a fresh run carried a placeholder.
+    #[test]
+    fn a_resume_rebuilds_the_calculation_the_fresh_run_made() {
+        let boot = create_test_boot_sector(1_000_000, 1000);
+        let calc = calculate_new_size(&boot, 4_000_000).unwrap();
+        let cp = calc.checkpoint(ResizePhase::DataCopied, 1);
+
+        assert_eq!(SizeCalculation::from_checkpoint(&boot, &cp).unwrap(), calc);
+    }
+
+    #[test]
+    fn a_checkpoint_whose_geometry_does_not_fit_is_unusable() {
+        let boot = create_test_boot_sector(1_000_000, 1000);
+        let cp = ResizeCheckpoint::new(ResizePhase::Started, 1, 1_000_000, 1_000, 1000, 900);
+
+        assert!(matches!(
+            SizeCalculation::from_checkpoint(&boot, &cp),
+            Err(Error::CheckpointGeometryUnusable {
+                new_total_sectors: 1_000,
+                new_fat_size: 900,
+            })
+        ));
     }
 
     /// The calculator's data-cluster arithmetic must agree with the canonical

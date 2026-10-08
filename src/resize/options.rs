@@ -3,8 +3,6 @@
 //! Plain data crossing the library boundary, split out of `executor.rs` for
 //! [F-R42] so the algorithm file holds an algorithm.
 
-use crate::resize::calculator::SizeCalculation;
-
 /// Options for the resize operation
 #[derive(Debug, Clone)]
 pub struct ResizeOptions {
@@ -90,8 +88,14 @@ pub struct ResizeResult {
     pub fat_grew: bool,
     /// Number of clusters relocated
     pub clusters_relocated: usize,
-    /// Detailed calculation results
-    pub calculation: SizeCalculation,
+    /// Filesystem size in sectors before the resize
+    pub old_total_sectors: u32,
+    /// Filesystem size in sectors after the resize
+    pub new_total_sectors: u32,
+    /// Size of one FAT in sectors before the resize
+    pub old_fat_size: u32,
+    /// Size of one FAT in sectors after the resize
+    pub new_fat_size: u32,
     /// List of operations performed (for logging)
     pub operations: Vec<String>,
 }
@@ -111,25 +115,15 @@ mod tests {
 
     #[test]
     fn test_resize_result() {
-        let calc = SizeCalculation {
-            old_total_sectors: 1000000,
-            new_total_sectors: 2000000,
-            old_fat_size: 1000,
-            new_fat_size: 2000,
-            new_data_clusters: 200000,
-            new_free_clusters: 100000,
-            fat_needs_growth: true,
-            fat_growth_sectors: 1000,
-            first_affected_cluster: 2,
-            last_affected_cluster: 10,
-        };
-
         let result = ResizeResult {
             old_size_bytes: 512000000,
             new_size_bytes: 1024000000,
             fat_grew: true,
             clusters_relocated: 5,
-            calculation: calc,
+            old_total_sectors: 1000000,
+            new_total_sectors: 2000000,
+            old_fat_size: 1000,
+            new_fat_size: 2000,
             operations: vec!["test".to_string()],
         };
 

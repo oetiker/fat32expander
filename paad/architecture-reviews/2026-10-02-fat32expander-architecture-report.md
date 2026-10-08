@@ -203,6 +203,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** All fields are `pub` and exported through `ResizeResult::calculation`. `new_free_clusters`, documented as "free clusters after resize", holds a placeholder on a fresh run and 0 on a resume; `size_increase()` (unchecked subtraction), `new_size_bytes()`, `additional_clusters()` and `last_affected_cluster` have no production readers, and the export hides them from the dead-code lint. The checkpoint ↔ calculation mapping is hand-copied three times plus an inverse literal.
 - **Evidence:** `src/resize/calculator.rs:128`, excerpt: "let new_free_clusters = additional_clusters; // Placeholder; actual = old_free + additional"; `src/resize/executor.rs:294` "new_free_clusters: 0, // Will be recalculated"; `calculator.rs:31-44`; `executor.rs:461-467,498-504,557-563` (`ResizeCheckpoint::new(...)`); `src/lib.rs:57`
 - **Found by:** Structure & Boundaries, Coupling & Dependencies, Error Handling & Observability, Integration & Data, Security & Code Quality
+- **Status:** Fixed
+- **Status reason:** `SizeCalculation` is crate-private and no longer exported; `ResizeResult` carries `old_total_sectors`, `new_total_sectors`, `old_fat_size` and `new_fat_size` instead. `new_free_clusters`, `last_affected_cluster`, `size_increase()`, `new_size_bytes()` and `additional_clusters()` are gone. The four hand-copied checkpoint constructions are `calculation.checkpoint(phase, volume_id)`, and the resume's inverse literal is `SizeCalculation::from_checkpoint`, built on the same `for_geometry` as a fresh calculation.
+- **Status date:** 2026-10-08 UTC
+- **Status commit:** pending
 
 ### [F-10] Backup boot sector location is never validated; the documented override writes there blindly
 - **Category:** 30 Security as an afterthought

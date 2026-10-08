@@ -230,8 +230,8 @@ fn test_resize_with_unaligned_fat_growth_preserves_files() {
     // 4-sector cluster. If mkfs.fat ever picks different numbers here, this test
     // stops exercising the unaligned path and needs revisiting.
     assert!(result.fat_grew, "this geometry must exercise FAT growth");
-    assert_eq!(result.calculation.old_fat_size, 1020);
-    assert_eq!(result.calculation.new_fat_size, 1023);
+    assert_eq!(result.old_fat_size, 1020);
+    assert_eq!(result.new_fat_size, 1023);
 
     assert!(
         check_filesystem(image.path()),

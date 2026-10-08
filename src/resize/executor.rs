@@ -11,7 +11,7 @@ use crate::fat32::{
     read_boot_sector_for_recovery, read_fat_table, read_fsinfo, write_backup_boot_sector,
     write_boot_sector, write_fsinfo, BootSector, FSInfo,
 };
-use crate::resize::calculator::{affected_cluster_range, calculate_new_size, SizeCalculation};
+use crate::resize::calculator::{calculate_new_size, SizeCalculation};
 use crate::resize::checkpoint::{
     check_for_incomplete_resize, clear_checkpoint, mark_checkpoint_slot, write_checkpoint,
     CheckpointSlot, ResizeCheckpoint, ResizePhase,
@@ -210,7 +210,10 @@ pub fn resize_fat32_with_events(
         new_size_bytes,
         fat_grew: calculation.fat_needs_growth,
         clusters_relocated,
-        calculation,
+        old_total_sectors: calculation.old_total_sectors,
+        new_total_sectors: calculation.new_total_sectors,
+        old_fat_size: calculation.old_fat_size,
+        new_fat_size: calculation.new_fat_size,
         operations: report.into_operations(),
     })
 }
@@ -335,34 +338,7 @@ fn prepare_resize(options: &ResizeOptions, report: &mut Reporter) -> Result<Prep
     let device_sectors = device.total_sectors();
     let calculation = if let Some(ref checkpoint) = incomplete_resize {
         // Use checkpoint values for consistency
-        let (first_affected_cluster, last_affected_cluster) =
-            affected_cluster_range(&boot, checkpoint.old_fat_size, checkpoint.new_fat_size);
-
-        // A checkpoint carries the geometry a previous run committed to. If that
-        // geometry does not describe a filesystem that fits, the record is not
-        // one we can resume from.
-        let new_data_clusters = boot
-            .with_geometry(checkpoint.new_total_sectors, checkpoint.new_fat_size)
-            .data_clusters()
-            .ok_or(Error::CheckpointGeometryUnusable {
-                new_total_sectors: checkpoint.new_total_sectors,
-                new_fat_size: checkpoint.new_fat_size,
-            })?;
-
-        SizeCalculation {
-            old_total_sectors: checkpoint.old_total_sectors,
-            new_total_sectors: checkpoint.new_total_sectors,
-            old_fat_size: checkpoint.old_fat_size,
-            new_fat_size: checkpoint.new_fat_size,
-            new_data_clusters,
-            new_free_clusters: 0, // Will be recalculated
-            fat_needs_growth: checkpoint.new_fat_size > checkpoint.old_fat_size,
-            fat_growth_sectors: checkpoint
-                .new_fat_size
-                .saturating_sub(checkpoint.old_fat_size),
-            first_affected_cluster,
-            last_affected_cluster,
-        }
+        SizeCalculation::from_checkpoint(&boot, checkpoint)?
     } else {
         calculate_new_size(&boot, device_sectors)?
     };
@@ -498,14 +474,7 @@ fn shift_cluster_data(
     let resumable = plan.shift_clusters(boot) > 0;
 
     // Write initial checkpoint
-    let mut checkpoint = ResizeCheckpoint::new(
-        ResizePhase::Started,
-        boot.volume_id(),
-        calculation.old_total_sectors,
-        calculation.new_total_sectors,
-        calculation.old_fat_size,
-        calculation.new_fat_size,
-    );
+    let mut checkpoint = calculation.checkpoint(ResizePhase::Started, boot.volume_id());
     if resumable {
         checkpoint.shift_progress = Some(resume_from);
     }
@@ -540,14 +509,7 @@ fn shift_cluster_data(
     maybe_crash_at("after_data_shift");
 
     // Update checkpoint to phase 1
-    let checkpoint = ResizeCheckpoint::new(
-        ResizePhase::DataCopied,
-        boot.volume_id(),
-        calculation.old_total_sectors,
-        calculation.new_total_sectors,
-        calculation.old_fat_size,
-        calculation.new_fat_size,
-    );
+    let checkpoint = calculation.checkpoint(ResizePhase::DataCopied, boot.volume_id());
     write_checkpoint(device, record.slot, &checkpoint)?;
     report.step("Updated checkpoint (phase 1: data copied)".to_string());
 
@@ -601,14 +563,7 @@ fn write_fat_extension(
     maybe_crash_at("after_fat_write");
 
     // Update checkpoint to phase 2
-    let checkpoint = ResizeCheckpoint::new(
-        ResizePhase::FatWritten,
-        boot.volume_id(),
-        calculation.old_total_sectors,
-        calculation.new_total_sectors,
-        calculation.old_fat_size,
-        calculation.new_fat_size,
-    );
+    let checkpoint = calculation.checkpoint(ResizePhase::FatWritten, boot.volume_id());
     write_checkpoint(device, checkpoint_slot, &checkpoint)?;
     report.step("Updated checkpoint (phase 2: FAT written)".to_string());
 
@@ -637,14 +592,7 @@ fn commit_new_geometry(
     // commit remains, so a rerun finishes it. The FAT phase already left
     // this record on the growth path.
     if let FatOnDisk::NotWritten(boot) = &fat_on_disk {
-        let checkpoint = ResizeCheckpoint::new(
-            ResizePhase::FatWritten,
-            boot.volume_id(),
-            calculation.old_total_sectors,
-            calculation.new_total_sectors,
-            calculation.old_fat_size,
-            calculation.new_fat_size,
-        );
+        let checkpoint = calculation.checkpoint(ResizePhase::FatWritten, boot.volume_id());
         write_checkpoint(device, record.slot, &checkpoint)?;
         mark_checkpoint_slot(device, record.fsinfo_sector, record.slot)?;
         report.step("Wrote checkpoint (phase 2: commit pending)".to_string());
