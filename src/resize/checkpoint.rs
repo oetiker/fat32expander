@@ -88,7 +88,7 @@ impl ResizePhase {
 ///
 /// This is written to its [`CheckpointSlot`], the device's last sector when
 /// the resize started, and allows resuming an interrupted resize operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResizeCheckpoint {
     /// Current resize phase
     pub phase: ResizePhase,
@@ -1163,5 +1163,75 @@ mod tests {
             check_for_incomplete_resize(&device, &invalidated, slot),
             Err(Error::CheckpointOutsideDevice { .. })
         ));
+    }
+}
+
+/// [F-13]: the checkpoint is read back from an untrusted sector after a crash.
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn phase() -> impl Strategy<Value = ResizePhase> {
+        prop_oneof![
+            Just(ResizePhase::Started),
+            Just(ResizePhase::DataCopied),
+            Just(ResizePhase::FatWritten),
+        ]
+    }
+
+    fn checkpoint() -> impl Strategy<Value = ResizeCheckpoint> {
+        (
+            phase(),
+            any::<u32>(),
+            any::<[u32; 4]>(),
+            proptest::option::of(any::<u32>()),
+        )
+            .prop_map(|(phase, volume, [ot, nt, of, nf], progress)| {
+                let cp = ResizeCheckpoint::new(phase, volume, ot, nt, of, nf);
+                match progress {
+                    Some(cluster) => cp.with_shift_progress(cluster),
+                    None => cp,
+                }
+            })
+    }
+
+    fn sector_size() -> impl Strategy<Value = usize> {
+        prop_oneof![Just(512usize), Just(1024), Just(2048), Just(4096)]
+    }
+
+    proptest! {
+        #[test]
+        fn decoding_arbitrary_bytes_never_panics(data in proptest::collection::vec(any::<u8>(), 0..4200)) {
+            let _ = ResizeCheckpoint::from_bytes(&data);
+        }
+
+        #[test]
+        fn a_checkpoint_round_trips_at_every_sector_size(cp in checkpoint(), size in sector_size()) {
+            prop_assert_eq!(ResizeCheckpoint::from_bytes(&cp.to_bytes(size)).unwrap(), Some(cp));
+        }
+
+        /// Damage may make the record unreadable or absent, but never a
+        /// different record a resume would act on. The one thing it can do is
+        /// drop the progress record: damage to its magic reads as "no record"
+        /// rather than as corruption. That is safe -- a `Started` resume
+        /// without one refuses with `ShiftProgressMissing` -- but reported as
+        /// missing rather than damaged.
+        #[test]
+        fn damage_never_yields_a_different_checkpoint(
+            cp in checkpoint(),
+            size in sector_size(),
+            flips in proptest::collection::vec((any::<prop::sample::Index>(), 1u8..=255), 1..4),
+        ) {
+            let mut data = cp.to_bytes(size);
+            for (at, mask) in flips {
+                let i = at.index(data.len());
+                data[i] ^= mask;
+            }
+            if let Ok(Some(read)) = ResizeCheckpoint::from_bytes(&data) {
+                let without_progress = ResizeCheckpoint { shift_progress: None, ..cp.clone() };
+                prop_assert!(read == cp || read == without_progress, "{:?} read as {:?}", cp, read);
+            }
+        }
     }
 }

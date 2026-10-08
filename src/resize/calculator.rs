@@ -551,3 +551,77 @@ mod tests {
         assert!(matches!(result, Err(Error::AlreadyMaxSize)));
     }
 }
+
+/// [F-13]: the calculation runs on a boot sector read off the device and on
+/// whatever size the device reports.
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use crate::fat32::validate_boot_sector;
+    use proptest::prelude::*;
+
+    fn boot(spc_shift: u8, reserved: u16, fats: u8, total: u32, fat_size: u32) -> BootSector {
+        let mut d = [0u8; 512];
+        d[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+        d[11..13].copy_from_slice(&512u16.to_le_bytes());
+        d[13] = 1 << spc_shift;
+        d[14..16].copy_from_slice(&reserved.to_le_bytes());
+        d[16] = fats;
+        d[21] = 0xF8;
+        d[32..36].copy_from_slice(&total.to_le_bytes());
+        d[36..40].copy_from_slice(&fat_size.to_le_bytes());
+        d[44..48].copy_from_slice(&2u32.to_le_bytes());
+        d[48] = 1;
+        d[50] = 6;
+        d[510] = 0x55;
+        d[511] = 0xAA;
+        BootSector::from_bytes(&d).unwrap()
+    }
+
+    proptest! {
+        /// Any geometry, any device size: an answer or an error, never a panic.
+        #[test]
+        fn calculation_never_panics(
+            spc_shift in 0u8..8,
+            reserved in 1u16..64,
+            fats in 1u8..=2,
+            total in any::<u32>(),
+            fat_size in any::<u32>(),
+            device in any::<u64>(),
+        ) {
+            let boot = boot(spc_shift, reserved, fats, total, fat_size);
+            if let Ok(calc) = calculate_new_size(&boot, device) {
+                prop_assert_eq!(calc.new_total_sectors as u64, device);
+            }
+        }
+
+        /// A valid filesystem on a larger device: the plan is a FAT32 volume
+        /// whose FAT has an entry for every cluster, and the FAT never shrinks.
+        #[test]
+        fn growing_a_valid_volume_plans_a_fat32_volume(
+            spc_shift in 0u8..8,
+            reserved in 8u16..64,
+            fats in 1u8..=2,
+            clusters in BootSector::MIN_FAT32_CLUSTERS..2_000_000,
+            growth in 1u64..8_000_000,
+        ) {
+            let spc = 1u64 << spc_shift;
+            let fat_size = ((clusters as u64 + 2) * 4).div_ceil(512) as u32;
+            let total = reserved as u64 + fats as u64 * fat_size as u64 + clusters as u64 * spc;
+            prop_assume!(total + growth <= u32::MAX as u64);
+            let boot = boot(spc_shift, reserved, fats, total as u32, fat_size);
+            prop_assert!(validate_boot_sector(&boot).is_ok(), "{:?}", validate_boot_sector(&boot));
+
+            let calc = calculate_new_size(&boot, total + growth).unwrap();
+            prop_assert_eq!(calc.new_total_sectors as u64, total + growth);
+            prop_assert!(calc.new_fat_size >= calc.old_fat_size);
+            prop_assert!(calc.new_data_clusters >= BootSector::MIN_FAT32_CLUSTERS);
+            prop_assert!(calc.new_fat_size as u64 * 128 >= calc.new_data_clusters as u64 + 2);
+            prop_assert_eq!(
+                Some(calc.new_data_clusters),
+                boot.with_geometry(calc.new_total_sectors, calc.new_fat_size).data_clusters()
+            );
+        }
+
+    }
+}

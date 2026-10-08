@@ -27,6 +27,7 @@ libc = "0.2"
 crc32fast = "1.4"
 
 [dev-dependencies]
+proptest = "1.11"
 tempfile = "3.0"
 
 [[bin]]

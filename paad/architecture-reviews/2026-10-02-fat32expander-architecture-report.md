@@ -247,10 +247,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** No test feeds a checkpoint that disagrees with the boot sector ([F-02]), a moved device ([F-03]), a bad `backup_boot_sector` ([F-10]), or a sparse in-use pattern to the shift resume ([F-01]). No fuzz or property harness exists; FAT1/FAT2 equality is checked only via dosfsck.
 - **Evidence:** `Cargo.toml` `[dev-dependencies]` — `tempfile = "3.0"` only; `grep ResizeSizeMismatch tests/` → none; `src/resize/relocator.rs:~598` "in_use = [2u32, 3, 4, 5, 6, 7, 8, 9]"
 - **Found by:** Security & Code Quality. Continues [F-R12].
-- **Status:** Partially fixed
-- **Status reason:** The sparse in-use pattern for the shift resume ([F-01]) is now tested (`execute_relocation_resumes_safely_across_free_clusters`). A checkpoint that disagrees with the boot sector ([F-02]) is now tested (`a_stale_checkpoint_behind_a_valid_boot_sector_is_ignored`, `a_mismatched_checkpoint_behind_an_invalidated_boot_sector_is_refused`, `checkpoint_must_describe_the_filesystem_behind_the_boot_sector`). A corrupt backup boot sector pointer ([F-10]) is now tested (`a_backup_pointer_into_the_fat_is_refused_even_with_the_override`). A device that changed size between the crash and the rerun ([F-03]) is now tested (`a_crash_in_the_data_shift_resumes_after_the_device_grew`, `a_crash_in_the_data_shift_is_refused_after_the_device_shrank`). Still open: any fuzz or property harness.
-- **Status date:** 2026-10-05 UTC
-- **Status commit:** 63c8312
+- **Status:** Fixed
+- **Status reason:** The earlier tests (F-01, F-02, F-03, F-10 cases, see the previous status) are now joined by a `proptest` harness: the checkpoint codec (no panic on any bytes, round trip at every sector size, damage never yields a different record), boot sector and FSInfo parsing and the layout accessors (no panic; every data cluster of a valid geometry inside the volume), the size calculation on any and on valid geometries, and in `tests/property_test.rs` whole resizes of generated images with random in-use patterns (FAT1 = FAT2, every FAT entry and cluster kept, FSInfo free count). The whole-resize property found a FAT-sizing defect, fixed in eaf57d2. It also showed that damage to the progress record's magic reads as "no progress record" (a safe refusal, but reported as missing rather than damaged); not fixed here.
+- **Status date:** 2026-10-08 UTC
+- **Status commit:** pending
 
 ### [F-14] A machine-specific `target` symlink is tracked in git
 - **Category:** 22 Configuration sprawl

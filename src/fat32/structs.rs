@@ -1021,3 +1021,113 @@ mod tests {
         assert_eq!(fsinfo.trail_sig(), FSInfo::TRAIL_SIG);
     }
 }
+
+/// [F-13]: boot sector and FSInfo are parsed from whatever the device holds.
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use crate::fat32::validate_boot_sector;
+    use proptest::prelude::*;
+
+    /// Boot sector bytes with a FAT32-shaped header and arbitrary geometry.
+    fn boot_bytes() -> impl Strategy<Value = Vec<u8>> {
+        (
+            prop_oneof![
+                Just(512u16),
+                Just(1024),
+                Just(2048),
+                Just(4096),
+                any::<u16>()
+            ],
+            any::<u8>(),
+            any::<u16>(),
+            any::<u8>(),
+            any::<u32>(),
+            any::<u32>(),
+            any::<u32>(),
+        )
+            .prop_map(|(bps, spc, reserved, fats, total, fat_size, root)| {
+                let mut d = vec![0u8; 512];
+                d[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+                d[11..13].copy_from_slice(&bps.to_le_bytes());
+                d[13] = spc;
+                d[14..16].copy_from_slice(&reserved.to_le_bytes());
+                d[16] = fats;
+                d[21] = 0xF8;
+                d[32..36].copy_from_slice(&total.to_le_bytes());
+                d[36..40].copy_from_slice(&fat_size.to_le_bytes());
+                d[44..48].copy_from_slice(&root.to_le_bytes());
+                d[48] = 1;
+                d[50] = 6;
+                d[82..90].copy_from_slice(b"FAT32   ");
+                d[510] = 0x55;
+                d[511] = 0xAA;
+                d
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn parsing_arbitrary_bytes_never_panics(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
+            if let Ok(boot) = BootSector::from_bytes(&data) {
+                let _ = format!("{:?}", boot);
+                let _ = boot.data_clusters();
+                let _ = boot.cluster_to_sector(u32::MAX);
+            }
+            let _ = FSInfo::from_bytes(&data);
+        }
+
+        #[test]
+        fn layout_questions_on_any_geometry_never_panic(data in boot_bytes(), cluster in any::<u32>()) {
+            let boot = BootSector::from_bytes(&data).unwrap();
+            let _ = format!("{:?}", boot);
+            let _ = boot.data_clusters();
+            let _ = boot.first_data_sector();
+            let _ = boot.cluster_to_sector(cluster);
+            let _ = validate_boot_sector(&boot);
+        }
+
+        /// On a boot sector that validates, every data cluster lies wholly
+        /// inside the volume. The geometry is built to be valid, so cases are
+        /// not wasted on rejects.
+        #[test]
+        fn a_valid_boot_sector_maps_every_cluster_into_the_volume(
+            bps_shift in 0u32..4,
+            spc_shift in 0u32..8,
+            reserved in 8u16..64,
+            fats in 1u8..=2,
+            clusters in BootSector::MIN_FAT32_CLUSTERS..4_000_000,
+            slack in 0u32..128,
+            pick in any::<prop::sample::Index>(),
+        ) {
+            let bps = 512u32 << bps_shift;
+            let spc = 1u32 << spc_shift;
+            let fat_size = ((clusters as u64 + 2) * 4).div_ceil(bps as u64) as u32;
+            let total = reserved as u64 + fats as u64 * fat_size as u64
+                + clusters as u64 * spc as u64 + (slack % spc) as u64;
+            prop_assume!(total <= u32::MAX as u64);
+
+            let mut d = vec![0u8; 512];
+            d[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+            d[11..13].copy_from_slice(&(bps as u16).to_le_bytes());
+            d[13] = spc as u8;
+            d[14..16].copy_from_slice(&reserved.to_le_bytes());
+            d[16] = fats;
+            d[21] = 0xF8;
+            d[32..36].copy_from_slice(&(total as u32).to_le_bytes());
+            d[36..40].copy_from_slice(&fat_size.to_le_bytes());
+            d[44..48].copy_from_slice(&2u32.to_le_bytes());
+            d[48] = 1;
+            d[50] = 6;
+            d[510] = 0x55;
+            d[511] = 0xAA;
+            let boot = BootSector::from_bytes(&d).unwrap();
+            prop_assert!(validate_boot_sector(&boot).is_ok(), "{:?}", validate_boot_sector(&boot));
+            prop_assert_eq!(boot.data_clusters(), Some(clusters));
+
+            let cluster = 2 + pick.index(clusters as usize) as u32;
+            let sector = boot.cluster_to_sector(cluster).unwrap();
+            prop_assert!(sector + spc as u64 <= total);
+        }
+    }
+}

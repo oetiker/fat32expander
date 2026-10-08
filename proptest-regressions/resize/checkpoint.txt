@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b02ac23fc63bb5e44583b78c69290481b78d4647577b0b7f826977672c0d2777 # shrinks to cp = ResizeCheckpoint { phase: Started, old_total_sectors: 0, new_total_sectors: 0, old_fat_size: 0, new_fat_size: 0, shift_progress: Some(0), volume_id: Some(0) }, size = 512, flips = [(Index(1152921504606846976), 1)]
