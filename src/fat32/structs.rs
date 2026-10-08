@@ -36,11 +36,6 @@ impl BootSector {
         &self.raw
     }
 
-    /// Get mutable raw bytes
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        &mut self.raw
-    }
-
     /// Get the sector size this boot sector was read with
     pub fn sector_size(&self) -> usize {
         self.raw.len()
@@ -154,12 +149,6 @@ impl BootSector {
         u32::from_le_bytes([self.raw[44], self.raw[45], self.raw[46], self.raw[47]])
     }
 
-    /// Set root directory cluster
-    pub fn set_root_cluster(&mut self, cluster: u32) {
-        let bytes = cluster.to_le_bytes();
-        self.raw[44..48].copy_from_slice(&bytes);
-    }
-
     /// FSInfo sector number (offset 48, 2 bytes) - typically 1
     pub fn fs_info_sector(&self) -> u16 {
         u16::from_le_bytes([self.raw[48], self.raw[49]])
@@ -198,11 +187,6 @@ impl BootSector {
     /// Volume label (offset 71, 11 bytes)
     pub fn volume_label(&self) -> &[u8] {
         &self.raw[71..82]
-    }
-
-    /// File system type string (offset 82, 8 bytes) - "FAT32   "
-    pub fn fs_type(&self) -> &[u8] {
-        &self.raw[82..90]
     }
 
     /// Boot signature at end of sector (offset 510, 2 bytes) - must be 0xAA55
@@ -421,11 +405,6 @@ impl FSInfo {
         &self.raw
     }
 
-    /// Get mutable raw bytes
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        &mut self.raw
-    }
-
     /// Get the sector size this FSInfo was read with
     pub fn sector_size(&self) -> usize {
         self.raw.len()
@@ -457,12 +436,6 @@ impl FSInfo {
     /// 0xFFFFFFFF means unknown
     pub fn next_free(&self) -> u32 {
         u32::from_le_bytes([self.raw[492], self.raw[493], self.raw[494], self.raw[495]])
-    }
-
-    /// Set next free cluster hint
-    pub fn set_next_free(&mut self, cluster: u32) {
-        let bytes = cluster.to_le_bytes();
-        self.raw[492..496].copy_from_slice(&bytes);
     }
 
     /// Where an interrupted resize left its checkpoint, if it marked one.

@@ -80,7 +80,7 @@ This is implemented in `src/resize/relocator.rs:execute_relocation()`.
 
 See `src/resize/relocator.rs` (`/// Since cluster numbers don't change, no FAT chain or directory entry updates are needed!`) and `TECHGUIDE.md`.
 
-> **Historical note.** An earlier design *did* renumber clusters, which required walking every directory tree and rewriting each entry that pointed at a moved cluster. That approach was abandoned in favour of the sector shift above. If you find code or docs implying directory entries must be updated, it is residue from that design, not a requirement — `BootSector::set_root_cluster` survives with zero call sites for the same reason. This section itself described the abandoned design until [F-R60].
+> **Historical note.** An earlier design *did* renumber clusters, which required walking every directory tree and rewriting each entry that pointed at a moved cluster. That approach was abandoned in favour of the sector shift above. If you find code or docs implying directory entries must be updated, it is residue from that design, not a requirement — `BootSector::set_root_cluster` was residue of the same kind and was removed in [F-17]. This section itself described the abandoned design until [F-R60].
 
 ## Common Pitfalls
 
@@ -88,7 +88,7 @@ See `src/resize/relocator.rs` (`/// Since cluster numbers don't change, no FAT c
 
 2. **FAT table sync**: Both FAT1 and FAT2 must be updated identically.
 
-3. **Root cluster**: The root directory is a cluster chain starting at `boot.root_cluster()`. Relocating cluster 2 does **not** change that field — the root stays cluster 2 and only moves physically. Writing `set_root_cluster` during a resize is a bug, not a fix; `root_cluster_survives_a_relocating_resize` in `tests/integration_test.rs` guards this.
+3. **Root cluster**: The root directory is a cluster chain starting at `boot.root_cluster()`. Relocating cluster 2 does **not** change that field — the root stays cluster 2 and only moves physically. Rewriting the `root_cluster` field during a resize is a bug, not a fix; `root_cluster_survives_a_relocating_resize` in `tests/integration_test.rs` guards this.
 
 4. **FSInfo free count**: Must be updated to reflect new available clusters.
 

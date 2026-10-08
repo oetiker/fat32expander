@@ -817,8 +817,8 @@ fn resize_preserves_files_on_a_4096_byte_sector_filesystem() {
 /// cluster-renumbering design, under which relocating cluster 2 would force
 /// `root_cluster` to be rewritten. The implementation preserves cluster
 /// numbers and moves only physical sectors, so `root_cluster` must come out
-/// the far side of a relocating resize untouched -- and `set_root_cluster`
-/// must stay callerless.
+/// the far side of a relocating resize untouched. (`set_root_cluster`, which
+/// had no callers, was removed in [F-17].)
 ///
 /// Nothing asserted this. `test_resize_with_fat_growth` checks cluster counts
 /// and `dosfsck`, neither of which distinguishes "root cluster preserved" from

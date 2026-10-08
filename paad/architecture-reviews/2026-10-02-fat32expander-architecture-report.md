@@ -287,6 +287,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** `Device::write_bytes_at` has no callers and would bypass the [F-R28] bounds check and the durability journal; `read_bytes_at` is unchecked too. `size_bytes`, `open_readonly_with_sector_size`, `get_block_device_size` are test-only; `BootSector::as_bytes_mut`, `FSInfo::as_bytes_mut`, `set_root_cluster`, `set_next_free` have no callers; `check_root` has none and its doc contradicts [F-R46]. Export hides all of it from the lint.
 - **Evidence:** `src/device.rs:303-309`, excerpt: "pub fn write_bytes_at(&self, offset: u64, data: &[u8]) -> Result<()> { self.file.write_all_at(data, offset)"; `src/fat32/structs.rs:40,158,423,461`; `src/system.rs:52-53` "Check if running as root (required for block device access)"; `src/lib.rs:59`
 - **Found by:** Structure & Boundaries, Coupling & Dependencies, Security & Code Quality
+- **Status:** Fixed
+- **Status reason:** Deleted `Device::write_bytes_at` and `Device::size_bytes`, both `as_bytes_mut`, `BootSector::set_root_cluster`, `BootSector::fs_type` and `FSInfo::set_next_free`; `read_bytes_at` is `#[cfg(test)]`. `check_root`'s doc now says it is informational and that nothing requires root ([F-R46]). Developer's choice: `check_root`, `get_block_device_size` and `Device::open_readonly_with_sector_size` stay exported, because `tests/public_api_test.rs` pins them as supported API; removing them is an API decision, not dead-code cleanup. `RelocationPlan::is_empty` was already `#[cfg(test)]` ([F-20]).
+- **Status date:** 2026-10-08 UTC
+- **Status commit:** pending
 
 ### [F-18] FAT held twice in memory, with a stale chunk comment and a per-sector copy loop
 - **Category:** 8 Premature optimization

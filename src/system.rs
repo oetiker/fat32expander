@@ -89,7 +89,10 @@ fn resolve_device_path(path: &Path) -> Result<String> {
     }
 }
 
-/// Check if running as root (required for block device access)
+/// Whether the process runs with an effective user ID of 0.
+///
+/// Informational only: nothing in this crate requires root ([F-R46]). Whether
+/// a device can be written is the kernel's answer to the open, not this one.
 pub fn check_root() -> bool {
     // SAFETY: `geteuid` takes no arguments, borrows nothing, and cannot fail --
     // POSIX specifies it as always successful, so there is no errno to race on

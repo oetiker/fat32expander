@@ -199,11 +199,6 @@ impl Device {
         self.total_sectors
     }
 
-    /// Get total device size in bytes
-    fn file_size(&self) -> Result<u64> {
-        Self::size_of(&self.file)
-    }
-
     /// Attach this device's identity to a failed I/O call.
     ///
     /// The path and sector size live here and nowhere else, so this is the only
@@ -315,26 +310,15 @@ impl Device {
         Ok(())
     }
 
-    /// Read raw bytes from a byte offset (used for bootstrapping before sector size is known)
+    /// Read raw bytes from a byte offset, for tests that check what landed on
+    /// disk. Not bounds-checked and not journaled, so test-only ([F-17]).
+    #[cfg(test)]
     pub fn read_bytes_at(&self, offset: u64, size: usize) -> Result<Vec<u8>> {
         let mut buffer = vec![0u8; size];
         self.file
             .read_exact_at(&mut buffer, offset)
             .map_err(|e| self.io_err("read", offset, size, e))?;
         Ok(buffer)
-    }
-
-    /// Write raw bytes at a byte offset
-    pub fn write_bytes_at(&self, offset: u64, data: &[u8]) -> Result<()> {
-        self.file
-            .write_all_at(data, offset)
-            .map_err(|e| self.io_err("write", offset, data.len(), e))?;
-        Ok(())
-    }
-
-    /// Get total device size in bytes (public version)
-    pub fn size_bytes(&self) -> Result<u64> {
-        self.file_size()
     }
 }
 
@@ -699,7 +683,7 @@ mod tests {
         std::fs::write(file.path(), vec![0u8; len as usize]).unwrap();
 
         let device = Device::open_with_sector_size(file.path(), 512).unwrap();
-        let via_device = device.size_bytes().unwrap();
+        let via_device = Device::size_of(&device.file).unwrap();
         let via_system = crate::system::get_block_device_size(file.path()).unwrap();
 
         assert_eq!(via_device, len, "Device must report the true byte size");
