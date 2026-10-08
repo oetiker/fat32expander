@@ -305,7 +305,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** One chunk size, `FAT_CHUNK_BYTES` (128 KiB), converted to sectors at the device's sector size, so the comment holds at every size. `read_fat_table` decodes each chunk into entries as it reads, so the FAT is held once. `copy_fat_to_other_copies` copies chunk by chunk with `read_sectors`/`write_sectors`. `zero_fat_extension` still writes one sector at a time (not named by the finding; the extension is small). No behaviour change; guarded by `tests/fat_io_test.rs` and the durability ordering tests.
 - **Status date:** 2026-10-08 UTC
-- **Status commit:** pending
+- **Status commit:** 3dc62bd
 
 ### [F-19] Filesystem-type check is an empty `if`
 - **Category:** 31 Dead code
