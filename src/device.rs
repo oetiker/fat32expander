@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, FileTypeExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 /// Wrapper around a block device or image file for sector-based I/O
@@ -70,6 +70,29 @@ pub mod journal {
 /// a complete boot sector whatever size it turns out to declare.
 pub const PROBE_BYTES: usize = 4096;
 
+/// [F-11]: whether to open `path` with `O_EXCL`.
+///
+/// A writable open of a block device claims it exclusively: Linux refuses it
+/// with `EBUSY` while the device is mounted or claimed by another exclusive
+/// opener, and refuses a mount for as long as the claim is held. That closes
+/// the window between the mount check and the open, and keeps a second resize
+/// off the device. A read-only open stays shared, so `info` still works on a
+/// mounted device, and a regular file never gets the flag, because Linux
+/// defines `O_EXCL` without `O_CREAT` only for block devices.
+fn opens_exclusively(path: &Path, writable: bool) -> bool {
+    writable && std::fs::metadata(path).is_ok_and(|m| m.file_type().is_block_device())
+}
+
+/// The error for a failed open; an exclusive open the kernel refused as busy
+/// is a device in use, not one that cannot be opened.
+fn open_error(path: String, source: std::io::Error, exclusive: bool) -> Error {
+    if exclusive && source.raw_os_error() == Some(libc::EBUSY) {
+        Error::DeviceBusy(path)
+    } else {
+        Error::DeviceOpen { path, source }
+    }
+}
+
 impl Device {
     /// Open a device and establish its geometry in a single step.
     ///
@@ -93,14 +116,15 @@ impl Device {
         let path_buf = path.as_ref().to_path_buf();
         let path_display = path_buf.display().to_string();
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(writable)
+        let exclusive = opens_exclusively(&path_buf, writable);
+        let mut options = OpenOptions::new();
+        options.read(true).write(writable);
+        if exclusive {
+            options.custom_flags(libc::O_EXCL);
+        }
+        let file = options
             .open(&path_buf)
-            .map_err(|source| Error::DeviceOpen {
-                path: path_display.clone(),
-                source,
-            })?;
+            .map_err(|source| open_error(path_display.clone(), source, exclusive))?;
 
         let size = Self::size_of(&file)?;
 
@@ -791,5 +815,46 @@ mod tests {
 
         // The rejected writes must not have modified the device.
         assert_eq!(device.read_sector(0).unwrap(), vec![0u8; 512]);
+    }
+
+    /// [F-11]: a writable open of a block device claims it with `O_EXCL`, so
+    /// the kernel refuses it while the device is mounted, and refuses a mount
+    /// or a second resize for as long as this one holds it. A regular file
+    /// gets no `O_EXCL`, which Linux does not define without `O_CREAT`.
+    #[test]
+    fn only_a_writable_open_of_a_block_device_is_exclusive() {
+        let file = NamedTempFile::new().unwrap();
+        assert!(!opens_exclusively(file.path(), true));
+        assert!(!opens_exclusively(file.path(), false));
+
+        // Any block device on this machine; reading its type needs no access.
+        let block = std::fs::read_dir("/sys/block")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| std::path::Path::new("/dev").join(e.file_name()))
+            .find(|p| {
+                use std::os::unix::fs::FileTypeExt;
+                std::fs::metadata(p).is_ok_and(|m| m.file_type().is_block_device())
+            });
+        if let Some(block) = block {
+            assert!(opens_exclusively(&block, true), "{}", block.display());
+            assert!(!opens_exclusively(&block, false), "{}", block.display());
+        }
+    }
+
+    /// [F-11]: the kernel's refusal of an exclusive open says "in use", which
+    /// is not the same as "cannot open".
+    #[test]
+    fn a_busy_exclusive_open_is_reported_as_in_use() {
+        let busy = || std::io::Error::from_raw_os_error(libc::EBUSY);
+        assert!(matches!(
+            open_error("/dev/sdx1".to_string(), busy(), true),
+            Error::DeviceBusy(path) if path == "/dev/sdx1"
+        ));
+        assert!(matches!(
+            open_error("/dev/sdx1".to_string(), busy(), false),
+            Error::DeviceOpen { .. }
+        ));
     }
 }

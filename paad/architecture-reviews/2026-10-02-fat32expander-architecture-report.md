@@ -221,6 +221,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** The `/proc/mounts` path comparison runs before a plain open, so a mount or a second concurrent run can start in between; a loop-mounted image appears as `/dev/loopN` and passes the check.
 - **Evidence:** `src/system.rs:8-37` (`check_not_mounted`); `src/device.rs:96-99`, excerpt: "OpenOptions::new().read(true).write(writable).open(&path_buf)"
 - **Found by:** Security & Code Quality. Continues [F-R27].
+- **Status:** Fixed
+- **Status reason:** A writable open of a block device now uses `O_EXCL`, so the kernel refuses it while the device is mounted or held and refuses a mount or a second resize while it is held; `EBUSY` there is the new `Error::DeviceBusy` (exit 4). A regular file is checked against the backing files of mounted loop devices (`/sys/block/loopN/loop/backing_file`). The `/proc/mounts` check stays for its message. The kernel's refusal itself is not tested: claiming a block device needs root.
+- **Status date:** 2026-10-08 UTC
+- **Status commit:** pending
 
 ### [F-12] The no-FAT-growth path is untested although two tests claim it
 - **Category:** 32 Missing test coverage for critical paths

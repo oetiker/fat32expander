@@ -1,17 +1,47 @@
 use crate::error::{Error, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Check if a device is currently mounted
 ///
 /// On Linux, this parses /proc/mounts to check if the device is mounted.
+///
+/// An image file counts as mounted when a loop device backed by it is mounted
+/// ([F-11]). This check names the mount point; what closes the race between
+/// it and the open is the exclusive open of a block device in `Device`.
 pub fn check_not_mounted(device_path: impl AsRef<Path>) -> Result<()> {
-    check_against_mounts(device_path.as_ref(), fs::read_to_string("/proc/mounts"))
+    check_against_mounts_with(
+        device_path.as_ref(),
+        fs::read_to_string("/proc/mounts"),
+        &loop_backing_file,
+    )
+}
+
+/// The file behind a loop device, from sysfs; `None` for anything that is not
+/// an attached loop device.
+fn loop_backing_file(device: &str) -> Option<PathBuf> {
+    let name = Path::new(device).file_name()?.to_str()?;
+    if !device.starts_with("/dev/loop") {
+        return None;
+    }
+    let text = fs::read_to_string(format!("/sys/block/{name}/loop/backing_file")).ok()?;
+    Some(PathBuf::from(text.trim_end_matches('\n')))
+}
+
+/// [`check_against_mounts_with`] for a machine without loop devices.
+#[cfg(test)]
+fn check_against_mounts(device_path: &Path, mounts: std::io::Result<String>) -> Result<()> {
+    check_against_mounts_with(device_path, mounts, &|_| None)
 }
 
 /// The decision behind [`check_not_mounted`], given the result of reading the
-/// mount table, so tests can hand it a table or a read failure.
-fn check_against_mounts(device_path: &Path, mounts: std::io::Result<String>) -> Result<()> {
+/// mount table and a way to find the file behind a loop device, so tests can
+/// hand it both.
+fn check_against_mounts_with(
+    device_path: &Path,
+    mounts: std::io::Result<String>,
+    loop_backing: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Result<()> {
     let device_path = resolve_device_path(device_path)?;
 
     let mounts = mounts.map_err(|source| Error::MountTableUnreadable {
@@ -29,6 +59,13 @@ fn check_against_mounts(device_path: &Path, mounts: std::io::Result<String>) -> 
             // Check if this mount entry matches our device
             if let Ok(resolved_mount) = resolve_device_path(Path::new(mount_device)) {
                 if resolved_mount == device_path {
+                    return Err(Error::DeviceMounted(device_path, mount_point.to_string()));
+                }
+            }
+
+            // An image mounted through a loop device ([F-11]).
+            if let Some(backing) = loop_backing(mount_device) {
+                if resolve_device_path(&backing)? == device_path {
                     return Err(Error::DeviceMounted(device_path, mount_point.to_string()));
                 }
             }
@@ -217,6 +254,44 @@ mod tests {
             check_against_mounts(file.path(), unreadable),
             Err(Error::MountTableUnreadable { .. })
         ));
+    }
+
+    /// [F-11]: an image file mounted through a loop device appears in the
+    /// mount table as `/dev/loopN`, never under its own path.
+    #[test]
+    fn an_image_mounted_through_a_loop_device_is_refused() {
+        let file = NamedTempFile::new().unwrap();
+        let table = "/dev/loop7 /mnt/image vfat rw 0 0\n".to_string();
+        let backing = file.path().to_path_buf();
+
+        match check_against_mounts_with(file.path(), Ok(table), &|dev: &str| {
+            (dev == "/dev/loop7").then(|| backing.clone())
+        }) {
+            Err(Error::DeviceMounted(device, mount_point)) => {
+                assert_eq!(device, resolve_device_path(file.path()).unwrap());
+                assert_eq!(mount_point, "/mnt/image");
+            }
+            other => panic!("a loop-mounted image must be refused, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_loop_device_backed_by_another_file_passes() {
+        let file = NamedTempFile::new().unwrap();
+        let other = NamedTempFile::new().unwrap();
+        let table = "/dev/loop7 /mnt/image vfat rw 0 0\n".to_string();
+        let backing = other.path().to_path_buf();
+
+        assert!(
+            check_against_mounts_with(file.path(), Ok(table), &|_: &str| { Some(backing.clone()) })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn only_loop_devices_have_a_backing_file() {
+        assert_eq!(loop_backing_file("/dev/sda1"), None);
+        assert_eq!(loop_backing_file("proc"), None);
     }
 
     #[test]

@@ -113,7 +113,7 @@ as the tool changes.
 | 1 | Unexpected internal failure |
 | 2 | Invalid command line (produced by the argument parser) |
 | 3 | Device could not be opened — check the path, permissions, and whether it is in use |
-| 4 | Device is mounted — unmount it first |
+| 4 | Device is mounted (also through a loop device), or another program holds it — unmount it or stop that program first |
 | 5 | Not a usable FAT32 filesystem |
 | 6 | Already at maximum size *(reserved; a no-op resize exits 0)* |
 | 7 | Device is smaller than the filesystem claims — truncated image or wrong device |
@@ -149,7 +149,7 @@ When a FAT32 filesystem grows significantly, the FAT (File Allocation Table) may
 
 ### Safety Features
 
-- Refuses to operate on mounted filesystems
+- Refuses to operate on mounted filesystems, including an image file mounted through a loop device, and holds a block device exclusively while it resizes
 - Validates boot sector and backup boot sector match
 - Verifies filesystem structure before modifications
 - Syncs all changes to disk at each phase

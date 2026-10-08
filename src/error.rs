@@ -22,6 +22,11 @@ pub enum Error {
     #[error("Device '{0}' is currently mounted at '{1}'")]
     DeviceMounted(String, String),
 
+    /// [F-11]: the kernel refused the exclusive open of a block device. It is
+    /// mounted, or another program -- a second resize, say -- holds it.
+    #[error("Device '{0}' is in use: it is mounted or held by another program")]
+    DeviceBusy(String),
+
     #[error("Not a valid FAT32 filesystem: {0}")]
     InvalidFAT32(String),
 

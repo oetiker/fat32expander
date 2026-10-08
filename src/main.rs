@@ -260,7 +260,7 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
 
     match e {
         Error::DeviceOpen { .. } => exit::DEVICE_UNOPENABLE,
-        Error::DeviceMounted(..) => exit::DEVICE_MOUNTED,
+        Error::DeviceMounted(..) | Error::DeviceBusy(_) => exit::DEVICE_MOUNTED,
         // The mount check could not look; no device was touched ([F-06]).
         Error::MountTableUnreadable { .. } => exit::MOUNT_STATE_UNKNOWN,
 
@@ -597,6 +597,15 @@ mod tests {
         let e = Error::DeviceMounted("/dev/sdx1".to_string(), "/mnt".to_string());
         assert_eq!(code(e), exit::DEVICE_MOUNTED);
         assert_eq!(exit::DEVICE_MOUNTED, 4);
+    }
+
+    /// [F-11]: the kernel refusing an exclusive open is a device in use.
+    #[test]
+    fn a_busy_device_exits_like_a_mounted_one() {
+        assert_eq!(
+            code(Error::DeviceBusy("/dev/sdx1".to_string())),
+            exit::DEVICE_MOUNTED
+        );
     }
 
     /// [F-06]: failing to read the mount table touched no device, so it is
