@@ -373,7 +373,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** `Error` and `ResizeResult` are `#[non_exhaustive]`; `ResizeEvent` already was ([F-08]) and `SizeCalculation` is no longer public ([F-09]). The other root types have private fields. `exit_code_for` in `main.rs` gained a wildcard arm; the compile-time "every variant has an exit code" guard it gave up moved into `every_variant_is_listed` in `src/error.rs`, an in-crate exhaustive match (verified by adding a probe variant: the lib tests stop compiling). `every_error_variant_keeps_its_exit_code` pins all 28 codes. The `lib.rs` API doc states the rule.
 - **Status date:** 2026-10-08 UTC
-- **Status commit:** pending
+- **Status commit:** 4785cf2
 
 ### [F-27] Library carries CLI-only dependencies
 - **Category:** 31 Dead code / unused dependencies
