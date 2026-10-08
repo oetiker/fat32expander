@@ -206,7 +206,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** `SizeCalculation` is crate-private and no longer exported; `ResizeResult` carries `old_total_sectors`, `new_total_sectors`, `old_fat_size` and `new_fat_size` instead. `new_free_clusters`, `last_affected_cluster`, `size_increase()`, `new_size_bytes()` and `additional_clusters()` are gone. The four hand-copied checkpoint constructions are `calculation.checkpoint(phase, volume_id)`, and the resume's inverse literal is `SizeCalculation::from_checkpoint`, built on the same `for_geometry` as a fresh calculation.
 - **Status date:** 2026-10-08 UTC
-- **Status commit:** pending
+- **Status commit:** c8372a9
 
 ### [F-10] Backup boot sector location is never validated; the documented override writes there blindly
 - **Category:** 30 Security as an afterthought
