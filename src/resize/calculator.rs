@@ -97,7 +97,7 @@ pub(crate) fn calculate_new_size(
     // The boot sector reaching here has passed validation, which rejects a
     // layout that does not fit - but this function is public, so it checks
     // rather than assuming.
-    boot.data_clusters().ok_or_else(|| {
+    let old_data_clusters = boot.data_clusters().ok_or_else(|| {
         Error::Calculation(format!(
             "Current filesystem layout does not fit in its own {} sectors",
             boot.total_sectors()
@@ -132,14 +132,39 @@ pub(crate) fn calculate_new_size(
         return Err(Error::AlreadyMaxSize);
     }
 
-    // Calculate new FAT size
-    let new_fat_size = calculate_fat_size(
+    // Calculate new FAT size. It never shrinks: a smaller FAT would move the
+    // data area backward, and nothing moves the data back with it.
+    let mut new_fat_size = calculate_fat_size(
         new_total_sectors,
         boot.reserved_sectors(),
         boot.num_fats(),
         boot.sectors_per_cluster(),
         boot.bytes_per_sector(),
-    )?;
+    )?
+    .max(old_fat_size);
+
+    // The formula sizes the FAT with room to spare. When the old FAT was
+    // sized exactly and the volume grows only a little, that spare room
+    // costs more clusters than the growth adds, and a cluster in use near
+    // the end would land outside the device. Take the smallest FAT that
+    // covers the grown volume instead; if even that loses clusters, the
+    // volume cannot grow on this device.
+    let clusters_with = |fat_size: u32| {
+        boot.with_geometry(new_total_sectors, fat_size)
+            .data_clusters()
+    };
+    if clusters_with(new_fat_size).is_some_and(|c| c < old_data_clusters) {
+        let entries_per_sector = boot.bytes_per_sector() as u64 / 4;
+        new_fat_size = (old_fat_size..new_fat_size)
+            .find(|&fat_size| {
+                clusters_with(fat_size)
+                    .is_some_and(|c| fat_size as u64 * entries_per_sector >= c as u64 + 2)
+            })
+            .unwrap_or(new_fat_size);
+        if clusters_with(new_fat_size).is_some_and(|c| c < old_data_clusters) {
+            return Err(Error::AlreadyMaxSize);
+        }
+    }
 
     // Calculate the new layout, from the geometry the volume will actually have
     let calculation = SizeCalculation::for_geometry(
@@ -380,6 +405,65 @@ mod tests {
                 new_fat_size: 900,
             })
         ));
+    }
+
+    /// A boot sector with one sector per cluster and a FAT of `fat_size`
+    /// sectors in front of `clusters` data clusters.
+    fn boot_with_clusters(clusters: u32, fat_size: u32) -> BootSector {
+        let boot = create_test_boot_sector(32 + 2 * fat_size + clusters, fat_size);
+        let mut data = boot.as_bytes().to_vec();
+        data[13] = 1; // sectors per cluster
+        BootSector::from_bytes(&data).unwrap()
+    }
+
+    /// The Microsoft formula sizes the FAT with room to spare. On a volume
+    /// whose FAT is sized exactly, a small growth then left fewer clusters
+    /// than before, and the resize failed halfway with its last cluster
+    /// outside the device. A FAT that still covers the grown volume is used
+    /// instead.
+    #[test]
+    fn a_small_growth_never_loses_clusters() {
+        // 782 sectors x 128 entries = 100,096 entries: room for 100,094.
+        let boot = boot_with_clusters(100_000, 782);
+        assert_eq!(boot.data_clusters(), Some(100_000));
+
+        let calc = calculate_new_size(&boot, boot.total_sectors() as u64 + 1).unwrap();
+
+        assert!(
+            calc.new_data_clusters >= 100_000,
+            "{} clusters after growing a volume of 100,000",
+            calc.new_data_clusters
+        );
+        assert!(calc.new_fat_size as u64 * 128 >= calc.new_data_clusters as u64 + 2);
+    }
+
+    /// A FAT with no free entry cannot take one more cluster, and growing it
+    /// by one sector costs two clusters. The volume cannot grow on this
+    /// device, which is "nothing to do", not a failure halfway.
+    #[test]
+    fn a_full_fat_that_cannot_grow_without_losing_clusters_has_nothing_to_do() {
+        let boot = boot_with_clusters(100_094, 782);
+
+        assert!(matches!(
+            calculate_new_size(&boot, boot.total_sectors() as u64 + 1),
+            Err(Error::AlreadyMaxSize)
+        ));
+    }
+
+    /// A FAT larger than the formula asks for must not shrink: that would move
+    /// the data area backward without moving the data.
+    #[test]
+    fn the_fat_never_shrinks() {
+        let boot = boot_with_clusters(100_000, 2000);
+
+        let calc = calculate_new_size(&boot, boot.total_sectors() as u64 + 1000).unwrap();
+
+        assert!(
+            calc.new_fat_size >= 2000,
+            "FAT shrank to {}",
+            calc.new_fat_size
+        );
+        assert!(calc.new_data_clusters >= 100_000);
     }
 
     /// The calculator's data-cluster arithmetic must agree with the canonical

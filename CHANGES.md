@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - used `let-else` pattern for cleaner checkpoint parsing
 
 ### Fixed
+- Growing a filesystem whose FAT was larger than `fat32expander` would have made it wrote a smaller FAT size into the boot sector, so every file and directory then pointed at the wrong data. The FAT now never shrinks.
+- Growing a filesystem whose FAT was exactly full by only a few sectors stopped halfway with "sector ... out of bounds", and every rerun failed the same way. The resize now keeps the FAT that still covers the grown volume; when the volume cannot gain a cluster on the device, it reports "already at maximum size" and changes nothing.
 - `fat32expander resize` on an image file that was mounted through a loop device (`/dev/loopN`) went ahead and changed the filesystem under the mount. It now refuses with "Device '...' is currently mounted at '...'" and exit code 4.
 - A block device could be mounted, or resized by a second `fat32expander`, while a resize was running on it. The resize now holds the device exclusively; if the device is already mounted or held, it stops with "Device '...' is in use: it is mounted or held by another program" and exit code 4.
 - When `fat32expander resize` failed, it printed only the error, so there was no record of what it had already changed on the device. It now lists the completed steps under "Operations performed before the failure:" on stderr before the error. The exit codes do not change.
