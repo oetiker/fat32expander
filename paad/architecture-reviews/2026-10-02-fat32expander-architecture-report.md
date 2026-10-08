@@ -272,7 +272,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** `fat_copy_start(boot, n, fat_size)` in `fat32::operations` is the one FAT layout formula; `read_fat_table` calls it with the boot sector's FAT size, the resize with the new one. `init_new_fat_sectors`/`sync_fat_copies` moved out of `executor.rs` into `operations.rs` as crate-private `zero_fat_extension` and `copy_fat_to_other_copies`, called from the same place. Safety net `tests/fat_io_test.rs` covers one- and two-FAT volumes (mutation-checked).
 - **Status date:** 2026-10-08 UTC
-- **Status commit:** pending
+- **Status commit:** b0279ef
 
 ### [F-16] Checkpoint versioning fails open
 - **Category:** 20 Weak error handling strategy
