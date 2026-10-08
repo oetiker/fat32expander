@@ -381,6 +381,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** `clap` (with derive) and `anyhow` are used only by `main.rs`, but library consumers compile them.
 - **Evidence:** `Cargo.toml` `[dependencies]`, excerpt: "clap = { version = \"4.5\", features = [\"derive\"] }", "anyhow = \"1.0\""
 - **Found by:** Coupling & Dependencies
+- **Status:** Fixed
+- **Status reason:** `clap` and `anyhow` are optional and enabled by a new default `cli` feature, which the `[[bin]]` requires. A library consumer opts out with `default-features = false`; `cargo build`, `cargo install`, the release workflow and the `CARGO_BIN_EXE` tests are unchanged. CI and the gate run `cargo check --lib --no-default-features`, the check that `lib.rs` does not use either crate; `tests/manifest_test.rs` pins the manifest shape and that CI step.
+- **Status date:** 2026-10-08 UTC
+- **Status commit:** pending
 
 ### [F-28] Build hash goes stale after a commit
 - **Category:** 21 No observability plan (build provenance)

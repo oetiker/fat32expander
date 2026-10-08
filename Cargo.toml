@@ -8,7 +8,10 @@ license = "MIT"
 readme = "README.md"
 
 [features]
-default = []
+default = ["cli"]
+# The `fat32expander` command. A program that uses only the library can set
+# `default-features = false` and skip building clap and anyhow ([F-27]).
+cli = ["dep:clap", "dep:anyhow"]
 # Enable fault injection for crash recovery testing
 # Build with: cargo build --features fault-injection
 fault-injection = []
@@ -20,9 +23,9 @@ fault-injection = []
 device-journal = []
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
 thiserror = "1.0"
-anyhow = "1.0"
+anyhow = { version = "1.0", optional = true }
 libc = "0.2"
 crc32fast = "1.4"
 
@@ -33,6 +36,7 @@ tempfile = "3.0"
 [[bin]]
 name = "fat32expander"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [lib]
 name = "fat32expander"

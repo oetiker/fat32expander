@@ -47,6 +47,15 @@ jobs:
         cargo build --release
         echo "::endgroup::"
 
+    # [F-27]: the library must build without the `cli` feature, so a program
+    # that uses it does not compile clap and anyhow. tests/manifest_test.rs
+    # checks that this step stays.
+    - name: Build library without CLI dependencies
+      run: |
+        echo "::group::Building library without default features"
+        cargo check --lib --no-default-features
+        echo "::endgroup::"
+
     # [F-R61]: these two steps sweep every target rather than naming them.
     # Naming targets one by one meant a new tests/*.rs file ran in CI on the
     # day someone remembered to add it to this file, not the day it was

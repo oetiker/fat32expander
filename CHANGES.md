@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - added `Debug` trait implementation for `Device`
 
 ### Changed
+- For programs that use `fat32expander` as a library: with `default-features = false` in their `Cargo.toml`, they no longer build `clap` and `anyhow`, which only the `fat32expander` command uses. The command is now behind the default `cli` feature; `cargo build` and `cargo install` work as before.
 - For programs that use `fat32expander` as a library: `Error` and `ResizeResult` are marked `#[non_exhaustive]`, so a `match` on `Error` needs a `_` arm and a `ResizeResult` can no longer be built outside the library. In return, later versions can add error kinds and result fields without breaking such programs.
 - For programs that use `fat32expander` as a library: `Device::write_bytes_at`, `Device::read_bytes_at`, `Device::size_bytes`, `BootSector::as_bytes_mut`, `BootSector::set_root_cluster`, `BootSector::fs_type`, `FSInfo::as_bytes_mut` and `FSInfo::set_next_free` are removed. `write_bytes_at` wrote anywhere on the device without the checks every other write goes through.
 - For programs that use `fat32expander` as a library: `ResizeResult` no longer has a `calculation` field, and `SizeCalculation` is no longer exported. `ResizeResult` now has `old_total_sectors`, `new_total_sectors`, `old_fat_size` and `new_fat_size` directly. The removed "free clusters after resize" value was wrong: it was 0 after a resumed resize.

@@ -1,5 +1,9 @@
 //! In-place FAT32 filesystem expansion.
 //!
+//! To use only the library, depend on it with `default-features = false`.
+//! The default `cli` feature builds the `fat32expander` command and pulls in
+//! `clap` and `anyhow`, which the library does not use ([F-27]).
+//!
 //! # Public API structure
 //!
 //! [F-R44] This crate exposes its items on exactly two levels, with a stated
