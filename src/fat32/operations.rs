@@ -110,9 +110,79 @@ pub fn write_fsinfo(device: &Device, fsinfo: &FSInfo, sector: u16) -> Result<()>
     device.write_sector(sector as u64, fsinfo.as_bytes())
 }
 
+/// First sector of FAT copy `fat_number` when every copy is `fat_size`
+/// sectors long.
+///
+/// [F-15]: the one place that knows the FAT layout. The size is an argument
+/// because a resize lays the copies out at the new FAT size while `boot`
+/// still declares the old one.
+pub(crate) fn fat_copy_start(boot: &BootSector, fat_number: u8, fat_size: u32) -> u64 {
+    boot.first_fat_sector() + fat_number as u64 * fat_size as u64
+}
+
+/// Zero FAT1's growth, sectors `old_fat_size..new_fat_size`, so every new
+/// entry reads as a free cluster. Does nothing unless the FAT grows.
+///
+/// This must be called AFTER relocation, and the order is not a preference.
+/// The sectors this zeroes are physically the sectors relocation has just
+/// vacated and moved cluster data out of. Running it first would zero the
+/// region while it still holds live cluster data, and relocation would then
+/// copy that data forward from an area this function had already erased.
+///
+/// [F-R16]: this doc said the exact opposite ("must be called BEFORE
+/// relocation so that reading new FAT sectors returns valid data") while the
+/// call site had it right, and the correct `copy_fat_to_other_copies` doc
+/// below made the wrong one easy to trust. Nothing enforces the order but
+/// the call site in `resize_fat32` ([F-R15]).
+pub(crate) fn zero_fat_extension(
+    device: &Device,
+    boot: &BootSector,
+    old_fat_size: u32,
+    new_fat_size: u32,
+) -> Result<()> {
+    if new_fat_size <= old_fat_size {
+        return Ok(());
+    }
+
+    let fat1_start = fat_copy_start(boot, 0, new_fat_size);
+    let free_sector = vec![0u8; boot.bytes_per_sector() as usize];
+    for sector_offset in old_fat_size..new_fat_size {
+        device.write_sector(fat1_start + sector_offset as u64, &free_sector)?;
+    }
+
+    Ok(())
+}
+
+/// Copy FAT1, `new_fat_size` sectors, over every other FAT copy, each laid
+/// out at `new_fat_size`. Does nothing unless the FAT grows.
+///
+/// This must be called AFTER relocation and after [`zero_fat_extension`], so
+/// the copies get FAT1 as it now stands.
+pub(crate) fn copy_fat_to_other_copies(
+    device: &Device,
+    boot: &BootSector,
+    old_fat_size: u32,
+    new_fat_size: u32,
+) -> Result<()> {
+    if new_fat_size <= old_fat_size {
+        return Ok(());
+    }
+
+    let fat1_start = fat_copy_start(boot, 0, new_fat_size);
+    for fat_number in 1..boot.num_fats() {
+        let dest_start = fat_copy_start(boot, fat_number, new_fat_size);
+        for sector_offset in 0..new_fat_size as u64 {
+            let data = device.read_sector(fat1_start + sector_offset)?;
+            device.write_sector(dest_start + sector_offset, &data)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Read the entire FAT table (one copy)
 pub fn read_fat_table(device: &Device, boot: &BootSector, fat_number: u8) -> Result<Vec<u32>> {
-    let fat_start = boot.first_fat_sector() + (fat_number as u64 * boot.fat_size() as u64);
+    let fat_start = fat_copy_start(boot, fat_number, boot.fat_size());
     let fat_sectors = boot.fat_size();
     let bytes_per_sector = boot.bytes_per_sector() as usize;
 
@@ -170,6 +240,27 @@ pub fn count_free_clusters(fat: &[u32], max_cluster: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [F-15]: the one formula for where FAT copy `n` starts, in sectors.
+    /// The resize asks with a FAT size that is not yet in the boot sector,
+    /// so the size is an argument rather than read from `boot`.
+    #[test]
+    fn fat_copy_start_counts_whole_fats_from_the_reserved_area() {
+        let boot = |reserved: u16| {
+            let mut data = vec![0u8; 512];
+            data[11..13].copy_from_slice(&512u16.to_le_bytes());
+            data[14..16].copy_from_slice(&reserved.to_le_bytes());
+            data[16] = 2;
+            data[510] = 0x55;
+            data[511] = 0xAA;
+            BootSector::from_bytes(&data).unwrap()
+        };
+        assert_eq!(fat_copy_start(&boot(32), 0, 1000), 32);
+        assert_eq!(fat_copy_start(&boot(32), 1, 1000), 1032);
+        assert_eq!(fat_copy_start(&boot(7), 1, 3), 10);
+        // Large enough that a 32-bit product would wrap.
+        assert_eq!(fat_copy_start(&boot(32), 1, u32::MAX), 32 + u32::MAX as u64);
+    }
 
     /// Safety net for [F-22]. The probe that addresses the device must accept
     /// every sector size FAT32 permits -- 1024 and 2048 included, though the

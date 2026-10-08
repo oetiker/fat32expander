@@ -7,9 +7,10 @@
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::fat32::{
-    boot_sectors_match, fat_entry, open_fat32_device, read_backup_boot_sector,
-    read_boot_sector_for_recovery, read_fat_table, read_fsinfo, write_backup_boot_sector,
-    write_boot_sector, write_fsinfo, BootSector, FSInfo,
+    boot_sectors_match, copy_fat_to_other_copies, fat_entry, open_fat32_device,
+    read_backup_boot_sector, read_boot_sector_for_recovery, read_fat_table, read_fsinfo,
+    write_backup_boot_sector, write_boot_sector, write_fsinfo, zero_fat_extension, BootSector,
+    FSInfo,
 };
 use crate::resize::calculator::{calculate_new_size, SizeCalculation};
 use crate::resize::checkpoint::{
@@ -542,12 +543,24 @@ fn write_fat_extension(
 
     maybe_crash_at("after_boot_invalidate");
 
-    // Initialize new FAT1 sectors
-    init_new_fat_sectors(device, &boot, calculation)?;
+    // Both after relocation: the FAT1 extension is zeroed over sectors the
+    // data has just moved out of, and the copies take FAT1 as it now stands.
+    // The FAT sizes come from the calculation, because `boot` still carries
+    // the old geometry until the commit ([F-15]).
+    zero_fat_extension(
+        device,
+        &boot,
+        calculation.old_fat_size,
+        calculation.new_fat_size,
+    )?;
     report.step("Initialized new FAT sectors".to_string());
 
-    // Sync FAT1 to FAT2
-    sync_fat_copies(device, &boot, calculation)?;
+    copy_fat_to_other_copies(
+        device,
+        &boot,
+        calculation.old_fat_size,
+        calculation.new_fat_size,
+    )?;
     report.step("Synced FAT copies".to_string());
 
     // [F-R17]: the checkpoint written below is a promise that the FAT
@@ -689,68 +702,6 @@ fn free_clusters_after_resize(
         .new_data_clusters
         .saturating_sub(old_data_clusters);
     old_free.saturating_add(additional_clusters)
-}
-
-/// Initialize new FAT sectors with free entries (zeros).
-///
-/// This must be called AFTER relocation, and the order is not a preference.
-/// The sectors this zeroes -- FAT1's extension, from `old_fat_size` to
-/// `new_fat_size` -- are physically the sectors relocation has just vacated
-/// and moved cluster data out of. Running it first would zero the region
-/// while it still holds live cluster data, and relocation would then copy
-/// that data forward from an area this function had already erased.
-///
-/// [F-R16]: this doc said the exact opposite ("must be called BEFORE
-/// relocation so that reading new FAT sectors returns valid data") while the
-/// call site had it right, and the correct `sync_fat_copies` doc immediately
-/// below made the wrong one easy to trust. Nothing enforces the order but
-/// the call site in `resize_fat32` ([F-R15]).
-fn init_new_fat_sectors(device: &Device, boot: &BootSector, calc: &SizeCalculation) -> Result<()> {
-    let bytes_per_sector = boot.bytes_per_sector() as usize;
-
-    if calc.new_fat_size <= calc.old_fat_size {
-        return Ok(()); // No extension needed
-    }
-
-    let fat1_start = boot.first_fat_sector();
-
-    // Create a sector of free entries
-    let free_sector = vec![0u8; bytes_per_sector];
-
-    // Initialize new sectors of FAT1 with free entries
-    for sector_offset in calc.old_fat_size..calc.new_fat_size {
-        let sector = fat1_start + sector_offset as u64;
-        device.write_sector(sector, &free_sector)?;
-    }
-
-    Ok(())
-}
-
-/// Sync FAT1 to FAT2 (and any additional FAT copies)
-/// This must be called AFTER relocation so that FAT2 gets the updated entries
-fn sync_fat_copies(device: &Device, boot: &BootSector, calc: &SizeCalculation) -> Result<()> {
-    if calc.new_fat_size <= calc.old_fat_size {
-        return Ok(()); // No extension needed
-    }
-
-    let fat1_start = boot.first_fat_sector();
-
-    // Copy the entire FAT1 to FAT2 (and any additional FAT copies)
-    // FAT2 starts right after FAT1's NEW size
-    for fat_num in 1..boot.num_fats() {
-        let fat_dest_start = fat1_start + (fat_num as u64 * calc.new_fat_size as u64);
-
-        // Copy all sectors from FAT1 to this FAT copy
-        for sector_offset in 0..calc.new_fat_size {
-            let src_sector = fat1_start + sector_offset as u64;
-            let dest_sector = fat_dest_start + sector_offset as u64;
-
-            let data = device.read_sector(src_sector)?;
-            device.write_sector(dest_sector, &data)?;
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

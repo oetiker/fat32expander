@@ -269,6 +269,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** `init_new_fat_sectors` and `sync_fat_copies` compute FAT-copy positions in `resize`, while `read_fat_table` holds the same formula in `fat32`; no FAT write lives in `fat32::operations`. Both copies are correct today.
 - **Evidence:** `src/resize/executor.rs:694-740`, excerpt: "let fat_dest_start = fat1_start + (fat_num as u64 * calc.new_fat_size as u64);"; `src/fat32/operations.rs:107` "boot.first_fat_sector() + (fat_number as u64 * boot.fat_size() as u64)"
 - **Found by:** Structure & Boundaries, Coupling & Dependencies, Integration & Data. Continues [F-R37].
+- **Status:** Fixed
+- **Status reason:** `fat_copy_start(boot, n, fat_size)` in `fat32::operations` is the one FAT layout formula; `read_fat_table` calls it with the boot sector's FAT size, the resize with the new one. `init_new_fat_sectors`/`sync_fat_copies` moved out of `executor.rs` into `operations.rs` as crate-private `zero_fat_extension` and `copy_fat_to_other_copies`, called from the same place. Safety net `tests/fat_io_test.rs` covers one- and two-FAT volumes (mutation-checked).
+- **Status date:** 2026-10-08 UTC
+- **Status commit:** pending
 
 ### [F-16] Checkpoint versioning fails open
 - **Category:** 20 Weak error handling strategy

@@ -27,6 +27,10 @@ pub use structs::{fat_entry, BootSector, FSInfo};
 // cluster-renumbering design, which the current data-shift approach does not
 // need, and being `pub` in a library exempted them from the dead-code lint.
 // `count_free_clusters` was deliberately kept -- see the note on it.
+// [F-15]: the FAT writes of a resize live beside `read_fat_table`, but are
+// not part of the public API.
+pub(crate) use operations::{copy_fat_to_other_copies, zero_fat_extension};
+
 pub use operations::{
     bootstrap_sector_size, count_free_clusters, open_fat32_device, read_backup_boot_sector,
     read_boot_sector, read_boot_sector_for_recovery, read_fat_table, read_fsinfo,
