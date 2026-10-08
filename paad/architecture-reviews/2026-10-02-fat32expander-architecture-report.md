@@ -357,6 +357,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** Names repeat across `executor.rs`, `fault.rs`, TECHGUIDE, the QEMU script and the crash tests; a typo gives a crash point that silently never fires.
 - **Evidence:** `src/resize/executor.rs:474,495,508,534,554,567`, excerpt: "maybe_crash_at(\"after_checkpoint_start\")"; `src/resize/fault.rs:23-29`
 - **Found by:** Structure & Boundaries
+- **Status:** Fixed
+- **Status reason:** `CrashPoint` in `fault.rs` has a variant per crash point and `name()` gives the unchanged `FAT32_CRASH_AT` spelling; the executor calls `maybe_crash_at(CrashPoint::…)`, so a misspelt point no longer compiles. The other files cannot use the enum, so `every_file_naming_crash_points_names_exactly_the_real_ones` checks that the QEMU script's `CRASH_POINTS`, the whole script, TECHGUIDE.md and `tests/crash_recovery_test.rs` each name exactly `CrashPoint::ALL` (mutation-checked with a typo in TECHGUIDE).
+- **Status date:** 2026-10-08 UTC
+- **Status commit:** pending
 
 ### [F-24] Hand-written byte offsets and repeated unit literals
 - **Category:** 28 Magic numbers/strings

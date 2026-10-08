@@ -18,7 +18,7 @@ use crate::resize::checkpoint::{
     CheckpointSlot, ResizeCheckpoint, ResizePhase,
 };
 use crate::resize::events::{Reporter, ResizeEvent};
-use crate::resize::fault::maybe_crash_at;
+use crate::resize::fault::{maybe_crash_at, CrashPoint};
 use crate::resize::options::{ResizeOptions, ResizeResult};
 use crate::resize::relocator::{
     execute_relocation, plan_relocation, RelocationPlan, ShiftProgress,
@@ -490,7 +490,7 @@ fn shift_cluster_data(
         record.slot.sector()
     ));
 
-    maybe_crash_at("after_checkpoint_start");
+    maybe_crash_at(CrashPoint::AfterCheckpointStart);
 
     // Execute data shift, recording how far it has got as it descends so a
     // crash here can be resumed rather than replayed from the beginning.
@@ -507,14 +507,14 @@ fn shift_cluster_data(
     let clusters_relocated = plan.cluster_count();
     report.step(format!("Shifted {} clusters forward", clusters_relocated));
 
-    maybe_crash_at("after_data_shift");
+    maybe_crash_at(CrashPoint::AfterDataShift);
 
     // Update checkpoint to phase 1
     let checkpoint = calculation.checkpoint(ResizePhase::DataCopied, boot.volume_id());
     write_checkpoint(device, record.slot, &checkpoint)?;
     report.step("Updated checkpoint (phase 1: data copied)".to_string());
 
-    maybe_crash_at("after_checkpoint_data_copied");
+    maybe_crash_at(CrashPoint::AfterCheckpointDataCopied);
 
     Ok(DataShifted { clusters_relocated })
 }
@@ -541,7 +541,7 @@ fn write_fat_extension(
     device.sync()?;
     report.step("Invalidated boot sector (danger zone)".to_string());
 
-    maybe_crash_at("after_boot_invalidate");
+    maybe_crash_at(CrashPoint::AfterBootInvalidate);
 
     // Both after relocation: the FAT1 extension is zeroed over sectors the
     // data has just moved out of, and the copies take FAT1 as it now stands.
@@ -573,14 +573,14 @@ fn write_fat_extension(
     device.sync()?;
     report.step("Flushed FAT writes".to_string());
 
-    maybe_crash_at("after_fat_write");
+    maybe_crash_at(CrashPoint::AfterFatWrite);
 
     // Update checkpoint to phase 2
     let checkpoint = calculation.checkpoint(ResizePhase::FatWritten, boot.volume_id());
     write_checkpoint(device, checkpoint_slot, &checkpoint)?;
     report.step("Updated checkpoint (phase 2: FAT written)".to_string());
 
-    maybe_crash_at("after_checkpoint_fat_written");
+    maybe_crash_at(CrashPoint::AfterCheckpointFatWritten);
 
     Ok(FatExtended { boot })
 }
@@ -648,7 +648,7 @@ fn commit_new_geometry(
     device.sync()?;
     report.step("Flushed supporting structures".to_string());
 
-    maybe_crash_at("before_primary_boot_write");
+    maybe_crash_at(CrashPoint::BeforePrimaryBootWrite);
 
     write_boot_sector(device, &boot)?;
     report.step("Updated boot sector (signature restored)".to_string());
