@@ -290,7 +290,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** Deleted `Device::write_bytes_at` and `Device::size_bytes`, both `as_bytes_mut`, `BootSector::set_root_cluster`, `BootSector::fs_type` and `FSInfo::set_next_free`; `read_bytes_at` is `#[cfg(test)]`. `check_root`'s doc now says it is informational and that nothing requires root ([F-R46]). Developer's choice: `check_root`, `get_block_device_size` and `Device::open_readonly_with_sector_size` stay exported, because `tests/public_api_test.rs` pins them as supported API; removing them is an API decision, not dead-code cleanup. `RelocationPlan::is_empty` was already `#[cfg(test)]` ([F-20]).
 - **Status date:** 2026-10-08 UTC
-- **Status commit:** pending
+- **Status commit:** 228acba
 
 ### [F-18] FAT held twice in memory, with a stale chunk comment and a per-sector copy loop
 - **Category:** 8 Premature optimization
