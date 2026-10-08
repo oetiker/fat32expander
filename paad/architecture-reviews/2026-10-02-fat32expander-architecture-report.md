@@ -370,6 +370,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** `lib.rs` says root items change only with a major version, yet `Error`, `ResizeResult` and `SizeCalculation` can be matched or constructed exhaustively, and `Error` has already gained and lost variants.
 - **Evidence:** `src/lib.rs:12-13`, excerpt: "They change only with a major version."; `grep non_exhaustive src` → only `finish_non_exhaustive`
 - **Found by:** Integration & Data
+- **Status:** Fixed
+- **Status reason:** `Error` and `ResizeResult` are `#[non_exhaustive]`; `ResizeEvent` already was ([F-08]) and `SizeCalculation` is no longer public ([F-09]). The other root types have private fields. `exit_code_for` in `main.rs` gained a wildcard arm; the compile-time "every variant has an exit code" guard it gave up moved into `every_variant_is_listed` in `src/error.rs`, an in-crate exhaustive match (verified by adding a probe variant: the lib tests stop compiling). `every_error_variant_keeps_its_exit_code` pins all 28 codes. The `lib.rs` API doc states the rule.
+- **Status date:** 2026-10-08 UTC
+- **Status commit:** pending
 
 ### [F-27] Library carries CLI-only dependencies
 - **Category:** 31 Dead code / unused dependencies

@@ -1,7 +1,13 @@
 use thiserror::Error;
 
 /// All errors that can occur during FAT32 resize operations
+///
+/// `#[non_exhaustive]` ([F-26]): a new variant is not a breaking change for a
+/// caller, who must match with a wildcard arm. Inside this crate the match
+/// stays exhaustive; `every_variant_is_listed` makes a new variant a compile
+/// error until it has an exit code.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// A device could not be opened. The underlying `io::Error` is kept as the
     /// source rather than discarded: "not found", "permission denied" and
@@ -230,6 +236,46 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [F-26]: `Error` is `#[non_exhaustive]`, so the `fat32expander` binary
+    /// maps it to exit codes with a wildcard arm and the compiler no longer
+    /// flags a new variant there. This match is exhaustive because it is inside
+    /// the crate. When it stops compiling, give the new variant an exit code in
+    /// `exit_code_for` in `src/main.rs` and a row in
+    /// `every_error_variant_keeps_its_exit_code`, then list it here.
+    #[allow(dead_code)]
+    fn every_variant_is_listed(e: &Error) {
+        match e {
+            Error::DeviceOpen { .. }
+            | Error::DeviceMounted(..)
+            | Error::DeviceBusy(_)
+            | Error::InvalidFAT32(_)
+            | Error::BootSectorValidation(_)
+            | Error::BootSectorInvalidated
+            | Error::FSInfoValidation(_)
+            | Error::BackupMismatch
+            | Error::DeviceTooSmall { .. }
+            | Error::AlreadyMaxSize
+            | Error::Io(_)
+            | Error::DeviceIo { .. }
+            | Error::DeviceSync { .. }
+            | Error::SectorLengthMismatch { .. }
+            | Error::SectorOutOfBounds { .. }
+            | Error::Calculation(_)
+            | Error::Relocation(_)
+            | Error::UnsupportedSectorSize(_)
+            | Error::CheckpointCorrupted
+            | Error::InvalidatedFilesystem
+            | Error::ResizeSizeMismatch(_)
+            | Error::CheckpointMismatch { .. }
+            | Error::CheckpointVersionUnsupported(_)
+            | Error::CheckpointVolumeMismatch { .. }
+            | Error::CheckpointOutsideDevice { .. }
+            | Error::CheckpointGeometryUnusable { .. }
+            | Error::ShiftProgressMissing
+            | Error::MountTableUnreadable { .. } => {}
+        }
+    }
 
     /// [F-22]: the message listed two of the four sizes FAT32 permits.
     #[test]

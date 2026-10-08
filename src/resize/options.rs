@@ -78,7 +78,11 @@ impl ResizeOptions {
 }
 
 /// Result of a resize operation
+///
+/// `#[non_exhaustive]` ([F-26]): only the library builds one, so a new field
+/// is not a breaking change for a caller who reads them.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ResizeResult {
     /// Old filesystem size in bytes
     pub old_size_bytes: u64,

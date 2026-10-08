@@ -32,6 +32,10 @@
 //! `SizeCalculation` is not exported either ([F-09]). `ResizeResult` used to
 //! hand one out, which made every member public, read or not; it now carries
 //! the four geometry numbers a caller has a use for as plain fields.
+//!
+//! [F-26]: `Error`, `ResizeResult` and `ResizeEvent` are `#[non_exhaustive]`,
+//! so a new error variant, result field or event is not a breaking change.
+//! Match them with a wildcard arm, and read `ResizeResult` by field.
 
 mod device;
 mod error;

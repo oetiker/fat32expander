@@ -297,6 +297,10 @@ fn exit_code_for(err: &anyhow::Error) -> u8 {
         Error::SectorOutOfBounds { .. } => exit::INTERNAL,
 
         Error::Calculation(_) | Error::Relocation(_) => exit::INTERNAL,
+
+        // `Error` is `#[non_exhaustive]` ([F-26]). A variant added without an
+        // arm here fails `every_variant_is_listed` in `src/error.rs` first.
+        _ => exit::INTERNAL,
     }
 }
 
