@@ -619,4 +619,123 @@ mod tests {
         assert_eq!(code(e), exit::MOUNT_STATE_UNKNOWN);
         assert_eq!(exit::MOUNT_STATE_UNKNOWN, 12);
     }
+
+    /// Safety net for [F-26]: every error variant keeps its exit code. The
+    /// match in `exit_code_for` is exhaustive today, so a new variant cannot
+    /// compile without a code; marking `Error` `#[non_exhaustive]` would need a
+    /// wildcard arm there, and this table is what notices a variant falling
+    /// into it. Literal numbers, not the `exit` constants: the codes are an ABI.
+    #[test]
+    fn every_error_variant_keeps_its_exit_code() {
+        let io = || std::io::Error::from(std::io::ErrorKind::Other);
+        let s = || "x".to_string();
+        let table: Vec<(Error, u8)> = vec![
+            (
+                Error::DeviceOpen {
+                    path: s(),
+                    source: io(),
+                },
+                3,
+            ),
+            (Error::DeviceMounted(s(), s()), 4),
+            (Error::DeviceBusy(s()), 4),
+            (Error::InvalidFAT32(s()), 5),
+            (Error::BootSectorValidation(s()), 5),
+            (Error::BootSectorInvalidated, 9),
+            (Error::FSInfoValidation(s()), 5),
+            (Error::BackupMismatch, 8),
+            (
+                Error::DeviceTooSmall {
+                    current: 1,
+                    minimum: 2,
+                },
+                7,
+            ),
+            (Error::AlreadyMaxSize, 0),
+            (Error::Io(io()), 10),
+            (
+                Error::DeviceIo {
+                    op: "read",
+                    path: s(),
+                    offset: 0,
+                    sector: 0,
+                    len: 1,
+                    source: io(),
+                },
+                10,
+            ),
+            (
+                Error::DeviceSync {
+                    path: s(),
+                    source: io(),
+                },
+                10,
+            ),
+            (
+                Error::SectorLengthMismatch {
+                    path: s(),
+                    expected: 512,
+                    actual: 1,
+                },
+                10,
+            ),
+            (
+                Error::SectorOutOfBounds {
+                    path: s(),
+                    sector: 9,
+                    count: 1,
+                    total_sectors: 8,
+                },
+                1,
+            ),
+            (Error::Calculation(s()), 1),
+            (Error::Relocation(s()), 1),
+            (Error::UnsupportedSectorSize(3), 5),
+            (Error::CheckpointCorrupted, 9),
+            (Error::InvalidatedFilesystem, 9),
+            (Error::ResizeSizeMismatch(1), 9),
+            (
+                Error::CheckpointMismatch {
+                    old_total_sectors: 1,
+                    new_total_sectors: 2,
+                    old_fat_size: 1,
+                    new_fat_size: 2,
+                    boot_total_sectors: 3,
+                    boot_fat_size: 3,
+                },
+                9,
+            ),
+            (Error::CheckpointVersionUnsupported(3), 9),
+            (Error::CheckpointVolumeMismatch { record: 1, boot: 2 }, 9),
+            (
+                Error::CheckpointOutsideDevice {
+                    sector: 9,
+                    device_sectors: 8,
+                },
+                9,
+            ),
+            (
+                Error::CheckpointGeometryUnusable {
+                    new_total_sectors: 1,
+                    new_fat_size: 1,
+                },
+                9,
+            ),
+            (Error::ShiftProgressMissing, 9),
+            (
+                Error::MountTableUnreadable {
+                    device: s(),
+                    source: io(),
+                },
+                12,
+            ),
+        ];
+
+        for (err, expected) in table {
+            let name = format!("{err:?}");
+            assert_eq!(code(err), expected, "exit code of {name}");
+        }
+        // Not one of our errors at all.
+        assert_eq!(exit_code_for(&anyhow::anyhow!("context only")), 1);
+    }
 }
