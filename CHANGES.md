@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - used `let-else` pattern for cleaner checkpoint parsing
 
 ### Fixed
+- When `fat32expander resize` failed, it printed only the error, so there was no record of what it had already changed on the device. It now lists the completed steps under "Operations performed before the failure:" on stderr before the error. The exit codes do not change.
 - A recovery record left in the last sector of a device that was reformatted afterwards could be taken for an interrupted resize of the new filesystem when the sizes matched, and the resize then moved data that was never meant to move. The record now names its filesystem, and a record of another filesystem is ignored with "Ignoring a resize checkpoint at sector ...: it was left by another filesystem" and the resize runs normally.
 - A recovery record written by a newer version of `fat32expander` was ignored, and the resize started over on a filesystem that was half resized. It is now refused with "...checkpoint in format version ..., which this build does not know" and exit code 9. Versions before this one cannot read the records this version writes, so finish an interrupted resize with the version that started it.
 - Resizing a filesystem whose FAT marked no cluster as in use, not even the root directory, enlarged the FAT without writing it. The two FAT copies then differed, and the first could mark a cluster as in use that held no data. Both copies are now written in full, as in every other resize that enlarges the FAT.

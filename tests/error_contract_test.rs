@@ -1193,3 +1193,40 @@ fn a_quiet_cli_resize_omits_the_verbose_detail() {
         );
     }
 }
+
+/// [F-07]: the list of completed steps used to be printed only after a
+/// successful resize, so a failed one left no record of how far it got. A
+/// refusal here comes after the device was opened and read.
+#[test]
+fn a_failed_resize_lists_the_steps_it_completed() {
+    let image = image_with_mismatched_backup(96, 64);
+    let output = run_resize(image.path());
+    let stderr = stderr_of(&output);
+
+    assert_eq!(output.status.code(), Some(8), "stderr:\n{stderr}");
+    for expected in [
+        "Operations performed before the failure:",
+        "Verified device is not mounted",
+        "Read boot sector",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "a failed resize must report {expected:?} on stderr.\nstderr:\n{stderr}"
+        );
+    }
+}
+
+/// [F-07]: "nothing to do" travels as an error but is not a failure, so it
+/// gets no failure report.
+#[test]
+fn a_resize_with_nothing_to_do_reports_no_failure() {
+    let image = valid_image(64, 64);
+    let output = run_resize(image.path());
+    let combined = combined_output(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output:\n{combined}");
+    assert!(
+        !combined.contains("before the failure"),
+        "output:\n{combined}"
+    );
+}

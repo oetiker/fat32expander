@@ -482,8 +482,28 @@ fn run() -> Result<()> {
                 .verbose(verbose)
                 .ignore_backup_mismatch(ignore_backup_mismatch);
 
-            let result = resize_fat32_with_events(options, &mut print_event)
-                .with_context(|| format!("Failed to resize filesystem on {}", device))?;
+            // [F-07]: the steps are kept as they arrive, so a resize that
+            // fails still shows how far it got -- whether the boot sector was
+            // already invalidated, for one. "Nothing to do" is not a failure.
+            let mut steps = Vec::new();
+            let outcome = resize_fat32_with_events(options, &mut |event| {
+                if let ResizeEvent::Step(step) = event {
+                    steps.push(step.clone());
+                }
+                print_event(event);
+            });
+            if outcome.is_err()
+                && !matches!(outcome, Err(Error::AlreadyMaxSize))
+                && !steps.is_empty()
+            {
+                eprintln!("Operations performed before the failure:");
+                for step in &steps {
+                    eprintln!("  - {}", step);
+                }
+                eprintln!();
+            }
+            let result =
+                outcome.with_context(|| format!("Failed to resize filesystem on {}", device))?;
 
             // Print results
             println!();

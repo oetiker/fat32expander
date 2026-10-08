@@ -181,6 +181,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** The audit trail is a local `Vec` returned only inside `Ok(ResizeResult)`; every `?` drops it, exactly when a record of the mutations already done matters.
 - **Evidence:** `src/resize/executor.rs:137`, excerpt: "let mut operations = Vec::new();"; `executor.rs:184-191` "Ok(ResizeResult { ... operations, })"
 - **Found by:** Error Handling & Observability. Continues [F-R19].
+- **Status:** Fixed
+- **Status reason:** Each step reaches the caller as a `ResizeEvent::Step` while the resize runs ([F-08]), so a library caller keeps them whatever the outcome. The CLI collects them and, on a failure other than "nothing to do", prints "Operations performed before the failure:" on stderr before the error.
+- **Status date:** 2026-10-08 UTC
+- **Status commit:** pending
 
 ### [F-08] No logging facade; the library writes to stderr directly
 - **Category:** 21 No observability plan
