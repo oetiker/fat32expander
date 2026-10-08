@@ -384,7 +384,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** `clap` and `anyhow` are optional and enabled by a new default `cli` feature, which the `[[bin]]` requires. A library consumer opts out with `default-features = false`; `cargo build`, `cargo install`, the release workflow and the `CARGO_BIN_EXE` tests are unchanged. CI and the gate run `cargo check --lib --no-default-features`, the check that `lib.rs` does not use either crate; `tests/manifest_test.rs` pins the manifest shape and that CI step.
 - **Status date:** 2026-10-08 UTC
-- **Status commit:** pending
+- **Status commit:** 38ddc01
 
 ### [F-28] Build hash goes stale after a commit
 - **Category:** 21 No observability plan (build provenance)
