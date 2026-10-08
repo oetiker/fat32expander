@@ -191,7 +191,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** The library reports through `ResizeEvent`s handed to a caller's callback (`resize_fat32_with_events`; `resize_fat32` drops them) and prints nothing; `verbose` selects the detail events and the relocator takes the reporter instead of a `bool`. The CLI owns the output and its rule: events during the run to stderr, the finished report to stdout. Only the `fault-injection` crash line still prints from the library.
 - **Status date:** 2026-10-08 UTC
-- **Status commit:** 21bb84a
+- **Status commit:** e686c9b
 
 ### [F-09] `SizeCalculation` is a public data bag with dead and misleading members
 - **Category:** 10 Feature envy / anemic domain model
