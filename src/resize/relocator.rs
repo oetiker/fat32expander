@@ -2,6 +2,7 @@ use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::fat32::{fat_entry, BootSector};
 use crate::resize::checkpoint::PROGRESS_RECORD_EVERY;
+use crate::resize::events::{Reporter, ResizeEvent};
 
 /// A planned cluster relocation representing physical sector movement
 ///
@@ -237,7 +238,7 @@ pub fn execute_relocation(
     boot: &BootSector,
     plan: &RelocationPlan,
     progress: &mut ShiftProgress,
-    verbose: bool,
+    report: &mut Reporter,
 ) -> Result<()> {
     let sectors_per_cluster = boot.sectors_per_cluster() as u32;
 
@@ -250,22 +251,13 @@ pub fn execute_relocation(
         .unwrap_or(plan.moves.len());
     let remaining = &plan.moves[start..];
 
-    if verbose {
-        eprintln!(
-            "Shifting data forward: {} of {} clusters need movement",
-            remaining.len(),
-            plan.moves.len()
-        );
-        eprintln!("  Old first data sector: {}", plan.old_first_data_sector);
-        eprintln!("  New first data sector: {}", plan.new_first_data_sector);
-        if remaining.len() != plan.moves.len() {
-            eprintln!(
-                "  Resuming at cluster {} ({} already shifted)",
-                progress.resume_from,
-                plan.moves.len() - remaining.len()
-            );
-        }
-    }
+    report.detail(ResizeEvent::ShiftStarting {
+        remaining: remaining.len(),
+        total: plan.moves.len(),
+        old_first_data_sector: plan.old_first_data_sector,
+        new_first_data_sector: plan.new_first_data_sector,
+        resumed_at: (remaining.len() != plan.moves.len()).then_some(progress.resume_from),
+    });
 
     let record_every = progress.record_every.max(1);
     let mut last_recorded: Option<u32> = None;
@@ -287,15 +279,14 @@ pub fn execute_relocation(
             last_recorded = Some(mv.from_cluster);
         }
 
-        if verbose && (i < 10 || i % 100 == 0 || i == remaining.len() - 1) {
-            eprintln!(
-                "Moving cluster {} from sector {} to sector {} ({}/{})",
-                mv.from_cluster,
-                mv.from_sector,
-                mv.to_sector,
-                i + 1,
-                remaining.len()
-            );
+        if report.wants_detail() {
+            report.detail(ResizeEvent::ClusterMoved {
+                cluster: mv.from_cluster,
+                from_sector: mv.from_sector,
+                to_sector: mv.to_sector,
+                done: i + 1,
+                of: remaining.len(),
+            });
         }
 
         // Read from old position
@@ -403,7 +394,7 @@ mod tests {
             record_every: u32::MAX,
             record: &mut record,
         };
-        execute_relocation(device, boot, plan, &mut progress, false)
+        execute_relocation(device, boot, plan, &mut progress, &mut Reporter::silent())
     }
 
     /// The relocator's idea of where the data area moves to must be the same as
@@ -663,7 +654,14 @@ mod tests {
                 record_every: 1,
                 record: &mut record,
             };
-            execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap_err()
+            execute_relocation(
+                &device,
+                &old_boot,
+                &plan,
+                &mut progress,
+                &mut Reporter::silent(),
+            )
+            .unwrap_err()
         };
         assert!(matches!(err, Error::Relocation(_)), "expected the abort");
 
@@ -678,7 +676,14 @@ mod tests {
             record_every: 1,
             record: &mut record,
         };
-        execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap();
+        execute_relocation(
+            &device,
+            &old_boot,
+            &plan,
+            &mut progress,
+            &mut Reporter::silent(),
+        )
+        .unwrap();
 
         assert_all_landed(&device, &new_boot, &in_use);
     }
@@ -716,7 +721,14 @@ mod tests {
                 record_every: 2,
                 record: &mut record,
             };
-            execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap_err();
+            execute_relocation(
+                &device,
+                &old_boot,
+                &plan,
+                &mut progress,
+                &mut Reporter::silent(),
+            )
+            .unwrap_err();
         }
         assert_eq!(recorded, vec![9, 7]);
 
@@ -726,7 +738,14 @@ mod tests {
             record_every: 2,
             record: &mut record,
         };
-        execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap();
+        execute_relocation(
+            &device,
+            &old_boot,
+            &plan,
+            &mut progress,
+            &mut Reporter::silent(),
+        )
+        .unwrap();
 
         assert_all_landed(&device, &new_boot, &in_use);
     }
@@ -764,7 +783,14 @@ mod tests {
                 record_every: 2,
                 record: &mut record,
             };
-            execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap_err();
+            execute_relocation(
+                &device,
+                &old_boot,
+                &plan,
+                &mut progress,
+                &mut Reporter::silent(),
+            )
+            .unwrap_err();
         }
         assert_eq!(recorded, vec![10]);
 
@@ -774,7 +800,14 @@ mod tests {
             record_every: 2,
             record: &mut record,
         };
-        execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap();
+        execute_relocation(
+            &device,
+            &old_boot,
+            &plan,
+            &mut progress,
+            &mut Reporter::silent(),
+        )
+        .unwrap();
 
         assert_all_landed(&device, &new_boot, &in_use);
     }
@@ -871,7 +904,14 @@ mod tests {
                 record_every: 1,
                 record: &mut record,
             };
-            execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap();
+            execute_relocation(
+                &device,
+                &old_boot,
+                &plan,
+                &mut progress,
+                &mut Reporter::silent(),
+            )
+            .unwrap();
         }
         assert_eq!(recorded, vec![9, 8, 7, 6, 5, 4, 3, 2]);
 
@@ -887,7 +927,14 @@ mod tests {
                 record_every: u32::MAX,
                 record: &mut record,
             };
-            execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap();
+            execute_relocation(
+                &device,
+                &old_boot,
+                &plan,
+                &mut progress,
+                &mut Reporter::silent(),
+            )
+            .unwrap();
         }
         assert_eq!(recorded, vec![9]);
     }
@@ -917,7 +964,14 @@ mod tests {
             record_every: 1,
             record: &mut record,
         };
-        execute_relocation(&device, &old_boot, &plan, &mut progress, false).unwrap();
+        execute_relocation(
+            &device,
+            &old_boot,
+            &plan,
+            &mut progress,
+            &mut Reporter::silent(),
+        )
+        .unwrap();
 
         assert_eq!(
             device

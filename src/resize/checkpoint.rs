@@ -65,6 +65,15 @@ pub enum ResizePhase {
 }
 
 impl ResizePhase {
+    /// The phase's name, as reported to the caller ([F-08]).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Started => "Started",
+            Self::DataCopied => "DataCopied",
+            Self::FatWritten => "FatWritten",
+        }
+    }
+
     fn from_u8(val: u8) -> Option<Self> {
         match val {
             0 => Some(Self::Started),

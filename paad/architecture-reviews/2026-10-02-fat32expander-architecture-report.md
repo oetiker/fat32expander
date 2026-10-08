@@ -188,6 +188,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** 14 `eprintln!` in `executor.rs` and 5 in `relocator.rs`, with `verbose: bool` threaded into `execute_relocation`; "Resuming interrupted resize ..." prints even without verbose. The CLI's verbose output goes to stdout, the library's to stderr, with no rule.
 - **Evidence:** `src/resize/executor.rs:225-228`, excerpt: "eprintln!(\"Resuming interrupted resize from phase {:?}...\", checkpoint.phase);"; `src/resize/relocator.rs:203,216-248`; `src/main.rs:347-350` "println!(\"Current filesystem state:\")"
 - **Found by:** Structure & Boundaries, Coupling & Dependencies, Error Handling & Observability. Continues [F-R21], [F-R53].
+- **Status:** Fixed
+- **Status reason:** The library reports through `ResizeEvent`s handed to a caller's callback (`resize_fat32_with_events`; `resize_fat32` drops them) and prints nothing; `verbose` selects the detail events and the relocator takes the reporter instead of a `bool`. The CLI owns the output and its rule: events during the run to stderr, the finished report to stdout. Only the `fault-injection` crash line still prints from the library.
+- **Status date:** 2026-10-08 UTC
+- **Status commit:** 21bb84a
 
 ### [F-09] `SizeCalculation` is a public data bag with dead and misleading members
 - **Category:** 10 Feature envy / anemic domain model

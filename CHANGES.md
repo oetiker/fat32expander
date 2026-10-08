@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### New
+- Programs that use `fat32expander` as a library can follow a resize as it runs: `resize_fat32_with_events` reports each step, a resumed or ignored recovery record, and, with `verbose`, the layout and every cluster moved. The library no longer writes these messages to the terminal itself; the `fat32expander` command prints them as before.
 - added a note to the readme why we are not shrinking
 - added `ClusterId` and `SectorNum` newtype wrappers for improved type safety
 - added `Debug` trait implementation for `Device`

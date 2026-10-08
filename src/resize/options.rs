@@ -31,7 +31,10 @@ impl ResizeOptions {
         self
     }
 
-    /// Enable or disable verbose output
+    /// Report the detail of the resize -- layout, shift plan, every cluster
+    /// moved -- to the callback of
+    /// [`resize_fat32_with_events`](crate::resize_fat32_with_events), not
+    /// only its steps. Nothing is printed either way ([F-08]).
     pub fn verbose(mut self, enable: bool) -> Self {
         self.verbose = enable;
         self

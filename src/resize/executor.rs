@@ -16,6 +16,7 @@ use crate::resize::checkpoint::{
     check_for_incomplete_resize, clear_checkpoint, mark_checkpoint_slot, write_checkpoint,
     CheckpointSlot, ResizeCheckpoint, ResizePhase,
 };
+use crate::resize::events::{Reporter, ResizeEvent};
 use crate::resize::fault::maybe_crash_at;
 use crate::resize::options::{ResizeOptions, ResizeResult};
 use crate::resize::relocator::{
@@ -132,9 +133,22 @@ struct Prepared {
     record: ResizeRecord,
 }
 
-/// Main resize function with crash-safe checkpoint support
+/// Main resize function with crash-safe checkpoint support.
+///
+/// Reports nothing; [`resize_fat32_with_events`] is the same resize with a
+/// callback for its progress.
 pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
-    let mut operations = Vec::new();
+    resize_fat32_with_events(options, &mut |_| {})
+}
+
+/// [`resize_fat32`], reporting each step and, with
+/// [`ResizeOptions::verbose`], the detail of the resize to `on_event` as it
+/// happens ([F-08]). The library itself prints nothing.
+pub fn resize_fat32_with_events(
+    options: ResizeOptions,
+    on_event: &mut dyn FnMut(&ResizeEvent),
+) -> Result<ResizeResult> {
+    let mut report = Reporter::new(on_event, options.is_verbose());
     let Prepared {
         device,
         boot,
@@ -143,11 +157,17 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         calculation,
         fat,
         record,
-    } = prepare_resize(&options, &mut operations)?;
+    } = prepare_resize(&options, &mut report)?;
 
-    if options.is_verbose() {
-        print_verbose_resize_info(&boot, &calculation);
-    }
+    report.detail(ResizeEvent::Layout {
+        old_total_sectors: calculation.old_total_sectors,
+        old_fat_size: calculation.old_fat_size,
+        old_data_clusters: boot.data_clusters(),
+        new_total_sectors: calculation.new_total_sectors,
+        new_fat_size: calculation.new_fat_size,
+        new_data_clusters: calculation.new_data_clusters,
+        fat_needs_growth: calculation.fat_needs_growth,
+    });
 
     fsinfo.set_free_count(free_clusters_after_resize(&boot, &calculation, &fat));
     // The commit writes FSInfo without the checkpoint mark, which retires it
@@ -167,7 +187,7 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         &fat,
         &record,
         &options,
-        &mut operations,
+        &mut report,
     )?;
 
     // Phase 2.
@@ -179,10 +199,10 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
             &fsinfo,
             backup_sector,
             &record,
-            &mut operations,
+            &mut report,
         )?;
     } else {
-        operations.push("Dry run: no changes made".to_string());
+        report.step("Dry run: no changes made");
     }
 
     Ok(ResizeResult {
@@ -191,21 +211,21 @@ pub fn resize_fat32(options: ResizeOptions) -> Result<ResizeResult> {
         fat_grew: calculation.fat_needs_growth,
         clusters_relocated,
         calculation,
-        operations,
+        operations: report.into_operations(),
     })
 }
 
 /// Read and validate everything the resize depends on, before it changes
 /// anything.
-fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Result<Prepared> {
+fn prepare_resize(options: &ResizeOptions, report: &mut Reporter) -> Result<Prepared> {
     // Check if mounted
     check_not_mounted(options.device_path())?;
-    operations.push("Verified device is not mounted".to_string());
+    report.step("Verified device is not mounted".to_string());
 
     // Open device. The sector size is established here, before any
     // sector-addressed I/O is possible ([F-R23]).
     let device = open_fat32_device(options.device_path(), !options.is_dry_run())?;
-    operations.push(format!(
+    report.step(format!(
         "Opened device: {}",
         options.device_path().display()
     ));
@@ -213,7 +233,7 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
     // Read boot sector - use recovery mode to allow invalidated signature
     // from an interrupted resize operation
     let boot = read_boot_sector_for_recovery(&device)?;
-    operations.push(format!(
+    report.step(format!(
         "Read boot sector ({}-byte sectors)",
         boot.bytes_per_sector()
     ));
@@ -222,7 +242,7 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
     // resize left its checkpoint ([F-03]).
     let fsinfo_sector = boot.fs_info_sector();
     let fsinfo = read_fsinfo(&device, fsinfo_sector)?;
-    operations.push(format!("Read FSInfo from sector {}", fsinfo_sector));
+    report.step(format!("Read FSInfo from sector {}", fsinfo_sector));
 
     // Check for incomplete resize operation. A dry run checks too: it only
     // reads, and it has to preview the resume the real run would do, not a
@@ -237,11 +257,10 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
         Some(checkpoint) if boot.is_signature_valid() => match checkpoint.check_against(&boot) {
             Ok(()) => Some(checkpoint),
             Err(_) => {
-                eprintln!(
-                    "Ignoring a resize checkpoint at sector {}: it was left by another filesystem",
-                    marked_slot.sector()
-                );
-                operations.push(format!(
+                report.notice(ResizeEvent::StaleCheckpointIgnored {
+                    sector: marked_slot.sector(),
+                });
+                report.step(format!(
                     "Ignored a stale resize checkpoint at sector {}",
                     marked_slot.sector()
                 ));
@@ -265,18 +284,11 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
     };
 
     if let Some(ref checkpoint) = incomplete_resize {
-        if options.is_dry_run() {
-            eprintln!(
-                "Dry run: an interrupted resize would be resumed from phase {:?}",
-                checkpoint.phase
-            );
-        } else {
-            eprintln!(
-                "Resuming interrupted resize from phase {:?}...",
-                checkpoint.phase
-            );
-        }
-        operations.push(format!(
+        report.notice(ResizeEvent::Resuming {
+            phase: checkpoint.phase.name(),
+            dry_run: options.is_dry_run(),
+        });
+        report.step(format!(
             "Detected incomplete resize at phase {:?}",
             checkpoint.phase
         ));
@@ -296,7 +308,7 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
     // interrupted commit, which writes the backup first and rewrites it on
     // resume ([F-04]).
     if incomplete_resize.is_some() {
-        operations.push(format!(
+        report.step(format!(
             "Backup boot sector at sector {} will be rewritten by the resumed resize",
             backup_sector
         ));
@@ -307,13 +319,13 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
         if !options.ignores_backup_mismatch() {
             return Err(Error::BackupMismatch);
         }
-        operations.push(format!(
+        report.step(format!(
             "Backup boot sector at sector {} does not match the primary; \
              proceeding on the caller's explicit instruction",
             backup_sector
         ));
     } else {
-        operations.push(format!(
+        report.step(format!(
             "Verified backup boot sector at sector {}",
             backup_sector
         ));
@@ -355,14 +367,14 @@ fn prepare_resize(options: &ResizeOptions, operations: &mut Vec<String>) -> Resu
         calculate_new_size(&boot, device_sectors)?
     };
 
-    operations.push(format!(
+    report.step(format!(
         "Calculated resize: {} -> {} sectors",
         calculation.old_total_sectors, calculation.new_total_sectors
     ));
 
     // Read FAT table
     let fat = read_fat_table(&device, &boot, 0)?;
-    operations.push(format!("Read FAT table ({} entries)", fat.len()));
+    report.step(format!("Read FAT table ({} entries)", fat.len()));
 
     Ok(Prepared {
         device,
@@ -391,7 +403,7 @@ fn run_fat_phases(
     fat: &[u32],
     record: &ResizeRecord,
     options: &ResizeOptions,
-    operations: &mut Vec<String>,
+    report: &mut Reporter,
 ) -> Result<(FatOnDisk, usize)> {
     // Derived here rather than passed in: the phase to start from is a fact
     // *about* the checkpoint, and taking both as parameters would let a caller
@@ -406,7 +418,7 @@ fn run_fat_phases(
         return Ok((FatOnDisk::NotWritten(boot), 0));
     }
 
-    operations.push(format!(
+    report.step(format!(
         "FAT needs to grow by {} sectors",
         calculation.fat_growth_sectors
     ));
@@ -421,44 +433,35 @@ fn run_fat_phases(
 
     // An empty plan still goes through both phases: the FAT has to grow and
     // FAT2 has to move even when no cluster data does ([F-20]).
-    operations.push(format!(
+    report.step(format!(
         "Planned data shift for {} clusters ({} bytes)",
         plan.cluster_count(),
         plan.total_bytes
     ));
 
-    if options.is_verbose() {
-        eprintln!("\nData shift plan (cluster numbers unchanged, sectors shift forward):");
-        eprintln!("  {} clusters will be moved", plan.moves.len());
-    }
+    report.detail(ResizeEvent::ShiftPlanned {
+        clusters: plan.moves.len(),
+    });
 
     if options.is_dry_run() {
-        operations.push("Dry run: would shift cluster data".to_string());
+        report.step("Dry run: would shift cluster data".to_string());
         return Ok((FatOnDisk::NotWritten(boot), 0));
     }
 
     // === PHASE 0: Data shift (safe - source preserved) ===
     let shifted = if starting_phase == ResizePhase::Started {
-        shift_cluster_data(
-            device,
-            &boot,
-            calculation,
-            &plan,
-            record,
-            options.is_verbose(),
-            operations,
-        )?
+        shift_cluster_data(device, &boot, calculation, &plan, record, report)?
     } else {
-        operations.push("Skipping data shift (already done)".to_string());
+        report.step("Skipping data shift (already done)".to_string());
         DataShifted::recorded_by_an_earlier_run(plan.cluster_count())
     };
     let clusters_relocated = shifted.clusters_relocated;
 
     // === PHASE 1: FAT operations (dangerous - boot sector invalidated) ===
     let extended = if starting_phase <= ResizePhase::DataCopied {
-        write_fat_extension(device, boot, calculation, shifted, record.slot, operations)?
+        write_fat_extension(device, boot, calculation, shifted, record.slot, report)?
     } else {
-        operations.push("Skipping FAT operations (already done)".to_string());
+        report.step("Skipping FAT operations (already done)".to_string());
         FatExtended::recorded_by_an_earlier_run(boot, shifted)
     };
 
@@ -473,8 +476,7 @@ fn shift_cluster_data(
     calculation: &SizeCalculation,
     plan: &RelocationPlan,
     record: &ResizeRecord,
-    verbose: bool,
-    operations: &mut Vec<String>,
+    report: &mut Reporter,
 ) -> Result<DataShifted> {
     // How far a previous pass got. A fresh run has moved nothing, so it
     // resumes from the highest cluster in the plan; a resume must read the
@@ -508,12 +510,12 @@ fn shift_cluster_data(
         checkpoint.shift_progress = Some(resume_from);
     }
     write_checkpoint(device, record.slot, &checkpoint)?;
-    operations.push("Wrote checkpoint (phase 0: started)".to_string());
+    report.step("Wrote checkpoint (phase 0: started)".to_string());
 
     // [F-03]: the record is durable, so point FSInfo at it before the first
     // move. From here on a rerun finds it whatever size the device has.
     mark_checkpoint_slot(device, record.fsinfo_sector, record.slot)?;
-    operations.push(format!(
+    report.step(format!(
         "Marked checkpoint at sector {} in FSInfo",
         record.slot.sector()
     ));
@@ -531,9 +533,9 @@ fn shift_cluster_data(
         write_checkpoint(device, record.slot, &cp)
     };
     let mut progress = ShiftProgress::new(plan, boot, resume_from, &mut record_progress);
-    execute_relocation(device, boot, plan, &mut progress, verbose)?;
+    execute_relocation(device, boot, plan, &mut progress, report)?;
     let clusters_relocated = plan.cluster_count();
-    operations.push(format!("Shifted {} clusters forward", clusters_relocated));
+    report.step(format!("Shifted {} clusters forward", clusters_relocated));
 
     maybe_crash_at("after_data_shift");
 
@@ -547,7 +549,7 @@ fn shift_cluster_data(
         calculation.new_fat_size,
     );
     write_checkpoint(device, record.slot, &checkpoint)?;
-    operations.push("Updated checkpoint (phase 1: data copied)".to_string());
+    report.step("Updated checkpoint (phase 1: data copied)".to_string());
 
     maybe_crash_at("after_checkpoint_data_copied");
 
@@ -568,23 +570,23 @@ fn write_fat_extension(
     calculation: &SizeCalculation,
     _shifted: DataShifted,
     checkpoint_slot: CheckpointSlot,
-    operations: &mut Vec<String>,
+    report: &mut Reporter,
 ) -> Result<FatExtended> {
     // Invalidate boot sector to prevent other tools from operating
     boot.invalidate_signature();
     write_boot_sector(device, &boot)?;
     device.sync()?;
-    operations.push("Invalidated boot sector (danger zone)".to_string());
+    report.step("Invalidated boot sector (danger zone)".to_string());
 
     maybe_crash_at("after_boot_invalidate");
 
     // Initialize new FAT1 sectors
     init_new_fat_sectors(device, &boot, calculation)?;
-    operations.push("Initialized new FAT sectors".to_string());
+    report.step("Initialized new FAT sectors".to_string());
 
     // Sync FAT1 to FAT2
     sync_fat_copies(device, &boot, calculation)?;
-    operations.push("Synced FAT copies".to_string());
+    report.step("Synced FAT copies".to_string());
 
     // [F-R17]: the checkpoint written below is a promise that the FAT
     // extension is on disk -- a resume reads it and skips the FAT work
@@ -594,7 +596,7 @@ fn write_fat_extension(
     // reads the device between the two helpers above, so one barrier covering
     // both is sufficient.
     device.sync()?;
-    operations.push("Flushed FAT writes".to_string());
+    report.step("Flushed FAT writes".to_string());
 
     maybe_crash_at("after_fat_write");
 
@@ -608,7 +610,7 @@ fn write_fat_extension(
         calculation.new_fat_size,
     );
     write_checkpoint(device, checkpoint_slot, &checkpoint)?;
-    operations.push("Updated checkpoint (phase 2: FAT written)".to_string());
+    report.step("Updated checkpoint (phase 2: FAT written)".to_string());
 
     maybe_crash_at("after_checkpoint_fat_written");
 
@@ -627,7 +629,7 @@ fn commit_new_geometry(
     fsinfo: &FSInfo,
     backup_sector: u16,
     record: &ResizeRecord,
-    operations: &mut Vec<String>,
+    report: &mut Reporter,
 ) -> Result<()> {
     // [F-04]: without a FAT phase there is no checkpoint yet, and a crash
     // between the backup and primary boot sector writes would leave two
@@ -645,7 +647,7 @@ fn commit_new_geometry(
         );
         write_checkpoint(device, record.slot, &checkpoint)?;
         mark_checkpoint_slot(device, record.fsinfo_sector, record.slot)?;
-        operations.push("Wrote checkpoint (phase 2: commit pending)".to_string());
+        report.step("Wrote checkpoint (phase 2: commit pending)".to_string());
     }
 
     // Update boot sector with new values and restore signature
@@ -672,23 +674,23 @@ fn commit_new_geometry(
     // user to vouch for the primary, so leaving the window open would have
     // meant asking them to vouch for a state this code created itself.
     write_backup_boot_sector(device, &boot, backup_sector)?;
-    operations.push("Updated backup boot sector".to_string());
+    report.step("Updated backup boot sector".to_string());
 
     // The free count was set by the caller from the FAT; see
     // [`free_clusters_after_resize`].
     let new_free = fsinfo.free_count();
     write_fsinfo(device, fsinfo, record.fsinfo_sector)?;
-    operations.push(format!("Updated FSInfo (free clusters: {})", new_free));
+    report.step(format!("Updated FSInfo (free clusters: {})", new_free));
 
     // [F-R26]: the supporting structures must be durable before the commit
     // point publishes a geometry that assumes them.
     device.sync()?;
-    operations.push("Flushed supporting structures".to_string());
+    report.step("Flushed supporting structures".to_string());
 
     maybe_crash_at("before_primary_boot_write");
 
     write_boot_sector(device, &boot)?;
-    operations.push("Updated boot sector (signature restored)".to_string());
+    report.step("Updated boot sector (signature restored)".to_string());
 
     // [F-R18]: clearing the checkpoint retires the only record that can
     // recover this filesystem, so everything it protects must be durable
@@ -698,15 +700,15 @@ fn commit_new_geometry(
     // `check_for_incomplete_resize` reports as `InvalidatedFilesystem` and
     // refuses to touch.
     device.sync()?;
-    operations.push("Flushed new geometry".to_string());
+    report.step("Flushed new geometry".to_string());
 
     // Clear checkpoint
     clear_checkpoint(device, record.slot)?;
-    operations.push("Cleared checkpoint".to_string());
+    report.step("Cleared checkpoint".to_string());
 
     // Final sync
     device.sync()?;
-    operations.push("Synced changes to disk".to_string());
+    report.step("Synced changes to disk".to_string());
 
     Ok(())
 }
@@ -739,23 +741,6 @@ fn free_clusters_after_resize(
         .new_data_clusters
         .saturating_sub(old_data_clusters);
     old_free.saturating_add(additional_clusters)
-}
-
-/// Print verbose resize information to stderr
-fn print_verbose_resize_info(boot: &BootSector, calculation: &SizeCalculation) {
-    eprintln!("Current filesystem:");
-    eprintln!("  Total sectors: {}", calculation.old_total_sectors);
-    eprintln!("  FAT size: {} sectors", calculation.old_fat_size);
-    match boot.data_clusters() {
-        Some(clusters) => eprintln!("  Data clusters: {}", clusters),
-        None => eprintln!("  Data clusters: <layout does not fit in the volume>"),
-    }
-    eprintln!();
-    eprintln!("After resize:");
-    eprintln!("  Total sectors: {}", calculation.new_total_sectors);
-    eprintln!("  FAT size: {} sectors", calculation.new_fat_size);
-    eprintln!("  Data clusters: {}", calculation.new_data_clusters);
-    eprintln!("  FAT needs growth: {}", calculation.fat_needs_growth);
 }
 
 /// Initialize new FAT sectors with free entries (zeros).

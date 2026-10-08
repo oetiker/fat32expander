@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::time::{Duration, UNIX_EPOCH};
 
-use fat32expander::{get_fs_info, resize_fat32, Error, FSInfo, FSInfoReport, ResizeOptions};
+use fat32expander::{
+    get_fs_info, resize_fat32_with_events, Error, FSInfo, FSInfoReport, ResizeEvent, ResizeOptions,
+};
 
 const BUILD_TIMESTAMP: u64 = const_parse_u64(env!("BUILD_TIMESTAMP"));
 const GIT_HASH: &str = env!("GIT_HASH");
@@ -319,6 +321,85 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Print what the library reports while a resize runs ([F-08]).
+///
+/// The rule for the streams: what happens during the run goes to stderr, as
+/// it happens; the report of the finished run goes to stdout. Steps are not
+/// printed here -- they are the "Operations performed" list of that report.
+fn print_event(event: &ResizeEvent) {
+    match event {
+        ResizeEvent::Resuming { phase, dry_run } => {
+            if *dry_run {
+                eprintln!("Dry run: an interrupted resize would be resumed from phase {phase}");
+            } else {
+                eprintln!("Resuming interrupted resize from phase {phase}...");
+            }
+        }
+        ResizeEvent::StaleCheckpointIgnored { sector } => {
+            eprintln!(
+                "Ignoring a resize checkpoint at sector {sector}: it was left by another filesystem"
+            );
+        }
+        ResizeEvent::Layout {
+            old_total_sectors,
+            old_fat_size,
+            old_data_clusters,
+            new_total_sectors,
+            new_fat_size,
+            new_data_clusters,
+            fat_needs_growth,
+        } => {
+            eprintln!("Current filesystem:");
+            eprintln!("  Total sectors: {old_total_sectors}");
+            eprintln!("  FAT size: {old_fat_size} sectors");
+            match old_data_clusters {
+                Some(clusters) => eprintln!("  Data clusters: {clusters}"),
+                None => eprintln!("  Data clusters: <layout does not fit in the volume>"),
+            }
+            eprintln!();
+            eprintln!("After resize:");
+            eprintln!("  Total sectors: {new_total_sectors}");
+            eprintln!("  FAT size: {new_fat_size} sectors");
+            eprintln!("  Data clusters: {new_data_clusters}");
+            eprintln!("  FAT needs growth: {fat_needs_growth}");
+        }
+        ResizeEvent::ShiftPlanned { clusters } => {
+            eprintln!("\nData shift plan (cluster numbers unchanged, sectors shift forward):");
+            eprintln!("  {clusters} clusters will be moved");
+        }
+        ResizeEvent::ShiftStarting {
+            remaining,
+            total,
+            old_first_data_sector,
+            new_first_data_sector,
+            resumed_at,
+        } => {
+            eprintln!("Shifting data forward: {remaining} of {total} clusters need movement");
+            eprintln!("  Old first data sector: {old_first_data_sector}");
+            eprintln!("  New first data sector: {new_first_data_sector}");
+            if let Some(cluster) = resumed_at {
+                eprintln!(
+                    "  Resuming at cluster {cluster} ({} already shifted)",
+                    total - remaining
+                );
+            }
+        }
+        // The first ten moves, every hundredth, and the last.
+        ResizeEvent::ClusterMoved {
+            cluster,
+            from_sector,
+            to_sector,
+            done,
+            of,
+        } if *done <= 10 || (done - 1) % 100 == 0 || done == of => {
+            eprintln!(
+                "Moving cluster {cluster} from sector {from_sector} to sector {to_sector} ({done}/{of})"
+            );
+        }
+        _ => {}
+    }
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
@@ -401,7 +482,7 @@ fn run() -> Result<()> {
                 .verbose(verbose)
                 .ignore_backup_mismatch(ignore_backup_mismatch);
 
-            let result = resize_fat32(options)
+            let result = resize_fat32_with_events(options, &mut print_event)
                 .with_context(|| format!("Failed to resize filesystem on {}", device))?;
 
             // Print results

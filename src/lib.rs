@@ -54,6 +54,7 @@ pub use device::journal;
 
 pub use fat32::{BootSector, FSInfo};
 pub use resize::{
-    get_fs_info, resize_fat32, FSInfoReport, ResizeOptions, ResizeResult, SizeCalculation,
+    get_fs_info, resize_fat32, resize_fat32_with_events, FSInfoReport, ResizeEvent, ResizeOptions,
+    ResizeResult, SizeCalculation,
 };
 pub use system::{check_not_mounted, check_root, get_block_device_size};
