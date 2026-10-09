@@ -371,7 +371,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** The version-1 checkpoint body has named offsets (`MAGIC_OFFSET` .. `BODY_CRC_OFFSET`, `BODY_SIZE`) and `put_u32`/`get_u32` replace the hand-written slices in the encoder, the decoder and the progress and volume records; the bytes on disk are unchanged and the layout tests keep their literal offsets as the specification. The CLI's five `1024.0 * 1024.0` became one `mib()` in `src/cli/render.rs`, and the values are labelled "MiB" (developer's choice; user-visible, with a CHANGES entry).
 - **Status date:** 2026-10-09 14:26 UTC
-- **Status commit:** pending
+- **Status commit:** e156819
 
 ### [F-25] `main.rs` mixes unrelated concerns
 - **Category:** 11 Low cohesion
