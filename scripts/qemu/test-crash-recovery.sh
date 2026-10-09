@@ -61,7 +61,7 @@ ensure_prerequisites() {
         exit 1
     fi
 
-    BINARY="$PROJECT_DIR/target/x86_64-unknown-linux-musl/release/fat32expander"
+    BINARY="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}/x86_64-unknown-linux-musl/release/fat32expander"
     if [ ! -x "$BINARY" ]; then
         log_error "Binary not found at $BINARY"
         exit 1

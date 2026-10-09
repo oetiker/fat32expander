@@ -133,9 +133,13 @@ get_binary_path() {
     local script_dir="$1"
     local project_dir=$(dirname $(dirname "$script_dir"))
 
+    # Cargo writes to CARGO_TARGET_DIR when it is set; a binary left in
+    # the project's own target/ would then be a stale build.
+    local target_dir="${CARGO_TARGET_DIR:-$project_dir/target}"
+
     # Prefer static musl binary for VM testing
-    local musl_binary="$project_dir/target/x86_64-unknown-linux-musl/release/fat32expander"
-    local glibc_binary="$project_dir/target/release/fat32expander"
+    local musl_binary="$target_dir/x86_64-unknown-linux-musl/release/fat32expander"
+    local glibc_binary="$target_dir/release/fat32expander"
 
     if [ -f "$musl_binary" ]; then
         echo "$musl_binary"
