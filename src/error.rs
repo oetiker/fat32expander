@@ -241,7 +241,7 @@ mod tests {
     /// maps it to exit codes with a wildcard arm and the compiler no longer
     /// flags a new variant there. This match is exhaustive because it is inside
     /// the crate. When it stops compiling, give the new variant an exit code in
-    /// `exit_code_for` in `src/main.rs` and a row in
+    /// `exit_code_for` in `src/cli/exit.rs` and a row in
     /// `every_error_variant_keeps_its_exit_code`, then list it here.
     #[allow(dead_code)]
     fn every_variant_is_listed(e: &Error) {

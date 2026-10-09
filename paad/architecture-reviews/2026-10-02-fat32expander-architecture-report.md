@@ -375,6 +375,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** One file holds a hand-rolled date formatter, the report renderer, the exit-code table and a ~160-line Resize arm.
 - **Evidence:** `src/main.rs:10-73` (`const_parse_u64`, `format_build_time`), `:133-222`, `:232-287`, `:324-481`
 - **Found by:** Structure & Boundaries. Continues [F-R54].
+- **Status:** Fixed
+- **Status reason:** `main.rs` keeps the clap definitions, `main` and the dispatch (97 lines). The build-time formatter moved to `src/cli/version.rs`, the exit-code table and its tests to `src/cli/exit.rs`, the report renderer, event printer and resize summary to `src/cli/render.rs`, and the Resize arm to `src/cli/resize.rs`. The `cli` modules are declared from `main.rs` only, so the library still builds without `clap` and `anyhow`.
+- **Status date:** 2026-10-09 14:24 UTC
+- **Status commit:** pending
 
 ### [F-26] Public types are not `#[non_exhaustive]` although stability is promised
 - **Category:** 24 Inconsistent API contracts

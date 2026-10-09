@@ -1,10 +1,11 @@
 //! Guard for [F-27]: a program that uses `fat32expander` as a library must not
 //! compile the command-line dependencies.
 //!
-//! `clap` and `anyhow` are used only by `src/main.rs`. As plain dependencies
-//! they were built for every library consumer. They are now optional, switched
-//! on by the default `cli` feature, which the binary requires; a consumer opts
-//! out with `default-features = false`.
+//! `clap` and `anyhow` are used only by the binary: `src/main.rs` and the
+//! `src/cli/` modules it declares. As plain dependencies they were built for
+//! every library consumer. They are now optional, switched on by the default
+//! `cli` feature, which the binary requires; a consumer opts out with
+//! `default-features = false`.
 //!
 //! Two things keep that true, and this file checks both: the manifest shape,
 //! and a CI step that builds the library with no default features. The
