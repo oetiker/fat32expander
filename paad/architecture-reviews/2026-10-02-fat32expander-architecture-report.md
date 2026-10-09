@@ -378,7 +378,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** `main.rs` keeps the clap definitions, `main` and the dispatch (97 lines). The build-time formatter moved to `src/cli/version.rs`, the exit-code table and its tests to `src/cli/exit.rs`, the report renderer, event printer and resize summary to `src/cli/render.rs`, and the Resize arm to `src/cli/resize.rs`. The `cli` modules are declared from `main.rs` only, so the library still builds without `clap` and `anyhow`.
 - **Status date:** 2026-10-09 14:24 UTC
-- **Status commit:** pending
+- **Status commit:** 9dc9608
 
 ### [F-26] Public types are not `#[non_exhaustive]` although stability is promised
 - **Category:** 24 Inconsistent API contracts
