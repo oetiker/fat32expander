@@ -423,10 +423,10 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Explanation:** CLAUDE.md's tree omits `checkpoint`, `fault`, `fsinfo`, `options`, `testutil`; it says the tool refuses maximum-size filesystems and mismatched backups (now exit 0 and `--ignore-backup-mismatch`) and that "All errors use thiserror" (CLI uses anyhow). TECHGUIDE shows non-`Option` accessor signatures, magic "0xFA32CHKP" (code: `b"FAT32RSZ"`), the old commit write order, and "Re-run entire resize" for `Started`. `checkpoint.rs:64` names the wrong checkpoint sector; `executor.rs:692-693` says nothing enforces the FAT order although the witnesses now do.
 - **Evidence:** `CLAUDE.md` "Architecture" and "Error Handling" sections; `TECHGUIDE.md:366-367,488,578`; `src/resize/checkpoint.rs:64`, excerpt: "written to sector `old_total_sectors`"; `src/resize/executor.rs:692-693`, excerpt: "Nothing enforces the order but the call site in `resize_fat32`"
 - **Found by:** all five specialists
-- **Status:** Partially fixed
-- **Status reason:** TECHGUIDE now gives the checkpoint magic as `FAT32RSZ`, and the `ResizeCheckpoint` doc in `checkpoint.rs` names its real location (the [F-03] slot). The rest is open: CLAUDE.md's tree and error-handling claims, TECHGUIDE's accessor signatures, commit write order and `Started` recovery text, and the `executor.rs` comment on FAT ordering.
-- **Status date:** 2026-10-05 UTC
-- **Status commit:** 4a36506
+- **Status:** Fixed
+- **Status reason:** 4a36506 fixed the checkpoint magic and the `ResizeCheckpoint` location doc. This session finished the rest: the module trees in CLAUDE.md and TECHGUIDE.md list `cli/` and every `resize/` module; CLAUDE.md's error-handling section names `anyhow` for the CLI, exit 0 for "nothing to do" and the `--ignore-backup-mismatch` override; TECHGUIDE shows the `Option` accessor signatures, the real commit write order and the real `Started` recovery; the FAT-order comment (now on `zero_fat_extension` in `operations.rs`) names the `DataShifted` witness; and `ResizeCheckpoint::from_bytes` no longer says only 32 bytes matter.
+- **Status date:** 2026-10-09 14:31 UTC
+- **Status commit:** pending
 
 ## Coverage Checklist
 

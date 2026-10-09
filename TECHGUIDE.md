@@ -330,7 +330,8 @@ device.sync()?;
 
 ```
 src/
-├── main.rs              # CLI entry point (clap-based)
+├── main.rs              # CLI entry point: clap definitions, main, dispatch
+├── cli/                 # Binary-only modules (exit codes, output, resize, version)
 ├── lib.rs               # Library exports
 ├── error.rs             # Error types (thiserror)
 ├── device.rs            # Sector-based device I/O
@@ -343,8 +344,14 @@ src/
 └── resize/
     ├── mod.rs           # Module exports
     ├── calculator.rs    # Size calculations for resize
+    ├── checkpoint.rs    # On-disk checkpoint format and its sector I/O
+    ├── events.rs        # What a resize reports while it runs
+    ├── executor.rs      # Main resize orchestration
+    ├── fault.rs         # Crash points for the fault-injection feature
+    ├── fsinfo.rs        # Read-only filesystem query
+    ├── options.rs       # ResizeOptions and ResizeResult
     ├── relocator.rs     # Data shifting logic
-    └── executor.rs      # Main resize orchestration
+    └── testutil.rs      # Shared fixtures for the unit tests
 ```
 
 ### Key Data Structures
@@ -364,8 +371,10 @@ impl BootSector {
     pub fn total_sectors(&self) -> u32;
     pub fn root_cluster(&self) -> u32;
     pub fn first_data_sector(&self) -> u64;
-    pub fn data_clusters(&self) -> u32;
-    pub fn cluster_to_sector(&self, cluster: u32) -> u64;
+    // `None` when the layout does not fit in the volume, or the cluster is
+    // outside it.
+    pub fn data_clusters(&self) -> Option<u32>;
+    pub fn cluster_to_sector(&self, cluster: u32) -> Option<u64>;
 }
 
 // Resize calculation results
@@ -538,10 +547,10 @@ Phase 2: FatWritten
    │
    ▼
 ┌─────────────────────────────────────┐
-│ - Restore boot sector (0xAA55)      │
-│ - Update boot sector parameters     │
 │ - Update backup boot sector         │
-│ - Update FSInfo                     │
+│ - Update FSInfo (mark cleared)      │
+│ - Write boot sector: new geometry,  │
+│   signature restored (0xAA55)       │
 │ - Clear checkpoint                  │
 └─────────────────────────────────────┘
    │
@@ -598,7 +607,7 @@ Recovery behavior depends on the checkpoint phase:
 
 | Crash Point | Phase | Boot Sector | Recovery Action |
 |-------------|-------|-------------|-----------------|
-| After checkpoint write | Started | Valid (0xAA55) | Re-run entire resize |
+| After checkpoint write | Started | Valid (0xAA55) | Resume shift from its first cluster (recorded with the checkpoint); a shift shorter than one cluster records no progress and is refused with exit code 9 |
 | After data shift | Started | Valid (0xAA55) | Resume shift from recorded progress |
 | After phase 1 checkpoint | DataCopied | Valid (0xAA55) | Skip data shift, continue |
 | After boot invalidation | DataCopied | Invalid (0x0000) | Skip data shift, continue |

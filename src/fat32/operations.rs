@@ -132,8 +132,10 @@ pub(crate) fn fat_copy_start(boot: &BootSector, fat_number: u8, fat_size: u32) -
 /// [F-R16]: this doc said the exact opposite ("must be called BEFORE
 /// relocation so that reading new FAT sectors returns valid data") while the
 /// call site had it right, and the correct `copy_fat_to_other_copies` doc
-/// below made the wrong one easy to trust. Nothing enforces the order but
-/// the call site in `resize_fat32` ([F-R15]).
+/// below made the wrong one easy to trust. Its only caller,
+/// `write_fat_extension` in `executor.rs`, takes the `DataShifted` witness
+/// that only a completed shift returns, so the order is enforced by the
+/// types ([F-R15]).
 pub(crate) fn zero_fat_extension(
     device: &Device,
     boot: &BootSector,

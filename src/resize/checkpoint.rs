@@ -289,7 +289,9 @@ impl ResizeCheckpoint {
         Ok(Some(get_u32(data, p + 4)))
     }
 
-    /// Parse checkpoint from bytes (sector size independent - only first 32 bytes matter)
+    /// Parse a checkpoint from a sector's bytes, at any sector size: the
+    /// body, the optional shift-progress record and, in version 2, the
+    /// volume record all sit in the first 52 bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Option<Self>> {
         if data.len() < BODY_SIZE {
             return Ok(None);

@@ -24,7 +24,12 @@ cargo test --test integration_test -- --ignored
 
 ```
 src/
-├── main.rs              # CLI entry point (clap-based)
+├── main.rs              # CLI entry point: clap definitions, main, dispatch
+├── cli/                 # Binary-only modules, declared from main.rs, never lib.rs
+│   ├── exit.rs          # Exit codes (an ABI) and the error-to-code table
+│   ├── render.rs        # `info` report, resize events and summary
+│   ├── resize.rs        # The `resize` subcommand
+│   └── version.rs       # `version` text and build-time formatting
 ├── lib.rs               # Library exports
 ├── error.rs             # Error types (thiserror)
 ├── device.rs            # Sector-based device I/O wrapper
@@ -37,8 +42,14 @@ src/
 └── resize/
     ├── mod.rs           # Module exports
     ├── calculator.rs    # Size calculations for resize
+    ├── checkpoint.rs    # On-disk checkpoint format and its sector I/O
+    ├── events.rs        # ResizeEvent: what a resize reports while it runs
+    ├── executor.rs      # Main resize orchestration (phase witnesses)
+    ├── fault.rs         # Crash points for the fault-injection feature
+    ├── fsinfo.rs        # Read-only filesystem query (FSInfoReport)
+    ├── options.rs       # ResizeOptions and ResizeResult
     ├── relocator.rs     # Cluster relocation logic (critical!)
-    └── executor.rs      # Main resize orchestration
+    └── testutil.rs      # Shared fixtures for the unit tests
 ```
 
 ## Key Concepts
@@ -115,8 +126,13 @@ Key test scenarios:
 
 ## Error Handling
 
-All errors use `thiserror` and propagate via `Result<T, Error>`. The tool refuses to operate on:
-- Mounted filesystems
-- Non-FAT32 filesystems
-- Filesystems already at maximum size
-- Filesystems with mismatched backup boot sectors
+The library's errors use `thiserror` and propagate via `Result<T, Error>`; the
+binary wraps them with `anyhow` context and maps them to exit codes in
+`src/cli/exit.rs`. The tool refuses to operate on:
+- Mounted or otherwise busy devices (exit 4)
+- Non-FAT32 filesystems (exit 5)
+- Filesystems whose backup boot sector disagrees with the primary (exit 8),
+  unless `--ignore-backup-mismatch` is given
+
+A filesystem already at maximum size is not an error: the tool prints
+"Nothing to do" and exits 0.
