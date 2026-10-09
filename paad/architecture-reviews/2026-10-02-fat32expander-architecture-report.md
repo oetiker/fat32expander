@@ -426,7 +426,7 @@ This is the second report. The previous one is `2026-07-28-fat32expander-archite
 - **Status:** Fixed
 - **Status reason:** 4a36506 fixed the checkpoint magic and the `ResizeCheckpoint` location doc. This session finished the rest: the module trees in CLAUDE.md and TECHGUIDE.md list `cli/` and every `resize/` module; CLAUDE.md's error-handling section names `anyhow` for the CLI, exit 0 for "nothing to do" and the `--ignore-backup-mismatch` override; TECHGUIDE shows the `Option` accessor signatures, the real commit write order and the real `Started` recovery; the FAT-order comment (now on `zero_fat_extension` in `operations.rs`) names the `DataShifted` witness; and `ResizeCheckpoint::from_bytes` no longer says only 32 bytes matter.
 - **Status date:** 2026-10-09 14:31 UTC
-- **Status commit:** pending
+- **Status commit:** bb2fde3
 
 ## Coverage Checklist
 
