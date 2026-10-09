@@ -566,6 +566,25 @@ mod tests {
         exit_code_for(&anyhow::Error::new(e))
     }
 
+    /// Safety net for [F-25]: the calendar arithmetic behind the build date
+    /// that `version` prints, across year ends and leap rules.
+    #[test]
+    fn days_since_the_epoch_convert_to_calendar_dates() {
+        for (days, date) in [
+            (0, (1970, 1, 1)),
+            (364, (1970, 12, 31)),
+            (789, (1972, 2, 29)),
+            (790, (1972, 3, 1)),
+            (11016, (2000, 2, 29)),
+            (11322, (2000, 12, 31)),
+            (20735, (2026, 10, 9)),
+            (47540, (2100, 2, 28)),
+            (47541, (2100, 3, 1)),
+        ] {
+            assert_eq!(days_to_ymd(days), date, "day {days}");
+        }
+    }
+
     /// [F-06]: a resume the tool refuses is a filesystem that needs recovery,
     /// not an internal failure.
     #[test]
