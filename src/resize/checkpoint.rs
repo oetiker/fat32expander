@@ -14,6 +14,20 @@ use crate::fat32::{read_fsinfo, write_fsinfo, BootSector, FSInfo};
 /// Magic bytes for resize checkpoint identification
 const CHECKPOINT_MAGIC: &[u8; 8] = b"FAT32RSZ";
 
+// Layout of the version-1 checkpoint body, the first [`BODY_SIZE`] bytes of
+// the sector. Integers are little-endian. Bytes 10..12 are padding, always
+// zero. The shift-progress and volume records follow the body.
+const MAGIC_OFFSET: usize = 0;
+const VERSION_OFFSET: usize = 8;
+const PHASE_OFFSET: usize = 9;
+const OLD_TOTAL_SECTORS_OFFSET: usize = 12;
+const NEW_TOTAL_SECTORS_OFFSET: usize = 16;
+const OLD_FAT_SIZE_OFFSET: usize = 20;
+const NEW_FAT_SIZE_OFFSET: usize = 24;
+/// CRC32 of every body byte before it.
+const BODY_CRC_OFFSET: usize = 28;
+const BODY_SIZE: usize = 32;
+
 /// Current checkpoint version.
 ///
 /// Version 2 adds the volume record at [`VOLUME_OFFSET`]; it is otherwise
@@ -43,10 +57,18 @@ const VOLUME_SIZE: usize = 8;
 const PROGRESS_MAGIC: &[u8; 4] = b"PRG1";
 
 /// Offset of the shift-progress record within the checkpoint sector
-const PROGRESS_OFFSET: usize = 32;
+const PROGRESS_OFFSET: usize = BODY_SIZE;
 
 /// magic (4) + next_cluster (4) + CRC32 (4)
 const PROGRESS_SIZE: usize = 12;
+
+fn put_u32(data: &mut [u8], at: usize, value: u32) {
+    data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn get_u32(data: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
+}
 
 /// Record shift progress at least once per this many clusters. The effective interval
 /// is also capped by the shift distance in clusters - see [`ShiftProgress`].
@@ -112,8 +134,8 @@ pub struct ResizeCheckpoint {
 }
 
 impl ResizeCheckpoint {
-    /// Checkpoint size in bytes (without CRC)
-    const DATA_SIZE: usize = 8 + 1 + 1 + 2 + 4 + 4 + 4 + 4; // 28 bytes
+    /// Bytes of the body the CRC covers: everything before it.
+    const DATA_SIZE: usize = BODY_CRC_OFFSET;
 
     /// Create a new checkpoint
     pub fn new(
@@ -189,43 +211,27 @@ impl ResizeCheckpoint {
     pub fn to_bytes(&self, sector_size: usize) -> Vec<u8> {
         let mut data = vec![0u8; sector_size];
 
-        // Magic (8 bytes)
-        data[0..8].copy_from_slice(CHECKPOINT_MAGIC);
+        data[MAGIC_OFFSET..MAGIC_OFFSET + CHECKPOINT_MAGIC.len()].copy_from_slice(CHECKPOINT_MAGIC);
 
-        // Version (1 byte). A record without a volume is a version-1 record;
+        // A record without a volume is a version-1 record;
         // so is one in a sector too small to hold the volume record, which no
         // sector size FAT32 permits is.
         let volume_id = self
             .volume_id
             .filter(|_| sector_size >= VOLUME_OFFSET + VOLUME_SIZE);
-        data[8] = if volume_id.is_some() {
+        data[VERSION_OFFSET] = if volume_id.is_some() {
             CHECKPOINT_VERSION
         } else {
             CHECKPOINT_VERSION_1
         };
 
-        // Phase (1 byte)
-        data[9] = self.phase as u8;
-
-        // Padding (2 bytes)
-        data[10] = 0;
-        data[11] = 0;
-
-        // old_total_sectors (4 bytes)
-        data[12..16].copy_from_slice(&self.old_total_sectors.to_le_bytes());
-
-        // new_total_sectors (4 bytes)
-        data[16..20].copy_from_slice(&self.new_total_sectors.to_le_bytes());
-
-        // old_fat_size (4 bytes)
-        data[20..24].copy_from_slice(&self.old_fat_size.to_le_bytes());
-
-        // new_fat_size (4 bytes)
-        data[24..28].copy_from_slice(&self.new_fat_size.to_le_bytes());
-
-        // CRC32 of data (4 bytes at offset 28)
-        let crc = crc32fast::hash(&data[0..Self::DATA_SIZE]);
-        data[28..32].copy_from_slice(&crc.to_le_bytes());
+        data[PHASE_OFFSET] = self.phase as u8;
+        put_u32(&mut data, OLD_TOTAL_SECTORS_OFFSET, self.old_total_sectors);
+        put_u32(&mut data, NEW_TOTAL_SECTORS_OFFSET, self.new_total_sectors);
+        put_u32(&mut data, OLD_FAT_SIZE_OFFSET, self.old_fat_size);
+        put_u32(&mut data, NEW_FAT_SIZE_OFFSET, self.new_fat_size);
+        let crc = crc32fast::hash(&data[..Self::DATA_SIZE]);
+        put_u32(&mut data, BODY_CRC_OFFSET, crc);
 
         // Shift-progress record, appended after the version-1 body so that
         // body's layout and CRC are untouched.
@@ -233,18 +239,18 @@ impl ResizeCheckpoint {
             if sector_size >= PROGRESS_OFFSET + PROGRESS_SIZE {
                 let p = PROGRESS_OFFSET;
                 data[p..p + 4].copy_from_slice(PROGRESS_MAGIC);
-                data[p + 4..p + 8].copy_from_slice(&next_cluster.to_le_bytes());
+                put_u32(&mut data, p + 4, next_cluster);
                 let crc = crc32fast::hash(&data[p..p + 8]);
-                data[p + 8..p + 12].copy_from_slice(&crc.to_le_bytes());
+                put_u32(&mut data, p + 8, crc);
             }
         }
 
         // Volume record, version 2 only.
         if let Some(volume_id) = volume_id {
             let v = VOLUME_OFFSET;
-            data[v..v + 4].copy_from_slice(&volume_id.to_le_bytes());
+            put_u32(&mut data, v, volume_id);
             let crc = crc32fast::hash(&data[v..v + 4]);
-            data[v + 4..v + 8].copy_from_slice(&crc.to_le_bytes());
+            put_u32(&mut data, v + 4, crc);
         }
 
         data
@@ -256,11 +262,10 @@ impl ResizeCheckpoint {
         let field = data
             .get(v..v + VOLUME_SIZE)
             .ok_or(Error::CheckpointCorrupted)?;
-        let stored = u32::from_le_bytes([field[4], field[5], field[6], field[7]]);
-        if stored != crc32fast::hash(&field[0..4]) {
+        if get_u32(field, 4) != crc32fast::hash(&field[0..4]) {
             return Err(Error::CheckpointCorrupted);
         }
-        Ok(u32::from_le_bytes([field[0], field[1], field[2], field[3]]))
+        Ok(get_u32(field, 0))
     }
 
     /// Parse the optional shift-progress record trailing the checkpoint body.
@@ -277,62 +282,44 @@ impl ResizeCheckpoint {
             return Ok(None);
         }
 
-        let stored = u32::from_le_bytes([data[p + 8], data[p + 9], data[p + 10], data[p + 11]]);
-        if stored != crc32fast::hash(&data[p..p + 8]) {
+        if get_u32(data, p + 8) != crc32fast::hash(&data[p..p + 8]) {
             return Err(Error::CheckpointCorrupted);
         }
 
-        Ok(Some(u32::from_le_bytes([
-            data[p + 4],
-            data[p + 5],
-            data[p + 6],
-            data[p + 7],
-        ])))
+        Ok(Some(get_u32(data, p + 4)))
     }
 
     /// Parse checkpoint from bytes (sector size independent - only first 32 bytes matter)
     pub fn from_bytes(data: &[u8]) -> Result<Option<Self>> {
-        // Need at least 32 bytes for checkpoint data
-        if data.len() < 32 {
+        if data.len() < BODY_SIZE {
             return Ok(None);
         }
 
-        // Check magic
-        if &data[0..8] != CHECKPOINT_MAGIC {
+        if &data[MAGIC_OFFSET..MAGIC_OFFSET + CHECKPOINT_MAGIC.len()] != CHECKPOINT_MAGIC {
             return Ok(None);
         }
 
         // Check version. Our magic with an unknown version is a newer
         // build's record, not a foreign sector ([F-16]).
-        let version = data[8];
+        let version = data[VERSION_OFFSET];
         if version != CHECKPOINT_VERSION && version != CHECKPOINT_VERSION_1 {
             return Err(Error::CheckpointVersionUnsupported(version));
         }
 
-        // Verify CRC
-        let stored_crc = u32::from_le_bytes([data[28], data[29], data[30], data[31]]);
-        let computed_crc = crc32fast::hash(&data[0..Self::DATA_SIZE]);
-        if stored_crc != computed_crc {
+        if get_u32(data, BODY_CRC_OFFSET) != crc32fast::hash(&data[..Self::DATA_SIZE]) {
             return Err(Error::CheckpointCorrupted);
         }
 
-        // Parse phase
-        let Some(phase) = ResizePhase::from_u8(data[9]) else {
+        let Some(phase) = ResizePhase::from_u8(data[PHASE_OFFSET]) else {
             return Err(Error::CheckpointCorrupted);
         };
 
-        // Parse fields
-        let old_total_sectors = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
-        let new_total_sectors = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
-        let old_fat_size = u32::from_le_bytes([data[20], data[21], data[22], data[23]]);
-        let new_fat_size = u32::from_le_bytes([data[24], data[25], data[26], data[27]]);
-
         Ok(Some(Self {
             phase,
-            old_total_sectors,
-            new_total_sectors,
-            old_fat_size,
-            new_fat_size,
+            old_total_sectors: get_u32(data, OLD_TOTAL_SECTORS_OFFSET),
+            new_total_sectors: get_u32(data, NEW_TOTAL_SECTORS_OFFSET),
+            old_fat_size: get_u32(data, OLD_FAT_SIZE_OFFSET),
+            new_fat_size: get_u32(data, NEW_FAT_SIZE_OFFSET),
             shift_progress: Self::parse_shift_progress(data)?,
             volume_id: if version == CHECKPOINT_VERSION_1 {
                 None

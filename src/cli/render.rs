@@ -2,6 +2,11 @@
 
 use fat32expander::{FSInfo, FSInfoReport, ResizeEvent, ResizeResult};
 
+/// `bytes` in mebibytes, for display next to the exact byte count.
+fn mib(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
 /// Render a filesystem report for a human reader.
 ///
 /// [F-R42] moved this out of the library. `FSInfoReport` is data; section
@@ -80,9 +85,9 @@ pub fn render_fs_info(info: &FSInfoReport) -> String {
 
     out.push_str("\nSize:\n");
     out.push_str(&format!(
-        "  Current size: {} bytes ({:.2} MB)\n",
+        "  Current size: {} bytes ({:.2} MiB)\n",
         info.current_size_bytes(),
-        info.current_size_bytes() as f64 / (1024.0 * 1024.0)
+        mib(info.current_size_bytes())
     ));
     out.push_str(&format!("  Device sectors: {}\n", info.device_sectors()));
     out.push_str(&format!(
@@ -91,9 +96,9 @@ pub fn render_fs_info(info: &FSInfoReport) -> String {
     ));
     if let Some(max_size) = info.max_new_size_bytes() {
         out.push_str(&format!(
-            "  Max new size: {} bytes ({:.2} MB)\n",
+            "  Max new size: {} bytes ({:.2} MiB)\n",
             max_size,
-            max_size as f64 / (1024.0 * 1024.0)
+            mib(max_size)
         ));
     }
 
@@ -199,19 +204,19 @@ pub fn print_resize_report(device: &str, result: &ResizeResult, dry_run: bool) {
     println!("Summary:");
     println!("  Device: {}", device);
     println!(
-        "  Old size: {:.2} MB ({} bytes)",
-        result.old_size_bytes as f64 / (1024.0 * 1024.0),
+        "  Old size: {:.2} MiB ({} bytes)",
+        mib(result.old_size_bytes),
         result.old_size_bytes
     );
     println!(
-        "  New size: {:.2} MB ({} bytes)",
-        result.new_size_bytes as f64 / (1024.0 * 1024.0),
+        "  New size: {:.2} MiB ({} bytes)",
+        mib(result.new_size_bytes),
         result.new_size_bytes
     );
     let increase = result.new_size_bytes.saturating_sub(result.old_size_bytes);
     println!(
-        "  Size increase: {:.2} MB ({} bytes)",
-        increase as f64 / (1024.0 * 1024.0),
+        "  Size increase: {:.2} MiB ({} bytes)",
+        mib(increase),
         increase
     );
     println!("  FAT tables grew: {}", result.fat_grew);

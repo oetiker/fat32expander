@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - added `Debug` trait implementation for `Device`
 
 ### Changed
+- `fat32expander info` and `fat32expander resize` now label sizes "MiB" instead of "MB" ("Current size: 35840000 bytes (34.18 MiB)"). The numbers do not change: they were always mebibytes (1024 × 1024 bytes), and the exact byte count is still printed beside them.
 - For programs that use `fat32expander` as a library: with `default-features = false` in their `Cargo.toml`, they no longer build `clap` and `anyhow`, which only the `fat32expander` command uses. The command is now behind the default `cli` feature; `cargo build` and `cargo install` work as before.
 - For programs that use `fat32expander` as a library: `Error` and `ResizeResult` are marked `#[non_exhaustive]`, so a `match` on `Error` needs a `_` arm and a `ResizeResult` can no longer be built outside the library. In return, later versions can add error kinds and result fields without breaking such programs.
 - For programs that use `fat32expander` as a library: `Device::write_bytes_at`, `Device::read_bytes_at`, `Device::size_bytes`, `BootSector::as_bytes_mut`, `BootSector::set_root_cluster`, `BootSector::fs_type`, `FSInfo::as_bytes_mut` and `FSInfo::set_next_free` are removed. `write_bytes_at` wrote anywhere on the device without the checks every other write goes through.

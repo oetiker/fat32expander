@@ -103,7 +103,7 @@ fn library_resize(device: &Path) -> (ResizeResult, Vec<ResizeEvent>) {
 
 /// The report a finished, non-dry-run resize of `device` prints on stdout.
 fn expected_report(device: &Path, result: &ResizeResult) -> String {
-    let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+    let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
     let increase = result.new_size_bytes - result.old_size_bytes;
     let mut s = String::from("\nResize complete!\n\nOperations performed:\n");
     for op in &result.operations {
@@ -112,18 +112,18 @@ fn expected_report(device: &Path, result: &ResizeResult) -> String {
     s += "\nSummary:\n";
     s += &format!("  Device: {}\n", device.display());
     s += &format!(
-        "  Old size: {:.2} MB ({} bytes)\n",
-        mb(result.old_size_bytes),
+        "  Old size: {:.2} MiB ({} bytes)\n",
+        mib(result.old_size_bytes),
         result.old_size_bytes
     );
     s += &format!(
-        "  New size: {:.2} MB ({} bytes)\n",
-        mb(result.new_size_bytes),
+        "  New size: {:.2} MiB ({} bytes)\n",
+        mib(result.new_size_bytes),
         result.new_size_bytes
     );
     s += &format!(
-        "  Size increase: {:.2} MB ({} bytes)\n",
-        mb(increase),
+        "  Size increase: {:.2} MiB ({} bytes)\n",
+        mib(increase),
         increase
     );
     s += &format!("  FAT tables grew: {}\n", result.fat_grew);
@@ -289,7 +289,7 @@ fn version_prints_the_build_time_as_a_utc_date_and_time() {
 }
 
 #[test]
-fn info_prints_the_current_and_the_largest_size_in_bytes_and_mb() {
+fn info_prints_the_current_and_the_largest_size_in_bytes_and_mib() {
     let image = growable_image();
 
     let out = run(&["info"], image.path());
@@ -298,8 +298,8 @@ fn info_prints_the_current_and_the_largest_size_in_bytes_and_mb() {
     let stdout = text(&out.stdout);
     assert!(
         stdout.contains(
-            "\nSize:\n  Current size: 35840000 bytes (34.18 MB)\n  Device sectors: 90000\n  \
-             Can grow: Yes\n  Max new size: 46080000 bytes (43.95 MB)\n"
+            "\nSize:\n  Current size: 35840000 bytes (34.18 MiB)\n  Device sectors: 90000\n  \
+             Can grow: Yes\n  Max new size: 46080000 bytes (43.95 MiB)\n"
         ),
         "got:\n{stdout}"
     );
