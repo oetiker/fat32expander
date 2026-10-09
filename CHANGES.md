@@ -10,7 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### New
 - Programs that use `fat32expander` as a library can follow a resize as it runs: `resize_fat32_with_events` reports each step, a resumed or ignored recovery record, and, with `verbose`, the layout and every cluster moved. The library no longer writes these messages to the terminal itself; the `fat32expander` command prints them as before.
 - added a note to the readme why we are not shrinking
-- added `ClusterId` and `SectorNum` newtype wrappers for improved type safety
 - added `Debug` trait implementation for `Device`
 
 ### Changed
@@ -22,10 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - replaced `String` with `PathBuf` for device paths throughout the codebase
 - public API functions now accept `impl AsRef<Path>` instead of `&str`
 - `ResizeOptions` now uses builder pattern: `ResizeOptions::new(path).dry_run(true)`
-- replaced glob re-exports (`pub use module::*`) with explicit exports in `fat32/mod.rs` and `resize/mod.rs`
-- extracted duplicate logic in `Device::open()` and `open_readonly()` into shared `open_impl()` helper
-- extracted `print_verbose_resize_info()` helper from `resize_fat32()`
-- used `let-else` pattern for cleaner checkpoint parsing
 
 ### Fixed
 - Growing a filesystem whose FAT was larger than `fat32expander` would have made it wrote a smaller FAT size into the boot sector, so every file and directory then pointed at the wrong data. The FAT now never shrinks.
