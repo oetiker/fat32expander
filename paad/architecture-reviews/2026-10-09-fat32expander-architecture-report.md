@@ -139,7 +139,7 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Status:** Fixed
 - **Status reason:** Added `BootSector::MAX_FAT32_CLUSTERS` (0x0FFFFFF5). Validation rejects a volume above it with `InvalidFAT32` (exit 5); `calculate_new_size` refuses growth past it with the new `Error::TooManyClusters` (exit 13, documented in README). Tests: `a_cluster_count_above_the_fat32_ceiling_is_rejected`, `growth_past_the_fat32_cluster_ceiling_is_refused`.
 - **Status date:** 2026-10-10 07:44 UTC
-- **Status commit:** pending
+- **Status commit:** 8e46f7f
 
 ### [F-T03] Phase 0 rewrites old cluster homes while the boot sector still looks valid
 - **Category:** 26 Poor transactional boundaries
