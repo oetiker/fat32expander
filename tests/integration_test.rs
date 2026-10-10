@@ -862,3 +862,99 @@ fn root_cluster_survives_a_relocating_resize() {
     );
     assert!(check_filesystem(image.path()), "Filesystem check failed");
 }
+
+/// Copy `count` files of each size in `sizes` into the image, each with its
+/// own byte pattern, and return them as (name, content).
+fn copy_payloads(image: &std::path::Path, count: usize, sizes: &[usize]) -> Vec<(String, Vec<u8>)> {
+    let mut payloads = Vec::new();
+    for (s, &size) in sizes.iter().enumerate() {
+        for i in 0..count {
+            let name = format!("F{s}_{i:02}.BIN");
+            let seed = (s * count + i) as u32;
+            let content: Vec<u8> = (0..size as u32)
+                .map(|b| (b.wrapping_mul(31) ^ seed.wrapping_mul(97)) as u8)
+                .collect();
+            let src = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(src.path(), &content).unwrap();
+            mcopy_into(image, src.path(), &name);
+            payloads.push((name, content));
+        }
+    }
+    payloads
+}
+
+/// Assert every payload reads back byte for byte.
+fn assert_payloads_intact(image: &std::path::Path, payloads: &[(String, Vec<u8>)]) {
+    for (name, content) in payloads {
+        assert_eq!(
+            &mcopy_out(image, name),
+            content,
+            "{} did not survive the resize",
+            name
+        );
+    }
+}
+
+/// Safety net for [F-T01]. When both FATs together grow by less than one
+/// cluster, the shift moves every cluster in use by part of a cluster, so
+/// each move overlaps its own source. An uninterrupted resize at that
+/// geometry must keep every file.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn a_shift_shorter_than_one_cluster_keeps_every_file() {
+    // The geometry of `an_interrupted_sub_cluster_shift_refuses_to_resume`:
+    // 32 KiB clusters, and a FAT that grows by one sector per copy. The image
+    // is sparse, so its nominal size costs no disk.
+    let image = create_fat32_image_with_cluster_size(2200, 64);
+    let payloads = copy_payloads(image.path(), 3, &[100, 32_768, 70_000, 300_000]);
+
+    extend_image(image.path(), 2308);
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(result.fat_grew, "fixture drifted: the FAT must grow");
+    assert!(
+        (result.new_fat_size - result.old_fat_size) * 2 < 64,
+        "fixture drifted: the shift ({} -> {} per FAT) is not shorter than one cluster",
+        result.old_fat_size,
+        result.new_fat_size
+    );
+    assert!(
+        result.clusters_relocated > 0,
+        "fixture drifted: nothing moved"
+    );
+
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+    assert_payloads_intact(image.path(), &payloads);
+}
+
+/// Safety net for [F-T05]. A volume with one FAT has no copy to mirror to,
+/// and the resize reads and extends that one FAT. It must keep working.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn a_single_fat_volume_grows_and_keeps_every_file() {
+    let image = NamedTempFile::new().expect("Failed to create temp file");
+    extend_image(image.path(), 256);
+    let status = Command::new("mkfs.fat")
+        .args(["-F", "32", "-f", "1"])
+        .arg(image.path())
+        .status()
+        .expect("Failed to run mkfs.fat");
+    assert!(status.success(), "mkfs.fat failed");
+    let payloads = copy_payloads(image.path(), 5, &[100, 4096, 50_000]);
+
+    extend_image(image.path(), 512);
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(result.fat_grew, "fixture drifted: the FAT must grow");
+    let info = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(
+        info.boot().num_fats(),
+        1,
+        "fixture drifted: not a one-FAT volume"
+    );
+
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+    assert_payloads_intact(image.path(), &payloads);
+}

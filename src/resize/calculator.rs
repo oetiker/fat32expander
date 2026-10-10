@@ -578,6 +578,42 @@ mod properties {
         BootSector::from_bytes(&d).unwrap()
     }
 
+    /// Safety net for [F-T02]. `growing_a_valid_volume_plans_a_fat32_volume`
+    /// stays below two million clusters. A ceiling on the cluster count must
+    /// not refuse growth that ends at hundreds of millions of clusters.
+    #[test]
+    fn growing_to_hundreds_of_millions_of_clusters_plans_a_fat32_volume() {
+        // (sectors-per-cluster shift, clusters before, clusters after)
+        let cases: [(u8, u32, u32); 3] = [
+            (0, 100_000_000, 250_000_000),
+            (3, 100_000_000, 250_000_000),
+            (6, 20_000_000, 65_000_000),
+        ];
+
+        for (spc_shift, before, after) in cases {
+            let spc = 1u64 << spc_shift;
+            let layout = |clusters: u32| {
+                let fat_size = ((clusters as u64 + 2) * 4).div_ceil(512);
+                (fat_size as u32, 32 + 2 * fat_size + clusters as u64 * spc)
+            };
+            let (fat_size, total) = layout(before);
+            let (_, device) = layout(after);
+            let label = format!("spc={spc} {before} -> {after} clusters");
+            assert!(device <= u32::MAX as u64, "fixture overflows: {label}");
+
+            let boot = boot(spc_shift, 32, 2, total as u32, fat_size);
+            assert_eq!(boot.data_clusters(), Some(before), "fixture: {label}");
+            let calc = calculate_new_size(&boot, device)
+                .unwrap_or_else(|e| panic!("growth refused: {label} -> {e:?}"));
+            assert_eq!(calc.new_total_sectors as u64, device, "{label}");
+            assert!(
+                calc.new_data_clusters.abs_diff(after) <= after / 100,
+                "{label}: planned {} clusters",
+                calc.new_data_clusters
+            );
+        }
+    }
+
     proptest! {
         /// Any geometry, any device size: an answer or an error, never a panic.
         #[test]

@@ -293,6 +293,34 @@ mod tests {
         }
     }
 
+    /// Safety net for [F-T02]. The cases above stop at a few million clusters.
+    /// A ceiling on the cluster count must still accept volumes with hundreds
+    /// of millions of clusters, at small and large sector and cluster sizes.
+    #[test]
+    fn validation_accepts_volumes_with_hundreds_of_millions_of_clusters() {
+        // (bytes per sector, sectors per cluster, FATs, data clusters)
+        let cases: [(u16, u8, u8, u32); 4] = [
+            (512, 1, 2, 250_000_000),
+            (4096, 1, 2, 250_000_000),
+            (512, 8, 1, 250_000_000),
+            (512, 128, 2, 33_000_000),
+        ];
+
+        for (bps, spc, num_fats, clusters) in cases {
+            let fat_size = ((clusters as u64 + 2) * 4).div_ceil(bps as u64) as u32;
+            let total = 32 + num_fats as u64 * fat_size as u64 + clusters as u64 * spc as u64;
+            let label = format!("bps={bps} spc={spc} nfats={num_fats} clusters={clusters}");
+            assert!(total <= u32::MAX as u64, "fixture overflows: {label}");
+            let boot = valid_boot_sector_with(bps, spc, 32, num_fats, total as u32, fat_size);
+            assert_eq!(boot.data_clusters(), Some(clusters), "fixture: {label}");
+            assert!(
+                validate_boot_sector(&boot).is_ok(),
+                "validation rejected a legitimate filesystem: {label} -> {:?}",
+                validate_boot_sector(&boot)
+            );
+        }
+    }
+
     /// Safety net for [F-10]. Every other fixture puts FSInfo at sector 1 and
     /// the backup boot sector at 6. A validator that starts checking those
     /// pointers must keep accepting every location the FAT32 specification
