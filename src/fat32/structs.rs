@@ -212,6 +212,11 @@ impl BootSector {
     /// and a floor the resize calculator must not project a volume below.
     pub const MIN_FAT32_CLUSTERS: u32 = 65525;
 
+    /// The most data clusters a FAT32 volume can have. Clusters are numbered
+    /// from 2, and the highest usable number is 0x0FFFFFF6: from 0x0FFFFFF7
+    /// up, FAT entries mean "bad cluster" and "end of chain".
+    pub const MAX_FAT32_CLUSTERS: u32 = 0x0FFF_FFF5;
+
     /// Check if the boot sector signature is valid
     pub fn is_signature_valid(&self) -> bool {
         self.boot_signature() == Self::VALID_SIGNATURE

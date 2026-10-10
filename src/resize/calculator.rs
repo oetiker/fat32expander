@@ -188,6 +188,12 @@ pub(crate) fn calculate_new_size(
             calculation.new_data_clusters
         )));
     }
+    if calculation.new_data_clusters > BootSector::MAX_FAT32_CLUSTERS {
+        return Err(Error::TooManyClusters {
+            clusters: calculation.new_data_clusters,
+            maximum: BootSector::MAX_FAT32_CLUSTERS,
+        });
+    }
 
     Ok(calculation)
 }
@@ -540,6 +546,24 @@ mod tests {
             msg.contains("would not be FAT32"),
             "rejected for the wrong reason: {msg}"
         );
+    }
+
+    /// [F-T02]: 512-byte clusters on a device of 300 million sectors would
+    /// give about 297 million clusters, past the FAT32 ceiling. The resize is
+    /// refused, and the error names both counts.
+    #[test]
+    fn growth_past_the_fat32_cluster_ceiling_is_refused() {
+        let mut raw = create_test_boot_sector(2_000_000, 2000).as_bytes().to_vec();
+        raw[13] = 1; // one sector per cluster
+        let boot = BootSector::from_bytes(&raw).unwrap();
+
+        match calculate_new_size(&boot, 300_000_000) {
+            Err(Error::TooManyClusters { clusters, maximum }) => {
+                assert_eq!(maximum, BootSector::MAX_FAT32_CLUSTERS);
+                assert!(clusters > maximum, "{clusters} is not above {maximum}");
+            }
+            other => panic!("expected TooManyClusters, got {other:?}"),
+        }
     }
 
     #[test]

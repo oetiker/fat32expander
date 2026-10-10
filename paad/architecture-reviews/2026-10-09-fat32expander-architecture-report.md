@@ -136,6 +136,10 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Explanation:** Validation and the size calculation enforce only the minimum of 65,525 clusters. Nothing caps the count at 0x0FFFFFF5, so a small-cluster image grown onto a large device (4 KiB clusters past about 1 TiB, 512-byte clusters past about 128 GiB) "succeeds" with cluster numbers that collide with the BAD/EOC markers, and Linux refuses to mount it. No test covers it.
 - **Evidence:** `src/resize/calculator.rs:184-190`, excerpt: "if calculation.new_data_clusters < BootSector::MIN_FAT32_CLUSTERS {"; `src/fat32/validation.rs:165-172`; `src/fat32/structs.rs:213` (no maximum constant)
 - **Found by:** Security & Code Quality
+- **Status:** Fixed
+- **Status reason:** Added `BootSector::MAX_FAT32_CLUSTERS` (0x0FFFFFF5). Validation rejects a volume above it with `InvalidFAT32` (exit 5); `calculate_new_size` refuses growth past it with the new `Error::TooManyClusters` (exit 13, documented in README). Tests: `a_cluster_count_above_the_fat32_ceiling_is_rejected`, `growth_past_the_fat32_cluster_ceiling_is_refused`.
+- **Status date:** 2026-10-10 07:44 UTC
+- **Status commit:** pending
 
 ### [F-T03] Phase 0 rewrites old cluster homes while the boot sector still looks valid
 - **Category:** 26 Poor transactional boundaries

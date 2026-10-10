@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ResizeOptions` now uses builder pattern: `ResizeOptions::new(path).dry_run(true)`
 
 ### Fixed
+- Growing a filesystem with small clusters onto a very large device (4 KiB clusters past about 1 TiB, 512-byte clusters past about 128 GiB) reported success, but left more clusters than FAT32 can number, and Linux then refused to mount it. `fat32expander resize` now stops with "FAT32 allows at most 268435445" and exit code 13 and changes nothing; `fat32expander info` and `resize` reject an existing filesystem with too many clusters as not a usable FAT32 filesystem (exit code 5).
 - Growing a filesystem whose FAT was larger than `fat32expander` would have made it wrote a smaller FAT size into the boot sector, so every file and directory then pointed at the wrong data. The FAT now never shrinks.
 - Growing a filesystem whose FAT was exactly full by only a few sectors stopped halfway with "sector ... out of bounds", and every rerun failed the same way. The resize now keeps the FAT that still covers the grown volume; when the volume cannot gain a cluster on the device, it reports "already at maximum size" and changes nothing.
 - `fat32expander resize` on an image file that was mounted through a loop device (`/dev/loopN`) went ahead and changed the filesystem under the mount. It now refuses with "Device '...' is currently mounted at '...'" and exit code 4.

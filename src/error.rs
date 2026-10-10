@@ -69,6 +69,15 @@ pub enum Error {
     #[error("Filesystem is already at maximum size for this device")]
     AlreadyMaxSize,
 
+    /// [F-T02]: the grown volume would have more clusters than FAT32 can
+    /// number. Nothing was written.
+    #[error(
+        "Growing to the full device would give {clusters} clusters, but FAT32 \
+         allows at most {maximum}; the filesystem was not changed. A volume \
+         this large needs a larger cluster size"
+    )]
+    TooManyClusters { clusters: u32, maximum: u32 },
+
     // [F-R46] removed `RootRequired`. The tool no longer guesses at write
     // access from euid: it attempts the open and reports what the kernel says,
     // which is both correct for non-root callers who do have access and more
@@ -256,6 +265,7 @@ mod tests {
             | Error::BackupMismatch
             | Error::DeviceTooSmall { .. }
             | Error::AlreadyMaxSize
+            | Error::TooManyClusters { .. }
             | Error::Io(_)
             | Error::DeviceIo { .. }
             | Error::DeviceSync { .. }

@@ -170,6 +170,13 @@ fn validate_boot_sector_impl(boot: &BootSector, allow_invalidated: bool) -> Resu
             BootSector::MIN_FAT32_CLUSTERS
         )));
     }
+    if cluster_count > BootSector::MAX_FAT32_CLUSTERS {
+        return Err(Error::InvalidFAT32(format!(
+            "Cluster count {} exceeds the FAT32 maximum of {}",
+            cluster_count,
+            BootSector::MAX_FAT32_CLUSTERS
+        )));
+    }
 
     // The FS type label at offset 82 is not checked: the cluster count above
     // decides the FAT type, and formatters write all sorts of labels there.
@@ -465,6 +472,34 @@ mod tests {
             matches!(validate_boot_sector(&boot), Err(Error::InvalidFAT32(_))),
             "a sub-65525-cluster volume was accepted as FAT32: {:?}",
             validate_boot_sector(&boot)
+        );
+    }
+
+    /// [F-T02]: cluster numbers above 0x0FFFFFF6 collide with the BAD and
+    /// end-of-chain markers, so a volume with more than 0x0FFFFFF5 clusters is
+    /// not a usable FAT32 volume. Exactly at the ceiling is still accepted.
+    #[test]
+    fn a_cluster_count_above_the_fat32_ceiling_is_rejected() {
+        let with_clusters = |clusters: u32| {
+            let fat_size = ((clusters as u64 + 2) * 4).div_ceil(512) as u32;
+            let total = 32 + 2 * fat_size + clusters;
+            let boot = valid_boot_sector_with(512, 1, 32, 2, total, fat_size);
+            assert_eq!(boot.data_clusters(), Some(clusters), "fixture drifted");
+            boot
+        };
+
+        let at_ceiling = with_clusters(BootSector::MAX_FAT32_CLUSTERS);
+        assert!(
+            validate_boot_sector(&at_ceiling).is_ok(),
+            "a volume at the ceiling was rejected: {:?}",
+            validate_boot_sector(&at_ceiling)
+        );
+
+        let above = with_clusters(BootSector::MAX_FAT32_CLUSTERS + 1);
+        assert!(
+            matches!(validate_boot_sector(&above), Err(Error::InvalidFAT32(_))),
+            "a volume above the ceiling was accepted as FAT32: {:?}",
+            validate_boot_sector(&above)
         );
     }
 

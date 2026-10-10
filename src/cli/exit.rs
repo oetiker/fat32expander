@@ -19,6 +19,7 @@ pub const BACKUP_MISMATCH: u8 = 8;
 pub const NEEDS_RECOVERY: u8 = 9;
 pub const IO_FAILURE: u8 = 10;
 pub const MOUNT_STATE_UNKNOWN: u8 = 12;
+pub const DEVICE_TOO_LARGE: u8 = 13;
 // 6 was ALREADY_MAX_SIZE and was never returned: "nothing to do" exits
 // 0 ([F-R31]), and [F-05] removed the last code path that could have
 // produced it. Not reused, for the same reason as 11 below.
@@ -48,6 +49,7 @@ pub fn exit_code_for(err: &anyhow::Error) -> u8 {
         // Nothing to do is success; `main` prints why.
         Error::AlreadyMaxSize => OK,
         Error::DeviceTooSmall { .. } => DEVICE_TOO_SMALL,
+        Error::TooManyClusters { .. } => DEVICE_TOO_LARGE,
         Error::BackupMismatch => BACKUP_MISMATCH,
 
         // Everything that means "this filesystem is mid-resize": either we can
@@ -179,6 +181,13 @@ mod tests {
                 7,
             ),
             (Error::AlreadyMaxSize, 0),
+            (
+                Error::TooManyClusters {
+                    clusters: 2,
+                    maximum: 1,
+                },
+                13,
+            ),
             (Error::Io(io()), 10),
             (
                 Error::DeviceIo {

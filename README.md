@@ -121,6 +121,7 @@ as the tool changes.
 | 9 | An interrupted resize needs recovery and could not be recovered automatically |
 | 10 | I/O failure reading or writing the device |
 | 12 | Could not check whether the device is mounted — `/proc/mounts` is unreadable |
+| 13 | The grown filesystem would have more clusters than FAT32 allows (268,435,445) — the filesystem needs a larger cluster size for this device |
 
 Code 11 previously meant "root privileges required". The tool no longer guesses
 at write access from the effective uid — it attempts the open and reports what
