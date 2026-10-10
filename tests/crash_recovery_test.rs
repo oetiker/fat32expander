@@ -403,6 +403,73 @@ fn a_crash_before_the_primary_boot_write_resumes_from_fat_written() {
     assert_eq!(crash_then_resume("before_primary_boot_write"), "FatWritten");
 }
 
+/// A file large enough that the shift records its progress more than once.
+///
+/// The shift records progress at most every 1024 clusters. `FILES` fill about
+/// 90 clusters of 512 bytes, so their shift has only its first record and
+/// `before_mid_shift_record` never fires. This file adds about 2900 clusters.
+const LONG_FILE: (&str, usize) = ("long.bin", 1_500_000);
+
+/// `image_with_files(128, 200)` plus `LONG_FILE`.
+fn image_with_a_long_shift() -> NamedTempFile {
+    let image = image_with_files(128, 200);
+    let (name, len) = LONG_FILE;
+    let src = NamedTempFile::new().expect("temp file");
+    std::fs::write(src.path(), content(name, len)).expect("write source file");
+    let out = run(Command::new("mcopy")
+        .arg("-i")
+        .arg(image.path())
+        .arg(src.path())
+        .arg(format!("::{}", name)));
+    assert!(
+        out.status.success(),
+        "mcopy of {} failed: {}",
+        name,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    image
+}
+
+/// `LONG_FILE` still reads back byte for byte.
+fn assert_long_file_is_intact(path: &Path) {
+    let (name, len) = LONG_FILE;
+    let dest = NamedTempFile::new().expect("temp file");
+    let out = run(Command::new("mcopy")
+        .args(["-n", "-i"])
+        .arg(path)
+        .arg(format!("::{}", name))
+        .arg(dest.path()));
+    assert!(out.status.success(), "{} could not be read back", name);
+    assert!(
+        std::fs::read(dest.path()).expect("read extracted file") == content(name, len),
+        "{} came back with different contents",
+        name
+    );
+}
+
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_in_the_middle_of_the_data_shift_resumes_from_started() {
+    // [F-T08]: the crash comes after the moves since the first progress
+    // record are on disk, but before the next record covers them. The resume
+    // must redo those moves from the first record without reading a source
+    // the first pass already overwrote, and land where an uninterrupted
+    // resize lands.
+    let reference = image_with_a_long_shift();
+    resize_expecting_success(reference.path());
+    let expected = geometry(reference.path());
+
+    let image = image_with_a_long_shift();
+    resize_crashing_at(image.path(), "before_mid_shift_record");
+    let output = resize_expecting_success(image.path());
+
+    assert_eq!(resumed_phase(&output), "Started");
+    assert_filesystem_is_clean(image.path());
+    assert_files_are_intact(image.path());
+    assert_long_file_is_intact(image.path());
+    assert_eq!(geometry(image.path()), expected);
+}
+
 /// An image with `FILES` on it that a resize grows without growing the FAT.
 ///
 /// A fresh `mkfs.fat` image always grows the FAT, so this one is resized once

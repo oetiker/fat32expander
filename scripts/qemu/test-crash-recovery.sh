@@ -4,6 +4,7 @@
 #
 # Tests that fat32expander can recover from crashes at ALL injection points:
 #   - after_checkpoint_start
+#   - before_mid_shift_record
 #   - after_data_shift
 #   - after_checkpoint_data_copied
 #   - after_boot_invalidate
@@ -144,7 +145,7 @@ MOUNT_POINT="/mnt/fat"
 mkdir -p "$MOUNT_POINT"
 
 # All crash points to test (in order they occur during resize)
-CRASH_POINTS="after_checkpoint_start after_data_shift after_checkpoint_data_copied after_boot_invalidate after_fat_write after_checkpoint_fat_written before_primary_boot_write"
+CRASH_POINTS="after_checkpoint_start before_mid_shift_record after_data_shift after_checkpoint_data_copied after_boot_invalidate after_fat_write after_checkpoint_fat_written before_primary_boot_write"
 
 # Track results
 TESTS_PASSED=0
@@ -290,7 +291,7 @@ test_crash_point() {
     # Boot sector is invalidated BEFORE FAT write (after_boot_invalidate)
     # and restored AFTER checkpoint_fat_written
     case "$crash_point" in
-        after_checkpoint_start|after_data_shift|after_checkpoint_data_copied)
+        after_checkpoint_start|before_mid_shift_record|after_data_shift|after_checkpoint_data_copied)
             # Crash before boot invalidation - boot sector should be valid
             if [ "$BOOT_SIG" != "55aa" ]; then
                 echo "WARNING: Boot sector unexpectedly invalidated at $crash_point"

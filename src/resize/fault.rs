@@ -22,6 +22,10 @@
 pub(crate) enum CrashPoint {
     /// After writing the phase 0 checkpoint, before the data shift.
     AfterCheckpointStart,
+    /// Part-way through the data shift: the moves since the first progress
+    /// record are on disk, but the second record, which would cover them, is
+    /// not yet written.
+    BeforeMidShiftRecord,
     /// After the data shift, before the phase 1 checkpoint.
     AfterDataShift,
     /// After the phase 1 checkpoint, before the boot sector is invalidated.
@@ -40,8 +44,9 @@ pub(crate) enum CrashPoint {
 impl CrashPoint {
     /// Every crash point, in the order a resize passes them.
     #[cfg(test)]
-    pub(crate) const ALL: [CrashPoint; 7] = [
+    pub(crate) const ALL: [CrashPoint; 8] = [
         CrashPoint::AfterCheckpointStart,
+        CrashPoint::BeforeMidShiftRecord,
         CrashPoint::AfterDataShift,
         CrashPoint::AfterCheckpointDataCopied,
         CrashPoint::AfterBootInvalidate,
@@ -55,6 +60,7 @@ impl CrashPoint {
     pub(crate) fn name(self) -> &'static str {
         match self {
             CrashPoint::AfterCheckpointStart => "after_checkpoint_start",
+            CrashPoint::BeforeMidShiftRecord => "before_mid_shift_record",
             CrashPoint::AfterDataShift => "after_data_shift",
             CrashPoint::AfterCheckpointDataCopied => "after_checkpoint_data_copied",
             CrashPoint::AfterBootInvalidate => "after_boot_invalidate",
@@ -98,6 +104,7 @@ mod tests {
             names,
             [
                 "after_checkpoint_start",
+                "before_mid_shift_record",
                 "after_data_shift",
                 "after_checkpoint_data_copied",
                 "after_boot_invalidate",

@@ -178,6 +178,10 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Explanation:** The seven crash points sit between phases. A crash part-way through the longest phase, with a batch not yet synced, is tested only at unit level in the relocator, never end to end.
 - **Evidence:** `src/resize/fault.rs:22-38` (`CrashPoint`); `src/resize/executor.rs:493-510`; `scripts/qemu/test-crash-recovery.sh:147`
 - **Found by:** Security & Code Quality
+- **Status:** Fixed
+- **Status reason:** New crash point `before_mid_shift_record` fires part-way through the shift, after the moves since the first progress record are synced but before the second record covers them. `a_crash_in_the_middle_of_the_data_shift_resumes_from_started` and the QEMU crash suite (now 8 points) resume from it with files intact and the same geometry as an uninterrupted resize.
+- **Status date:** 2026-10-10 07:14 UTC
+- **Status commit:** 6dc23d2
 
 ### [F-T09] Backup area: backup sector 0 breaks the commit order; backup FSInfo never written
 - **Category:** 17 No clear ownership of data (also 26)

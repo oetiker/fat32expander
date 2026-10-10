@@ -678,6 +678,9 @@ FAT32_CRASH_AT=after_boot_invalidate ./fat32expander resize image.img
 
 Available crash points:
 - `after_checkpoint_start`
+- `before_mid_shift_record` (part-way through the data shift, before the
+  second progress record; fires only when the shift records progress more
+  than once)
 - `after_data_shift`
 - `after_checkpoint_data_copied`
 - `after_boot_invalidate`

@@ -494,10 +494,15 @@ fn shift_cluster_data(
 
     // Execute data shift, recording how far it has got as it descends so a
     // crash here can be resumed rather than replayed from the beginning.
+    let mut records_written = 0u32;
     let mut record_progress = |next_cluster: u32| -> Result<()> {
         if !resumable {
             return Ok(());
         }
+        if records_written == 1 {
+            maybe_crash_at(CrashPoint::BeforeMidShiftRecord);
+        }
+        records_written += 1;
         let mut cp = checkpoint.clone();
         cp.shift_progress = Some(next_cluster);
         write_checkpoint(device, record.slot, &cp)
