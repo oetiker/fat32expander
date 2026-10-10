@@ -181,7 +181,7 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Status:** Fixed
 - **Status reason:** New crash point `before_mid_shift_record` fires part-way through the shift, after the moves since the first progress record are synced but before the second record covers them. `a_crash_in_the_middle_of_the_data_shift_resumes_from_started` and the QEMU crash suite (now 8 points) resume from it with files intact and the same geometry as an uninterrupted resize.
 - **Status date:** 2026-10-10 07:14 UTC
-- **Status commit:** 6dc23d2
+- **Status commit:** 56d43ca
 
 ### [F-T09] Backup area: backup sector 0 breaks the commit order; backup FSInfo never written
 - **Category:** 17 No clear ownership of data (also 26)
