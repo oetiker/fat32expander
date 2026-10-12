@@ -282,6 +282,13 @@ test_crash_point() {
     FAT32_CRASH_AT="$crash_point" /bin/fat32expander resize --verbose "$image" > /tmp/crash_${crash_point}.log 2>&1
     CRASH_EXIT=$?
     echo "Crash exit code: $CRASH_EXIT"
+    # A crash point exits 137. Any other code means it was never reached and
+    # the run was an ordinary resize, which the steps below would pass.
+    if [ "$CRASH_EXIT" -ne 137 ]; then
+        echo "ERROR: expected a crash at $crash_point (exit 137), got exit $CRASH_EXIT"
+        cat /tmp/crash_${crash_point}.log
+        return 1
+    fi
 
     # Check boot sector state
     BOOT_SIG=$(dd if="$image" bs=1 skip=510 count=2 2>/dev/null | xxd -p)
