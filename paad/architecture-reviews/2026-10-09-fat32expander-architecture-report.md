@@ -168,7 +168,7 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Status:** Fixed
 - **Status reason:** `resize` now calls `check_resizable_fat_layout` right after reading the boot sector, before any write: it refuses `fs_version != 0` and mirroring off (`ext_flags` bit 7) with an active FAT other than 0, as the new `Error::UnsupportedFatLayout` (exit 5, "not a usable FAT32 filesystem"; no new exit code). Mirroring off with FAT 0 active still resizes, since FAT 0 is then the live FAT. `info` is unchanged. Tests: `a_fat32_version_other_than_0_0_is_refused_and_writes_nothing`, `a_volume_whose_active_fat_is_not_fat_0_is_refused_and_writes_nothing`, `a_volume_with_mirroring_off_and_fat_0_active_grows_and_keeps_every_file`. README safety list and CHANGES updated.
 - **Status date:** 2026-10-12 15:14 UTC
-- **Status commit:** pending
+- **Status commit:** dbfc821
 
 ### [F-T06] Documentation contradicts the crash-safety model
 - **Category:** 24 Inconsistent API contracts
