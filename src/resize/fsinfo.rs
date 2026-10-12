@@ -9,6 +9,7 @@ use crate::fat32::{
     boot_sectors_match, open_fat32_device, read_backup_boot_sector, read_boot_sector, read_fsinfo,
     BootSector,
 };
+use crate::resize::calculator::calculate_new_size;
 
 /// Get information about a FAT32 filesystem without modifying it
 pub fn get_fs_info(device_path: impl AsRef<std::path::Path>) -> Result<FSInfoReport> {
@@ -116,9 +117,14 @@ impl FSInfoReport {
         self.device_sectors
     }
 
-    /// Whether the device is larger than the filesystem on it.
+    /// Whether `resize` would grow the filesystem onto this device.
+    ///
+    /// A larger device is not enough: the resize also refuses when the volume
+    /// cannot gain a cluster ("Nothing to do") or would end with more clusters
+    /// than FAT32 allows. `info` used to say "Can grow: Yes" in both cases, so
+    /// this asks the same calculation the resize makes.
     pub fn can_grow(&self) -> bool {
-        self.device_sectors > self.boot.total_sectors() as u64
+        calculate_new_size(&self.boot, self.device_sectors).is_ok()
     }
 
     /// Current filesystem size in bytes.
@@ -133,5 +139,54 @@ impl FSInfoReport {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resize::testutil::test_boot_sector;
+
+    fn report(boot: BootSector, device_sectors: u64) -> FSInfoReport {
+        FSInfoReport {
+            device_path: "test.img".into(),
+            data_clusters: boot.data_clusters().unwrap(),
+            boot,
+            free_clusters: 0,
+            backup_matches: true,
+            device_sectors,
+        }
+    }
+
+    /// A FAT with no free entry, on a volume of one-sector clusters.
+    fn full_fat_boot() -> BootSector {
+        // 782 sectors x 128 entries = 100,096 entries: room for 100,094.
+        let boot = test_boot_sector(32 + 2 * 782 + 100_094, 782);
+        let mut data = boot.as_bytes().to_vec();
+        data[13] = 1; // sectors per cluster
+        BootSector::from_bytes(&data).unwrap()
+    }
+
+    /// `resize` reports "Nothing to do" here: growing the full FAT by one
+    /// sector costs two clusters, more than one extra sector adds. `info`
+    /// must not offer a growth the resize will not make.
+    #[test]
+    fn a_full_fat_that_cannot_gain_a_cluster_cannot_grow() {
+        let boot = full_fat_boot();
+        let device_sectors = boot.total_sectors() as u64 + 1;
+        let info = report(boot, device_sectors);
+
+        assert!(!info.can_grow());
+        assert_eq!(info.max_new_size_bytes(), None);
+    }
+
+    /// `resize` refuses growth past the FAT32 cluster ceiling (exit 13), so
+    /// `info` must not offer it.
+    #[test]
+    fn growth_past_the_fat32_cluster_ceiling_cannot_grow() {
+        let info = report(test_boot_sector(1_000_000, 1000), u32::MAX as u64);
+
+        assert!(!info.can_grow());
+        assert_eq!(info.max_new_size_bytes(), None);
     }
 }
