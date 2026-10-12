@@ -38,6 +38,7 @@ pub use operations::{
 };
 
 // Re-export validation
+pub(crate) use validation::check_resizable_fat_layout;
 pub use validation::{
     boot_sectors_match, validate_boot_sector, validate_boot_sector_for_recovery, validate_fsinfo,
 };

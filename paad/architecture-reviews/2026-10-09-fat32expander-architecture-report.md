@@ -165,6 +165,10 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Explanation:** `ext_flags` and `fs_version` have no caller. On a volume with mirroring disabled and FAT 2 active, the plan is made from the stale FAT 1, in-use clusters are not moved, and FAT 1 is then copied over the active FAT. The setup is rare, but the tool does not refuse it.
 - **Evidence:** `src/fat32/structs.rs:135-145` (`ext_flags`, `fs_version`); `src/resize/executor.rs:353`, excerpt: "let fat = read_fat_table(&device, &boot, 0)?;"; `src/fat32/operations.rs:163-187` (`copy_fat_to_other_copies`)
 - **Found by:** Security & Code Quality
+- **Status:** Fixed
+- **Status reason:** `resize` now calls `check_resizable_fat_layout` right after reading the boot sector, before any write: it refuses `fs_version != 0` and mirroring off (`ext_flags` bit 7) with an active FAT other than 0, as the new `Error::UnsupportedFatLayout` (exit 5, "not a usable FAT32 filesystem"; no new exit code). Mirroring off with FAT 0 active still resizes, since FAT 0 is then the live FAT. `info` is unchanged. Tests: `a_fat32_version_other_than_0_0_is_refused_and_writes_nothing`, `a_volume_whose_active_fat_is_not_fat_0_is_refused_and_writes_nothing`, `a_volume_with_mirroring_off_and_fat_0_active_grows_and_keeps_every_file`. README safety list and CHANGES updated.
+- **Status date:** 2026-10-12 15:14 UTC
+- **Status commit:** pending
 
 ### [F-T06] Documentation contradicts the crash-safety model
 - **Category:** 24 Inconsistent API contracts

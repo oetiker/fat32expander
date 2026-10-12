@@ -929,6 +929,59 @@ fn an_unsupported_sector_size_exits_5_names_the_size_and_writes_nothing() {
     );
 }
 
+/// `valid_image(80, 64)`, a volume with room to grow, with `bytes` written at
+/// `offset` of both the primary and the backup boot sector, so the backup
+/// still matches.
+fn growable_image_with_boot_bytes(offset: usize, bytes: &[u8]) -> NamedTempFile {
+    let image = valid_image(80, 64);
+    let mut data = std::fs::read(image.path()).unwrap();
+    for sector in [0, 6] {
+        let at = sector * 512 + offset;
+        data[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+    std::fs::write(image.path(), &data).unwrap();
+    image
+}
+
+/// Run `resize` on `image` and assert it was refused with exit 5, with a
+/// message containing `expected`, and that nothing was written.
+fn assert_refused_as_unusable(image: &NamedTempFile, expected: &str) {
+    let before = std::fs::read(image.path()).unwrap();
+    let output = run_resize(image.path());
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "an unsupported FAT layout must exit 5.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        stderr_of(&output).contains(expected),
+        "the error must say {expected:?}.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        std::fs::read(image.path()).unwrap() == before,
+        "a refused device must not be written"
+    );
+}
+
+/// [F-T05]: a FAT32 version other than 0.0 is a format this tool does not
+/// know, so `resize` refuses it before writing anything.
+#[test]
+fn a_fat32_version_other_than_0_0_is_refused_and_writes_nothing() {
+    let image = growable_image_with_boot_bytes(42, &[1, 0]);
+    assert_refused_as_unusable(&image, "version");
+}
+
+/// [F-T05]: with mirroring off, only the active FAT is current. The resize
+/// reads, extends and mirrors FAT 0, so a volume whose active FAT is another
+/// one is refused before anything is written.
+#[test]
+fn a_volume_whose_active_fat_is_not_fat_0_is_refused_and_writes_nothing() {
+    let image = growable_image_with_boot_bytes(40, &[0x81, 0]);
+    assert_refused_as_unusable(&image, "active FAT");
+}
+
 /// Safety net for [F-28]. `version` reports the package version and a
 /// `git:` provenance field, whatever [F-28] changes about when that field is
 /// refreshed.

@@ -42,6 +42,7 @@ pub fn exit_code_for(err: &anyhow::Error) -> u8 {
         Error::MountTableUnreadable { .. } => MOUNT_STATE_UNKNOWN,
 
         Error::InvalidFAT32(_)
+        | Error::UnsupportedFatLayout(_)
         | Error::BootSectorValidation(_)
         | Error::FSInfoValidation(_)
         | Error::UnsupportedSectorSize(_) => NOT_USABLE_FAT32,
@@ -169,6 +170,7 @@ mod tests {
             (Error::DeviceMounted(s(), s()), 4),
             (Error::DeviceBusy(s()), 4),
             (Error::InvalidFAT32(s()), 5),
+            (Error::UnsupportedFatLayout(s()), 5),
             (Error::BootSectorValidation(s()), 5),
             (Error::BootSectorInvalidated, 9),
             (Error::FSInfoValidation(s()), 5),

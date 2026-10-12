@@ -957,3 +957,33 @@ fn a_single_fat_volume_grows_and_keeps_every_file() {
     assert!(check_filesystem(image.path()), "Filesystem check failed");
     assert_payloads_intact(image.path(), &payloads);
 }
+
+/// [F-T05]: with mirroring off and FAT 0 active, FAT 0 is the live FAT, which
+/// is the one the resize reads and extends. Such a volume still grows and
+/// keeps every file, and stays unmirrored.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn a_volume_with_mirroring_off_and_fat_0_active_grows_and_keeps_every_file() {
+    let image = create_fat32_image(256);
+    let payloads = copy_payloads(image.path(), 5, &[100, 4096, 50_000]);
+    let mut data = std::fs::read(image.path()).unwrap();
+    let backup = get_fs_info(image.path())
+        .expect("Failed to get fs info")
+        .boot()
+        .backup_boot_sector() as usize;
+    for sector in [0, backup] {
+        data[sector * 512 + 40..sector * 512 + 42].copy_from_slice(&0x0080u16.to_le_bytes());
+    }
+    std::fs::write(image.path(), &data).unwrap();
+
+    extend_image(image.path(), 512);
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(result.fat_grew, "fixture drifted: the FAT must grow");
+    let info = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(info.boot().ext_flags(), 0x0080, "mirroring must stay off");
+
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+    assert_payloads_intact(image.path(), &payloads);
+}

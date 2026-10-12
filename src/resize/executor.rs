@@ -7,10 +7,10 @@
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::fat32::{
-    boot_sectors_match, copy_fat_to_other_copies, fat_entry, open_fat32_device,
-    read_backup_boot_sector, read_boot_sector_for_recovery, read_fat_table, read_fsinfo,
-    write_backup_boot_sector, write_boot_sector, write_fsinfo, zero_fat_extension, BootSector,
-    FSInfo,
+    boot_sectors_match, check_resizable_fat_layout, copy_fat_to_other_copies, fat_entry,
+    open_fat32_device, read_backup_boot_sector, read_boot_sector_for_recovery, read_fat_table,
+    read_fsinfo, write_backup_boot_sector, write_boot_sector, write_fsinfo, zero_fat_extension,
+    BootSector, FSInfo,
 };
 use crate::resize::calculator::{calculate_new_size, SizeCalculation};
 use crate::resize::checkpoint::{
@@ -241,6 +241,7 @@ fn prepare_resize(options: &ResizeOptions, report: &mut Reporter) -> Result<Prep
         "Read boot sector ({}-byte sectors)",
         boot.bytes_per_sector()
     ));
+    check_resizable_fat_layout(&boot)?;
 
     // Read FSInfo. It comes first because it marks where an interrupted
     // resize left its checkpoint ([F-03]).

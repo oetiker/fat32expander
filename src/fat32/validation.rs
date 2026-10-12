@@ -231,6 +231,33 @@ pub fn boot_sectors_match(primary: &BootSector, backup: &BootSector) -> bool {
         && primary.backup_boot_sector() == backup.backup_boot_sector()
 }
 
+/// Refuse a FAT layout the resize cannot handle ([F-T05]).
+///
+/// The resize plans from FAT 0, extends it and copies it over every other
+/// FAT. With mirroring off (bit 7 of `ext_flags`) only the active FAT (bits
+/// 0-3) is current: if that is not FAT 0, the plan would miss clusters in use
+/// and the copy would overwrite the live FAT with a stale one. A FAT32
+/// version other than 0.0 is a format this tool does not know.
+pub(crate) fn check_resizable_fat_layout(boot: &BootSector) -> Result<()> {
+    let version = boot.fs_version();
+    if version != 0 {
+        return Err(Error::UnsupportedFatLayout(format!(
+            "FAT32 version {}.{}; only version 0.0 is supported",
+            version >> 8,
+            version & 0xFF
+        )));
+    }
+    let ext_flags = boot.ext_flags();
+    let active_fat = ext_flags & 0x0F;
+    if ext_flags & 0x80 != 0 && active_fat != 0 {
+        return Err(Error::UnsupportedFatLayout(format!(
+            "FAT mirroring is off and the active FAT is number {active_fat}; \
+             only a volume whose active FAT is number 0 can be resized"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

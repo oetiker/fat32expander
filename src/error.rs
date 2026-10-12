@@ -36,6 +36,11 @@ pub enum Error {
     #[error("Not a valid FAT32 filesystem: {0}")]
     InvalidFAT32(String),
 
+    /// [F-T05]: a FAT32 layout the resize cannot handle safely. Nothing was
+    /// written.
+    #[error("Unsupported FAT32 layout: {0}")]
+    UnsupportedFatLayout(String),
+
     #[error("Boot sector validation failed: {0}")]
     BootSectorValidation(String),
 
@@ -259,6 +264,7 @@ mod tests {
             | Error::DeviceMounted(..)
             | Error::DeviceBusy(_)
             | Error::InvalidFAT32(_)
+            | Error::UnsupportedFatLayout(_)
             | Error::BootSectorValidation(_)
             | Error::BootSectorInvalidated
             | Error::FSInfoValidation(_)

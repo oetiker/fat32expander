@@ -152,6 +152,7 @@ When a FAT32 filesystem grows significantly, the FAT (File Allocation Table) may
 
 - Refuses to operate on mounted filesystems, including an image file mounted through a loop device, and holds a block device exclusively while it resizes
 - Validates boot sector and backup boot sector match
+- Refuses a volume whose FAT mirroring is off with an active FAT other than the first, and a FAT32 version other than 0.0
 - Verifies filesystem structure before modifications
 - Syncs all changes to disk at each phase
 
