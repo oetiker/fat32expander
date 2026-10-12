@@ -214,8 +214,10 @@ pub fn read_fat_table(device: &Device, boot: &BootSector, fat_number: u8) -> Res
         let count = std::cmp::min(chunk_sectors, fat_sectors - sector);
         let data = device.read_sectors(fat_start + sector as u64, count)?;
         entries.extend(
-            data.chunks_exact(4)
-                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+            data.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes(*b)),
         );
         sector += count;
     }
