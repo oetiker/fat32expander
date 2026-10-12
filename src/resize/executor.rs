@@ -349,6 +349,12 @@ fn prepare_resize(options: &ResizeOptions, report: &mut Reporter) -> Result<Prep
         "Calculated resize: {} -> {} sectors",
         calculation.old_total_sectors, calculation.new_total_sectors
     ));
+    if device_sectors > u32::MAX as u64 {
+        report.notice(ResizeEvent::DeviceBeyondFat32Limit {
+            device_sectors,
+            used_sectors: calculation.new_total_sectors,
+        });
+    }
 
     // Read FAT table
     let fat = read_fat_table(&device, &boot, 0)?;

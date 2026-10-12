@@ -135,7 +135,7 @@ impl FSInfoReport {
     /// Size in bytes the filesystem could be grown to, if it can grow at all.
     pub fn max_new_size_bytes(&self) -> Option<u64> {
         if self.can_grow() {
-            Some(self.device_sectors * self.boot.bytes_per_sector() as u64)
+            Some(self.device_sectors.min(u32::MAX as u64) * self.boot.bytes_per_sector() as u64)
         } else {
             None
         }
@@ -188,5 +188,19 @@ mod tests {
 
         assert!(!info.can_grow());
         assert_eq!(info.max_new_size_bytes(), None);
+    }
+
+    /// On a device beyond what FAT32 can address, the resize grows the
+    /// volume to `u32::MAX` sectors, and `info` offers exactly that.
+    #[test]
+    fn a_device_beyond_the_fat32_limit_offers_the_fat32_limit() {
+        let boot = test_boot_sector(10_000_000, 2000);
+        let mut data = boot.as_bytes().to_vec();
+        data[13] = 64; // sectors per cluster
+        let boot = BootSector::from_bytes(&data).unwrap();
+        let info = report(boot, u32::MAX as u64 + 4096);
+
+        assert!(info.can_grow());
+        assert_eq!(info.max_new_size_bytes(), Some(u32::MAX as u64 * 512));
     }
 }

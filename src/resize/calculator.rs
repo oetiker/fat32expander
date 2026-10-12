@@ -104,16 +104,10 @@ pub(crate) fn calculate_new_size(
         ))
     })?;
 
-    // New total sectors is the device size (in sectors)
-    // Cap at u32::MAX since FAT32 uses 32-bit sector counts
-    let new_total_sectors = if device_sectors > u32::MAX as u64 {
-        return Err(Error::Calculation(format!(
-            "Device size {} sectors exceeds FAT32 maximum",
-            device_sectors
-        )));
-    } else {
-        device_sectors as u32
-    };
+    // New total sectors is the device size, capped at u32::MAX: a FAT32 boot
+    // sector counts sectors in 32 bits, so the rest of a larger device stays
+    // unused. This used to be refused as an internal error (exit 1).
+    let new_total_sectors = u32::try_from(device_sectors).unwrap_or(u32::MAX);
 
     // The device is smaller than the filesystem says it is. This is not a
     // shrink request: the only caller passes the device's actual size and the
@@ -618,6 +612,21 @@ mod properties {
         BootSector::from_bytes(&d).unwrap()
     }
 
+    /// A device with more sectors than a FAT32 boot sector can count grows
+    /// the volume to the largest count it can, `u32::MAX`, rather than
+    /// failing as an internal error.
+    #[test]
+    fn a_device_beyond_u32_max_sectors_grows_to_the_fat32_limit() {
+        let clusters = 20_000_000u64;
+        let fat_size = ((clusters + 2) * 4).div_ceil(512);
+        let total = 32 + 2 * fat_size + clusters * 64;
+        let boot = boot(6, 32, 2, total as u32, fat_size as u32);
+
+        let calc = calculate_new_size(&boot, u32::MAX as u64 + 1_000_000).unwrap();
+
+        assert_eq!(calc.new_total_sectors, u32::MAX);
+    }
+
     /// Safety net for [F-T02]. `growing_a_valid_volume_plans_a_fat32_volume`
     /// stays below two million clusters. A ceiling on the cluster count must
     /// not refuse growth that ends at hundreds of millions of clusters.
@@ -667,7 +676,7 @@ mod properties {
         ) {
             let boot = boot(spc_shift, reserved, fats, total, fat_size);
             if let Ok(calc) = calculate_new_size(&boot, device) {
-                prop_assert_eq!(calc.new_total_sectors as u64, device);
+                prop_assert_eq!(calc.new_total_sectors as u64, device.min(u32::MAX as u64));
             }
         }
 

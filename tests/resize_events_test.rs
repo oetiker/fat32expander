@@ -166,3 +166,97 @@ fn the_library_writes_nothing_to_stderr() {
         "the library wrote to stderr:\n{stderr}"
     );
 }
+
+/// Sectors on the device of `image_beyond_the_fat32_limit`: more than the
+/// `u32` sector count of a FAT32 boot sector can name.
+const BEYOND_LIMIT_SECTORS: u64 = u32::MAX as u64 + 4096;
+
+/// A FAT32 volume of 65,600 clusters of 64 sectors on a sparse file of
+/// `BEYOND_LIMIT_SECTORS` sectors. Only the first sectors are written.
+///
+/// `None` when the filesystem under the temp directory refuses a file over
+/// 2 TiB (ext4 without the `huge_file` feature does).
+fn image_beyond_the_fat32_limit() -> Option<NamedTempFile> {
+    const CLUSTERS: usize = 65_600;
+    const SPC: usize = 64;
+    let fat_size = ((CLUSTERS + 2) * 4).div_ceil(512);
+    let total_sectors = (RESERVED_SECTORS + 2 * fat_size + CLUSTERS * SPC) as u32;
+
+    let mut data = vec![0u8; (RESERVED_SECTORS + 2 * fat_size) * 512];
+    let boot = &mut data[0..512];
+    boot[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+    boot[3..11].copy_from_slice(b"MSDOS5.0");
+    boot[11..13].copy_from_slice(&512u16.to_le_bytes());
+    boot[13] = SPC as u8;
+    boot[14..16].copy_from_slice(&(RESERVED_SECTORS as u16).to_le_bytes());
+    boot[16] = 2; // number of FATs
+    boot[21] = 0xF8;
+    boot[32..36].copy_from_slice(&total_sectors.to_le_bytes());
+    boot[36..40].copy_from_slice(&(fat_size as u32).to_le_bytes());
+    boot[44..48].copy_from_slice(&2u32.to_le_bytes()); // root cluster
+    boot[48] = 1; // FSInfo sector
+    boot[50] = 6; // backup boot sector
+    boot[82..90].copy_from_slice(b"FAT32   ");
+    boot[510] = 0x55;
+    boot[511] = 0xAA;
+    let primary = data[0..512].to_vec();
+    data[6 * 512..7 * 512].copy_from_slice(&primary);
+
+    let fsinfo = &mut data[512..1024];
+    fsinfo[0..4].copy_from_slice(b"RRaA");
+    fsinfo[484..488].copy_from_slice(b"rrAa");
+    fsinfo[488..492].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    fsinfo[492..496].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    fsinfo[508..512].copy_from_slice(&0xAA55_0000u32.to_le_bytes());
+
+    for fat in 0..2 {
+        let at = (RESERVED_SECTORS + fat * fat_size) * 512;
+        for (entry, value) in [0x0FFF_FFF8u32, 0x0FFF_FFFF, 0x0FFF_FFFF]
+            .iter()
+            .enumerate()
+        {
+            data[at + entry * 4..at + entry * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    let file = NamedTempFile::new().expect("temp file");
+    std::fs::write(file.path(), &data).expect("write image");
+    match file.as_file().set_len(BEYOND_LIMIT_SECTORS * 512) {
+        Ok(()) => Some(file),
+        Err(e) if e.kind() == std::io::ErrorKind::FileTooLarge => None,
+        Err(e) => panic!("grow the sparse image: {e}"),
+    }
+}
+
+/// A device with more sectors than FAT32 can address used to be refused as
+/// an internal failure (exit 1). The volume now grows to the largest size
+/// FAT32 can describe, and the resize says the rest of the device stays
+/// unused.
+#[test]
+fn a_device_beyond_the_fat32_limit_grows_the_volume_to_that_limit() {
+    // Skipping where the host cannot hold the image keeps local runs green,
+    // but a skip in CI would hide a regression, so CI fails instead.
+    let Some(image) = image_beyond_the_fat32_limit() else {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "the temp directory cannot hold a file over 2 TiB; set TMPDIR to one that can"
+        );
+        eprintln!("SKIPPED: the temp directory cannot hold a file over 2 TiB");
+        return;
+    };
+    let mut events = Vec::new();
+    let result =
+        resize_fat32_with_events(ResizeOptions::new(image.path()).dry_run(true), &mut |e| {
+            events.push(e.clone())
+        })
+        .expect("a device beyond the FAT32 limit must not be refused");
+
+    assert_eq!(result.new_total_sectors, u32::MAX);
+    assert!(
+        events.contains(&ResizeEvent::DeviceBeyondFat32Limit {
+            device_sectors: BEYOND_LIMIT_SECTORS,
+            used_sectors: u32::MAX,
+        }),
+        "the resize must say the rest of the device stays unused: {events:?}"
+    );
+}

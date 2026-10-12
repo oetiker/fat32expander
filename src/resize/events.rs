@@ -6,8 +6,9 @@
 
 /// Something a resize reports while it runs.
 ///
-/// [`Step`](ResizeEvent::Step) and [`Resuming`](ResizeEvent::Resuming) and
-/// [`StaleCheckpointIgnored`](ResizeEvent::StaleCheckpointIgnored) are always
+/// [`Step`](ResizeEvent::Step), [`Resuming`](ResizeEvent::Resuming),
+/// [`StaleCheckpointIgnored`](ResizeEvent::StaleCheckpointIgnored) and
+/// [`DeviceBeyondFat32Limit`](ResizeEvent::DeviceBeyondFat32Limit) are always
 /// reported. The others are detail, reported only when
 /// [`ResizeOptions::verbose`](crate::ResizeOptions::verbose) is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,13 @@ pub enum ResizeEvent {
     /// A checkpoint was found that belongs to another filesystem; it is
     /// ignored, and a fresh resize overwrites it.
     StaleCheckpointIgnored { sector: u64 },
+    /// The device has more sectors than a FAT32 boot sector can count. The
+    /// volume grows to `used_sectors`, and the rest of the device stays
+    /// unused.
+    DeviceBeyondFat32Limit {
+        device_sectors: u64,
+        used_sectors: u32,
+    },
     /// The layout before and after the resize. Detail.
     Layout {
         old_total_sectors: u32,

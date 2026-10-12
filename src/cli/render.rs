@@ -124,6 +124,16 @@ pub fn print_event(event: &ResizeEvent) {
                 "Ignoring a resize checkpoint at sector {sector}: it was left by another filesystem"
             );
         }
+        ResizeEvent::DeviceBeyondFat32Limit {
+            device_sectors,
+            used_sectors,
+        } => {
+            eprintln!(
+                "The device has {device_sectors} sectors, but FAT32 can use at most \
+                 {used_sectors}; the remaining {} sectors stay unused",
+                device_sectors - *used_sectors as u64
+            );
+        }
         ResizeEvent::Layout {
             old_total_sectors,
             old_fat_size,
