@@ -132,7 +132,7 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Status:** Fixed
 - **Status reason:** The calculator never plans a shift shorter than one cluster: when `num_fats × FAT growth < sectors_per_cluster` it grows the FAT to `old + ceil(spc / num_fats)` (costs less than one cluster; `AlreadyMaxSize` if the volume would lose clusters). The data shift records progress unconditionally and refuses a sub-cluster plan with moves before its first write. `ShiftProgressMissing` no longer claims the filesystem is intact; TECHGUIDE and CHANGES updated. New tests: proptest `a_growing_fat_shifts_the_data_by_at_least_one_cluster`, `a_shift_shorter_than_one_cluster_is_refused_before_any_write`, crash tests `a_crash_at_the_start_of_a_short_fat_growth_resumes` and `a_crash_in_the_middle_of_a_short_fat_growth_resumes`. With the user's approval the two crash tests that asserted the flaw (`an_interrupted_sub_cluster_shift_exits_9`, `..._refuses_to_resume`) were deleted and the fixture guard of `a_shift_shorter_than_one_cluster_keeps_every_file` was inverted.
 - **Status date:** 2026-10-12 09:33 UTC
-- **Status commit:** pending
+- **Status commit:** 8089141
 
 ### [F-T02] No upper bound on the FAT32 cluster count
 - **Category:** 30 Security as an afterthought (untrusted geometry not bounded)
