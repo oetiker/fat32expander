@@ -166,6 +166,22 @@ pub(crate) fn calculate_new_size(
         }
     }
 
+    // [F-T01]: the data area moves by `num_fats` times the FAT growth. A move
+    // shorter than one cluster overlaps each cluster with itself, so no
+    // progress can be recorded and a crash during it could not be resumed.
+    // Grow the FAT until the data moves at least one whole cluster; the extra
+    // FAT sectors cost less than one cluster.
+    let num_fats = boot.num_fats().max(1) as u64;
+    let sectors_per_cluster = boot.sectors_per_cluster().max(1) as u64;
+    if new_fat_size > old_fat_size
+        && num_fats * u64::from(new_fat_size - old_fat_size) < sectors_per_cluster
+    {
+        new_fat_size = old_fat_size.saturating_add(sectors_per_cluster.div_ceil(num_fats) as u32);
+        if clusters_with(new_fat_size).is_some_and(|c| c < old_data_clusters) {
+            return Err(Error::AlreadyMaxSize);
+        }
+    }
+
     // Calculate the new layout, from the geometry the volume will actually have
     let calculation = SizeCalculation::for_geometry(
         boot,
@@ -683,5 +699,29 @@ mod properties {
             );
         }
 
+        /// [F-T01]: a growing FAT shifts the data by at least one cluster.
+        /// A shorter shift overlaps each cluster with itself, so its progress
+        /// cannot be recorded and a crash during it could not be resumed.
+        #[test]
+        fn a_growing_fat_shifts_the_data_by_at_least_one_cluster(
+            spc_shift in 0u8..8,
+            reserved in 8u16..64,
+            fats in 1u8..=2,
+            clusters in BootSector::MIN_FAT32_CLUSTERS..2_000_000,
+            growth in 1u64..8_000_000,
+        ) {
+            let spc = 1u64 << spc_shift;
+            let fat_size = ((clusters as u64 + 2) * 4).div_ceil(512) as u32;
+            let total = reserved as u64 + fats as u64 * fat_size as u64 + clusters as u64 * spc;
+            prop_assume!(total + growth <= u32::MAX as u64);
+            let boot = boot(spc_shift, reserved, fats, total as u32, fat_size);
+
+            if let Ok(calc) = calculate_new_size(&boot, total + growth) {
+                if calc.new_fat_size > calc.old_fat_size {
+                    let shift = fats as u64 * (calc.new_fat_size - calc.old_fat_size) as u64;
+                    prop_assert!(shift >= spc, "shift of {} sectors, cluster of {}", shift, spc);
+                }
+            }
+        }
     }
 }

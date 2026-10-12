@@ -81,11 +81,16 @@ fn run(cmd: &mut Command) -> std::process::Output {
 /// A `size_mb` FAT32 image carrying `FILES`, in a file grown to `grown_mb` so
 /// there is room to resize into.
 fn image_with_files(size_mb: u32, grown_mb: u32) -> NamedTempFile {
+    image_with_files_made_by(&["-F", "32"], size_mb, grown_mb)
+}
+
+/// `image_with_files`, formatted by `mkfs.fat` with `mkfs_args`.
+fn image_with_files_made_by(mkfs_args: &[&str], size_mb: u32, grown_mb: u32) -> NamedTempFile {
     let file = NamedTempFile::new().expect("temp file");
     truncate(file.path(), size_mb);
 
     let status = Command::new("mkfs.fat")
-        .args(["-F", "32"])
+        .args(mkfs_args)
         .arg(file.path())
         .status()
         .expect("failed to run mkfs.fat");
@@ -470,6 +475,48 @@ fn a_crash_in_the_middle_of_the_data_shift_resumes_from_started() {
     assert_eq!(geometry(image.path()), expected);
 }
 
+/// A 32 KB-cluster image whose FAT grows by too little to shift the data a
+/// whole cluster unless the calculator rounds the growth up: 2200 MiB grown
+/// to 2308 MiB, carrying `FILES`. The image is sparse, so its nominal size
+/// costs no disk.
+fn image_with_a_short_fat_growth() -> NamedTempFile {
+    image_with_files_made_by(&["-F", "32", "-s", "64"], 2200, 2308)
+}
+
+/// Crash at `crash_point` on `image_with_a_short_fat_growth`, resume, and
+/// assert the filesystem lands where an uninterrupted resize lands.
+fn short_fat_growth_crash_then_resume(crash_point: &str) {
+    let reference = image_with_a_short_fat_growth();
+    resize_expecting_success(reference.path());
+    let expected = geometry(reference.path());
+
+    let image = image_with_a_short_fat_growth();
+    resize_crashing_at(image.path(), crash_point);
+    let output = resize_expecting_success(image.path());
+
+    assert_eq!(resumed_phase(&output), "Started");
+    assert_filesystem_is_clean(image.path());
+    assert_files_are_intact(image.path());
+    assert_eq!(geometry(image.path()), expected);
+}
+
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_at_the_start_of_a_short_fat_growth_resumes() {
+    // [F-T01]: with 32 KB clusters and a FAT that grows by one sector, the
+    // shift used to be shorter than one cluster and recorded no progress, so
+    // even a crash before the first move could not be resumed.
+    short_fat_growth_crash_then_resume("after_checkpoint_start");
+}
+
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_in_the_middle_of_a_short_fat_growth_resumes() {
+    // [F-T01]: the shift moves one cluster between records here, so a crash
+    // after some moves resumes from the last record.
+    short_fat_growth_crash_then_resume("before_mid_shift_record");
+}
+
 /// An image with `FILES` on it that a resize grows without growing the FAT.
 ///
 /// A fresh `mkfs.fat` image always grows the FAT, so this one is resized once
@@ -527,32 +574,6 @@ fn a_crash_inside_a_commit_without_fat_growth_is_recoverable() {
         expected,
         "a commit rerun after a crash produced different geometry than an \
          uninterrupted one"
-    );
-}
-
-#[test]
-#[ignore = "requires mkfs.fat, dosfsck and mtools"]
-fn an_interrupted_sub_cluster_shift_exits_9() {
-    // [F-06]: the refusal in `an_interrupted_sub_cluster_shift_refuses_to_resume`
-    // is a filesystem that needs recovery, so it exits 9, not 1. Same fixture.
-    let image = NamedTempFile::new().expect("temp file");
-    truncate(image.path(), 2200);
-    let status = Command::new("mkfs.fat")
-        .args(["-F", "32", "-s", "64"])
-        .arg(image.path())
-        .status()
-        .expect("failed to run mkfs.fat");
-    assert!(status.success(), "mkfs.fat failed");
-    truncate(image.path(), 2308);
-
-    resize_crashing_at(image.path(), "after_checkpoint_start");
-
-    let out = run(Command::new(BIN).arg("resize").arg(image.path()));
-    assert_eq!(
-        out.status.code(),
-        Some(9),
-        "a shift with no progress record needs recovery:\n{}",
-        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -714,51 +735,6 @@ fn a_completed_resize_leaves_nothing_for_a_second_run_to_resume() {
     );
     assert_filesystem_is_clean(image.path());
     assert_files_are_intact(image.path());
-}
-
-#[test]
-#[ignore = "requires mkfs.fat, dosfsck and mtools"]
-fn an_interrupted_sub_cluster_shift_refuses_to_resume() {
-    // The other side of the `Started` branch. When the whole shift is shorter
-    // than one cluster, no move can ever be safely replayed, so the run
-    // records no progress -- and a resume that finds a phase-0 checkpoint with
-    // no progress record must refuse rather than copy shifted data over
-    // itself.
-    //
-    // Reaching it needs `num_fats * fat_growth < sectors_per_cluster`: a
-    // 32 KB-cluster filesystem whose FAT grows by exactly one sector, which
-    // needs enough clusters to clear the FAT32 minimum. The image is sparse,
-    // so its nominal size costs no disk.
-    let image = NamedTempFile::new().expect("temp file");
-    truncate(image.path(), 2200);
-    let status = Command::new("mkfs.fat")
-        .args(["-F", "32", "-s", "64"])
-        .arg(image.path())
-        .status()
-        .expect("failed to run mkfs.fat");
-    assert!(status.success(), "mkfs.fat failed");
-    truncate(image.path(), 2308);
-
-    resize_crashing_at(image.path(), "after_checkpoint_start");
-
-    let out = run(Command::new(BIN).arg("resize").arg(image.path()));
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        !out.status.success(),
-        "resuming a shift with no progress record must fail:\n{}",
-        text
-    );
-    assert!(
-        text.contains("no progress record"),
-        "the refusal must say why it cannot resume:\n{}",
-        text
-    );
-    // Refusing is only the right answer if it leaves the filesystem alone.
-    assert_filesystem_is_clean(image.path());
 }
 
 /// The "FAT tables grew:" line of a resize summary.

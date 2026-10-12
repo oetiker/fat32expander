@@ -225,8 +225,8 @@ pub enum Error {
     /// the point it reached is unknown.
     #[error(
         "Interrupted data shift left no progress record, so the point it reached is unknown; \
-         resuming would copy already-shifted data over itself. The filesystem is intact but \
-         must be recovered from backup or repaired by hand."
+         resuming would copy already-shifted data over itself. The filesystem must be \
+         recovered from backup or repaired by hand."
     )]
     ShiftProgressMissing,
 

@@ -467,18 +467,21 @@ fn shift_cluster_data(
     // How often progress is recorded is decided by `ShiftProgress::new`,
     // which keeps it within the shift distance ([F-01]).
     //
-    // A shift shorter than one cluster overlaps a cluster with itself, so no
-    // move may ever be replayed. A single pass is still safe - each cluster is
-    // read whole before it is written - so the run proceeds, but nothing is
-    // recorded: a later resume then finds no progress record and refuses
-    // rather than corrupting.
-    let resumable = plan.shift_clusters(boot) > 0;
+    // [F-T01]: a shift shorter than one cluster overlaps a cluster with
+    // itself, so no move could ever be replayed and a crash during it could
+    // not be resumed. The calculator never plans one; refuse it here, before
+    // the first write, rather than run a shift no crash can recover from.
+    if !plan.moves.is_empty() && plan.shift_clusters(boot) == 0 {
+        return Err(Error::Calculation(format!(
+            "Planned data shift of {} sectors is shorter than one cluster of {} sectors",
+            plan.new_first_data_sector - plan.old_first_data_sector,
+            boot.sectors_per_cluster()
+        )));
+    }
 
     // Write initial checkpoint
     let mut checkpoint = calculation.checkpoint(ResizePhase::Started, boot.volume_id());
-    if resumable {
-        checkpoint.shift_progress = Some(resume_from);
-    }
+    checkpoint.shift_progress = Some(resume_from);
     write_checkpoint(device, record.slot, &checkpoint)?;
     report.step("Wrote checkpoint (phase 0: started)".to_string());
 
@@ -496,9 +499,6 @@ fn shift_cluster_data(
     // crash here can be resumed rather than replayed from the beginning.
     let mut records_written = 0u32;
     let mut record_progress = |next_cluster: u32| -> Result<()> {
-        if !resumable {
-            return Ok(());
-        }
         if records_written == 1 {
             maybe_crash_at(CrashPoint::BeforeMidShiftRecord);
         }
@@ -757,5 +757,59 @@ mod tests {
         expected[32..36].copy_from_slice(&4_000_000u32.to_le_bytes());
         expected[36..40].copy_from_slice(&3903u32.to_le_bytes());
         assert_eq!(projected.as_bytes(), expected.as_slice());
+    }
+
+    /// [F-T01]: a shift shorter than one cluster cannot record progress, so a
+    /// crash during it could never be resumed. The calculator no longer plans
+    /// one; if such a plan reaches the data shift anyway, the shift refuses it
+    /// before writing a single byte.
+    #[test]
+    fn a_shift_shorter_than_one_cluster_is_refused_before_any_write() {
+        use super::*;
+        use crate::resize::testutil::temp_device;
+
+        // 2 FATs x 1 sector of growth against 8 sectors per cluster.
+        let boot = test_boot_sector(4232, 100);
+        let new_boot = boot.with_geometry(4232, 101);
+        let (file, device) = temp_device(4232);
+        let mut fat = vec![0u32; 502];
+        for entry in &mut fat[2..=6] {
+            *entry = 0x0FFF_FFFF;
+        }
+        let plan = plan_relocation(&boot, &new_boot, &fat, 2).unwrap();
+        assert!(!plan.is_empty(), "fixture must move clusters");
+        assert_eq!(
+            plan.shift_clusters(&boot),
+            0,
+            "fixture must shift by less than a cluster"
+        );
+
+        let calculation = SizeCalculation {
+            old_total_sectors: 4232,
+            new_total_sectors: 4232,
+            old_fat_size: 100,
+            new_fat_size: 101,
+            new_data_clusters: new_boot.data_clusters().unwrap(),
+            fat_needs_growth: true,
+            fat_growth_sectors: 1,
+            first_affected_cluster: 2,
+        };
+        let record = ResizeRecord {
+            slot: CheckpointSlot::at_device_end(&device),
+            fsinfo_sector: 1,
+            interrupted: None,
+        };
+        let before = std::fs::read(file.path()).unwrap();
+        let mut sink = |_: &ResizeEvent| {};
+        let mut report = Reporter::new(&mut sink, false);
+
+        let result = shift_cluster_data(&device, &boot, &calculation, &plan, &record, &mut report);
+
+        let error = result.err();
+        assert!(matches!(error, Some(Error::Calculation(_))), "{error:?}");
+        assert!(
+            std::fs::read(file.path()).unwrap() == before,
+            "the refusal must come before any write"
+        );
     }
 }

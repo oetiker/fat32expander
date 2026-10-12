@@ -895,16 +895,15 @@ fn assert_payloads_intact(image: &std::path::Path, payloads: &[(String, Vec<u8>)
     }
 }
 
-/// Safety net for [F-T01]. When both FATs together grow by less than one
-/// cluster, the shift moves every cluster in use by part of a cluster, so
-/// each move overlaps its own source. An uninterrupted resize at that
-/// geometry must keep every file.
+/// Safety net for [F-T01]. At this geometry both FATs together would grow by
+/// less than one cluster, so the shift would move every cluster in use by
+/// part of a cluster and no progress could be recorded. The calculator rounds
+/// such a growth up to one cluster, and every file must survive the resize.
 #[test]
 #[ignore] // Requires mkfs.fat, dosfsck and mtools
 fn a_shift_shorter_than_one_cluster_keeps_every_file() {
-    // The geometry of `an_interrupted_sub_cluster_shift_refuses_to_resume`:
-    // 32 KiB clusters, and a FAT that grows by one sector per copy. The image
-    // is sparse, so its nominal size costs no disk.
+    // 32 KiB clusters, and a FAT that needs to grow by only one sector per
+    // copy. The image is sparse, so its nominal size costs no disk.
     let image = create_fat32_image_with_cluster_size(2200, 64);
     let payloads = copy_payloads(image.path(), 3, &[100, 32_768, 70_000, 300_000]);
 
@@ -914,8 +913,8 @@ fn a_shift_shorter_than_one_cluster_keeps_every_file() {
         resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
     assert!(result.fat_grew, "fixture drifted: the FAT must grow");
     assert!(
-        (result.new_fat_size - result.old_fat_size) * 2 < 64,
-        "fixture drifted: the shift ({} -> {} per FAT) is not shorter than one cluster",
+        (result.new_fat_size - result.old_fat_size) * 2 >= 64,
+        "the calculator must round a short FAT growth up to one cluster ({} -> {} per FAT)",
         result.old_fat_size,
         result.new_fat_size
     );

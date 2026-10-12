@@ -607,7 +607,7 @@ Recovery behavior depends on the checkpoint phase:
 
 | Crash Point | Phase | Boot Sector | Recovery Action |
 |-------------|-------|-------------|-----------------|
-| After checkpoint write | Started | Valid (0xAA55) | Resume shift from its first cluster (recorded with the checkpoint); a shift shorter than one cluster records no progress and is refused with exit code 9 |
+| After checkpoint write | Started | Valid (0xAA55) | Resume shift from its first cluster (recorded with the checkpoint) |
 | After data shift | Started | Valid (0xAA55) | Resume shift from recorded progress |
 | After phase 1 checkpoint | DataCopied | Valid (0xAA55) | Skip data shift, continue |
 | After boot invalidation | DataCopied | Invalid (0x0000) | Skip data shift, continue |
@@ -659,10 +659,14 @@ Replaying the moves within `k` clusters of the record is harmless -
 why progress need not be recorded after every single move.
 
 If a checkpoint carries no progress record the position is unknown, and the
-resume is **refused** rather than guessed. The same applies to a shift shorter
-than one cluster (`k == 0`), where a cluster's destination overlaps its own
-source and no move may ever be replayed; such a resize still runs, it simply
-cannot be resumed.
+resume is **refused** rather than guessed.
+
+Every shift moves the data by at least one cluster (`k >= 1`). At `k == 0` a
+cluster's destination overlaps its own source, so no move could be replayed and
+a crash during the shift could not be resumed. When the FAT would grow by less
+than one cluster in total, the calculator grows it further, which costs less
+than one cluster of space [F-T01]. The data shift refuses a plan with `k == 0`
+before its first write.
 
 ### Testing Crash Recovery
 

@@ -129,6 +129,10 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Explanation:** When `num_fats × FAT growth < sectors_per_cluster`, no progress record is written, so any crash in phase 0 ends every rerun in `ShiftProgressMissing` (exit 9), even a crash before the first move. Phase 0 moves every used cluster, so it is the longest phase, and the geometry is common with large clusters and modest growth. The error text says "The filesystem is intact" although after a mid-shift crash neither layout is; README promises resume without qualification, and the crash suites never use this geometry.
 - **Evidence:** `src/resize/executor.rs:462-504` (`shift_cluster_data`), excerpt: "let resumable = plan.shift_clusters(boot) > 0;"; `src/error.rs:217-221`; README.md:157-166; test `execute_relocation_handles_a_shift_shorter_than_one_cluster` (`src/resize/relocator.rs:985-1000`) proves the geometry is reachable
 - **Found by:** Integration & Data
+- **Status:** Fixed
+- **Status reason:** The calculator never plans a shift shorter than one cluster: when `num_fats × FAT growth < sectors_per_cluster` it grows the FAT to `old + ceil(spc / num_fats)` (costs less than one cluster; `AlreadyMaxSize` if the volume would lose clusters). The data shift records progress unconditionally and refuses a sub-cluster plan with moves before its first write. `ShiftProgressMissing` no longer claims the filesystem is intact; TECHGUIDE and CHANGES updated. New tests: proptest `a_growing_fat_shifts_the_data_by_at_least_one_cluster`, `a_shift_shorter_than_one_cluster_is_refused_before_any_write`, crash tests `a_crash_at_the_start_of_a_short_fat_growth_resumes` and `a_crash_in_the_middle_of_a_short_fat_growth_resumes`. With the user's approval the two crash tests that asserted the flaw (`an_interrupted_sub_cluster_shift_exits_9`, `..._refuses_to_resume`) were deleted and the fixture guard of `a_shift_shorter_than_one_cluster_keeps_every_file` was inverted.
+- **Status date:** 2026-10-12 09:33 UTC
+- **Status commit:** pending
 
 ### [F-T02] No upper bound on the FAT32 cluster count
 - **Category:** 30 Security as an afterthought (untrusted geometry not bounded)
