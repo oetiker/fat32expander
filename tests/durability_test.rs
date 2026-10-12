@@ -29,7 +29,8 @@ use tempfile::NamedTempFile;
 const CHECKPOINT_MAGIC: &[u8; 8] = b"FAT32RSZ";
 
 fn create_fat32_image(size_mb: u32) -> NamedTempFile {
-    let file = NamedTempFile::new().expect("Failed to create temp file");
+    let file =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
     Command::new("truncate")
         .arg("-s")
         .arg(format!("{}M", size_mb))

@@ -9,7 +9,9 @@ export PATH="$PATH:/sbin:/usr/sbin"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-WORK_DIR="${TMPDIR:-/tmp}/fat32expander-test-$$"
+# Images go under the cargo target directory unless TMPDIR says otherwise:
+# /tmp is often small or a tmpfs held in memory.
+WORK_DIR="${TMPDIR:-${CARGO_TARGET_DIR:-$PROJECT_DIR/target}/tmp}/fat32expander-test-$$"
 BINARY="$PROJECT_DIR/target/release/fat32expander"
 
 # Colors for output

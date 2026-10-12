@@ -63,7 +63,7 @@ fn growable_image() -> NamedTempFile {
         }
     }
 
-    let file = NamedTempFile::new().expect("temp file");
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     std::fs::write(file.path(), &data).expect("write image");
     file
 }

@@ -98,7 +98,7 @@ fn build(
         data[at..at + BPS].copy_from_slice(&pattern(cluster));
     }
 
-    let file = NamedTempFile::new().expect("temp file");
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     std::fs::write(file.path(), &data).expect("write image");
     Image {
         file,

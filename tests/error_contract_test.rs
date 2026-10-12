@@ -22,7 +22,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_fat32expander");
 /// zeroed image fails for the wrong reason and never reaches the CLI's recovery
 /// decision at all.
 fn image_with_signature(size_mb: u64, signature: u16) -> NamedTempFile {
-    let file = NamedTempFile::new().expect("temp file");
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     let mut data = vec![0u8; (size_mb * 1024 * 1024) as usize];
 
     let total_sectors: u32 = (size_mb * 1024 * 1024 / 512) as u32;
@@ -56,7 +56,7 @@ fn image_with_signature(size_mb: u64, signature: u16) -> NamedTempFile {
 /// `--ignored`. The geometry is chosen to clear the FAT32 minimum of 65525
 /// clusters; below that the tool correctly rejects the image as FAT12/16.
 fn valid_image(file_mb: u64, fs_mb: u64) -> NamedTempFile {
-    let file = NamedTempFile::new().expect("temp file");
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     let mut data = vec![0u8; (file_mb * 1024 * 1024) as usize];
 
     let total_sectors: u32 = (fs_mb * 1024 * 1024 / 512) as u32;

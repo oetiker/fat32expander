@@ -95,7 +95,7 @@ fn fsinfo_sector_bytes(free_clusters: u32) -> [u8; 512] {
 
 /// Build an image of `device_sectors` sectors holding the fixture filesystem.
 fn fixture_image(device_sectors: u64, free_clusters: u32, matching_backup: bool) -> NamedTempFile {
-    let file = NamedTempFile::new().expect("temp file");
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     let mut data = vec![0u8; device_sectors as usize * BYTES_PER_SECTOR as usize];
 
     let boot = boot_sector_bytes();

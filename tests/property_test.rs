@@ -88,7 +88,7 @@ fn build(extra_clusters: u32, growth: u32, in_use: &BTreeSet<u32>, seed: u8) -> 
         data[at..at + BPS].copy_from_slice(&pattern(cluster, seed));
     }
 
-    let file = NamedTempFile::new().expect("temp file");
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     std::fs::write(file.path(), &data).expect("write image");
     Image {
         file,

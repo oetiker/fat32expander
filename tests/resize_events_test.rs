@@ -54,7 +54,7 @@ fn growable_image() -> NamedTempFile {
         }
     }
 
-    let file = NamedTempFile::new().expect("temp file");
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     std::fs::write(file.path(), &data).expect("write image");
     file
 }
@@ -219,7 +219,7 @@ fn image_beyond_the_fat32_limit() -> Option<NamedTempFile> {
         }
     }
 
-    let file = NamedTempFile::new().expect("temp file");
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     std::fs::write(file.path(), &data).expect("write image");
     match file.as_file().set_len(BEYOND_LIMIT_SECTORS * 512) {
         Ok(()) => Some(file),

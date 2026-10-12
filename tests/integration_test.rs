@@ -4,7 +4,8 @@ use tempfile::NamedTempFile;
 
 /// Create a FAT32 test image of the specified size in MB
 fn create_fat32_image(size_mb: u32) -> NamedTempFile {
-    let file = NamedTempFile::new().expect("Failed to create temp file");
+    let file =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
     let path = file.path();
 
     // Create file of specified size
@@ -128,7 +129,8 @@ fn test_resize_with_fat_growth() {
 
 /// Create a FAT32 test image with an explicit cluster size.
 fn create_fat32_image_with_cluster_size(size_mb: u32, sectors_per_cluster: u32) -> NamedTempFile {
-    let file = NamedTempFile::new().expect("Failed to create temp file");
+    let file =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
     let path = file.path();
 
     Command::new("truncate")
@@ -166,7 +168,7 @@ fn mcopy_into(image: &std::path::Path, source: &std::path::Path, dest_name: &str
 
 /// Read a file back out of the image with mtools.
 fn mcopy_out(image: &std::path::Path, name: &str) -> Vec<u8> {
-    let out = tempfile::NamedTempFile::new().unwrap();
+    let out = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let status = Command::new("mcopy")
         .arg("-i")
         .arg(image)
@@ -214,7 +216,7 @@ fn test_resize_with_unaligned_fat_growth_preserves_files() {
         .collect();
 
     for (name, content) in &payloads {
-        let src = tempfile::NamedTempFile::new().unwrap();
+        let src = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
         std::fs::write(src.path(), content).unwrap();
         mcopy_into(image.path(), src.path(), name);
     }
@@ -298,7 +300,8 @@ fn image_ready_for_a_resize_without_fat_growth() -> NamedTempFile {
 fn a_resize_without_fat_growth_adds_the_new_clusters_and_keeps_files() {
     let image = image_ready_for_a_resize_without_fat_growth();
     let payload: Vec<u8> = (0..40 * 1024u32).map(|i| (i % 251) as u8).collect();
-    let source = NamedTempFile::new().expect("Failed to create payload file");
+    let source =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create payload file");
     std::fs::write(source.path(), &payload).expect("Failed to write payload");
     mcopy_into(image.path(), source.path(), "NOGROW.BIN");
 
@@ -369,7 +372,8 @@ fn rerunning_an_interrupted_commit_counts_the_new_clusters_once() {
 #[test]
 #[ignore] // Requires mkfs.fat and dosfsck
 fn a_backup_boot_sector_outside_sector_6_is_resized_in_place() {
-    let image = NamedTempFile::new().expect("Failed to create temp file");
+    let image =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
     Command::new("truncate")
         .args(["-s", "128M"])
         .arg(image.path())
@@ -480,7 +484,8 @@ fn test_resize_with_data() {
 
 /// Create a FAT32 image with explicit mkfs geometry.
 fn create_fat32_image_with_sector_size(size_mb: u32, sector_size: u32, spc: u32) -> NamedTempFile {
-    let file = NamedTempFile::new().expect("Failed to create temp file");
+    let file =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
     let path = file.path();
 
     Command::new("truncate")
@@ -585,7 +590,8 @@ fn fat_table_reads_back_in_full_for_a_valid_image() {
 #[test]
 #[ignore] // Requires mkfs.fat
 fn non_fat32_device_is_rejected() {
-    let file = NamedTempFile::new().expect("Failed to create temp file");
+    let file =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
     Command::new("truncate")
         .arg("-s")
         .arg("64M")
@@ -776,7 +782,7 @@ fn resize_preserves_files_on_a_4096_byte_sector_filesystem() {
     let image = create_fat32_image_with_sector_size(512, 4096, 1);
 
     let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
-    let source = NamedTempFile::new().unwrap();
+    let source = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     std::fs::write(source.path(), &payload).unwrap();
     mcopy_into(image.path(), source.path(), "PAYLOAD.BIN");
 
@@ -829,7 +835,8 @@ fn resize_preserves_files_on_a_4096_byte_sector_filesystem() {
 fn root_cluster_survives_a_relocating_resize() {
     let image = create_fat32_image(128);
     let payload = vec![0x5Au8; 96 * 1024];
-    let source = NamedTempFile::new().expect("Failed to create payload file");
+    let source =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create payload file");
     std::fs::write(source.path(), &payload).expect("Failed to write payload");
     mcopy_into(image.path(), source.path(), "ROOTCHK.BIN");
 
@@ -874,7 +881,7 @@ fn copy_payloads(image: &std::path::Path, count: usize, sizes: &[usize]) -> Vec<
             let content: Vec<u8> = (0..size as u32)
                 .map(|b| (b.wrapping_mul(31) ^ seed.wrapping_mul(97)) as u8)
                 .collect();
-            let src = tempfile::NamedTempFile::new().unwrap();
+            let src = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
             std::fs::write(src.path(), &content).unwrap();
             mcopy_into(image, src.path(), &name);
             payloads.push((name, content));
@@ -932,7 +939,8 @@ fn a_shift_shorter_than_one_cluster_keeps_every_file() {
 #[test]
 #[ignore] // Requires mkfs.fat, dosfsck and mtools
 fn a_single_fat_volume_grows_and_keeps_every_file() {
-    let image = NamedTempFile::new().expect("Failed to create temp file");
+    let image =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
     extend_image(image.path(), 256);
     let status = Command::new("mkfs.fat")
         .args(["-F", "32", "-f", "1"])

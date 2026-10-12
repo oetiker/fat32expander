@@ -86,7 +86,7 @@ fn image_with_files(size_mb: u32, grown_mb: u32) -> NamedTempFile {
 
 /// `image_with_files`, formatted by `mkfs.fat` with `mkfs_args`.
 fn image_with_files_made_by(mkfs_args: &[&str], size_mb: u32, grown_mb: u32) -> NamedTempFile {
-    let file = NamedTempFile::new().expect("temp file");
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     truncate(file.path(), size_mb);
 
     let status = Command::new("mkfs.fat")
@@ -97,7 +97,7 @@ fn image_with_files_made_by(mkfs_args: &[&str], size_mb: u32, grown_mb: u32) -> 
     assert!(status.success(), "mkfs.fat failed");
 
     for (name, len) in FILES {
-        let src = NamedTempFile::new().expect("temp file");
+        let src = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
         std::fs::write(src.path(), content(name, *len)).expect("write source file");
         let out = run(Command::new("mcopy")
             .arg("-i")
@@ -180,7 +180,7 @@ fn assert_filesystem_is_clean(path: &Path) {
 /// running it twice reads sources the first pass already clobbered.
 fn assert_files_are_intact(path: &Path) {
     for (name, len) in FILES {
-        let dest = NamedTempFile::new().expect("temp file");
+        let dest = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
         let out = run(Command::new("mcopy")
             .args(["-n", "-i"])
             .arg(path)
@@ -419,7 +419,7 @@ const LONG_FILE: (&str, usize) = ("long.bin", 1_500_000);
 fn image_with_a_long_shift() -> NamedTempFile {
     let image = image_with_files(128, 200);
     let (name, len) = LONG_FILE;
-    let src = NamedTempFile::new().expect("temp file");
+    let src = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     std::fs::write(src.path(), content(name, len)).expect("write source file");
     let out = run(Command::new("mcopy")
         .arg("-i")
@@ -438,7 +438,7 @@ fn image_with_a_long_shift() -> NamedTempFile {
 /// `LONG_FILE` still reads back byte for byte.
 fn assert_long_file_is_intact(path: &Path) {
     let (name, len) = LONG_FILE;
-    let dest = NamedTempFile::new().expect("temp file");
+    let dest = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     let out = run(Command::new("mcopy")
         .args(["-n", "-i"])
         .arg(path)

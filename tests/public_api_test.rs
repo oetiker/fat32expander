@@ -87,7 +87,7 @@ fn fsinfo_sector_bytes() -> [u8; 512] {
 /// An image holding the fixture filesystem, with both FATs marking clusters
 /// 2 and 3 as an end-of-chain so the FAT is not uniformly zero.
 fn fixture_image() -> NamedTempFile {
-    let file = NamedTempFile::new().expect("temp file");
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
     let mut data = vec![0u8; DEVICE_SECTORS as usize * BYTES_PER_SECTOR as usize];
 
     let boot = boot_sector_bytes();
