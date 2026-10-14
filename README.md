@@ -161,15 +161,15 @@ When a FAT32 filesystem grows significantly, the FAT (File Allocation Table) may
 If the resize operation is interrupted (power loss, system crash, kill signal), the tool can resume on the next run:
 
 1. **Checkpoint system** - Progress is recorded at each phase
-2. **Boot sector invalidation** - During critical operations, the boot sector signature is temporarily set to an invalid value (0x0000), preventing other tools from operating on the inconsistent filesystem
+2. **Boot sector invalidation** - Before the first data cluster moves, the boot sector signature is set to an invalid value (0x0000), so no other tool mounts or writes to the filesystem while it is inconsistent
 3. **Automatic resume** - Running the tool again detects the incomplete state and continues from the last checkpoint
 
 The operation proceeds in three phases:
-- **Phase 0 (Started)**: Data clusters are copied to new positions
-- **Phase 1 (DataCopied)**: FAT tables are extended (boot sector invalid during this phase)
-- **Phase 2 (FatWritten)**: Boot sector is restored with new parameters
+- **Phase 0 (Started)**: Data clusters are moved to their new positions, overwriting their old ones
+- **Phase 1 (DataCopied)**: FAT tables are extended
+- **Phase 2 (FatWritten)**: The backup boot sector and FSInfo are updated, then the boot sector is written with the new parameters and a valid signature
 
-If a crash occurs during Phase 1 (the critical window), the filesystem will appear invalid to other tools until `fat32expander` completes the recovery.
+The boot sector stays invalid from the start of Phase 0 until the end of Phase 2. A crash in between leaves a filesystem that other tools treat as invalid until `fat32expander` completes the recovery.
 
 ## Testing
 

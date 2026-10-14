@@ -501,7 +501,9 @@ below). A rerun reads the checkpoint from the marked sector, so it finds it
 even if the device has grown since the crash. If the device has shrunk past
 the marked sector, the rerun refuses with exit code 9. Without a mark (a crash
 before the mark was written, or a run of an older build) the rerun looks in
-the device's current last sector. The commit writes FSInfo without the mark.
+the device's current last sector. The commit removes the mark as its last
+write, after it has cleared the checkpoint, so a crash at any earlier point
+still leaves the mark that leads a rerun to the record.
 
 The checkpoint contains:
 - Magic signature (`FAT32RSZ`) and format version (bytes 0-8)
@@ -526,93 +528,108 @@ with exit code 9.
 ```
 Phase 0: Started
    │
-   ▼
-┌─────────────────────────────────────┐
-│ Data Shift (copy clusters forward)  │  ◄── Safe: source data preserved
-└─────────────────────────────────────┘
-   │
-   ▼
-Phase 1: DataCopied
+   ├─ Write checkpoint, mark its sector in FSInfo, sync
    │
    ▼
 ┌─────────────────────────────────────┐
 │ *** DANGER ZONE ***                 │
-│ - Invalidate boot sector (0x0000)   │  ◄── Prevents other tools from
-│ - Extend FAT tables                 │      operating on corrupt state
-│ - Sync FAT1 to FAT2                 │
+│ - Invalidate boot sector (0x0000)   │  ◄── From here on, nothing mounts
+│ - Shift clusters forward, highest   │      the volume or writes to it
+│   first, recording progress         │
+│   (old homes are overwritten)       │
+│                                     │
+│ Phase 1: DataCopied                 │
+│ - Extend FAT1, copy it to FAT2      │
+│ - Sync                              │
+│                                     │
+│ Phase 2: FatWritten                 │
+│ - Write backup boot sector          │
+│ - Write FSInfo free count (mark     │
+│   kept), sync                       │
+│ - Write primary boot sector: new    │  ◄── Commit point
+│   geometry, signature 0xAA55, sync  │
 └─────────────────────────────────────┘
    │
-   ▼
-Phase 2: FatWritten
-   │
-   ▼
-┌─────────────────────────────────────┐
-│ - Update backup boot sector         │
-│ - Update FSInfo (mark cleared)      │
-│ - Write boot sector: new geometry,  │
-│   signature restored (0xAA55)       │
-│ - Clear checkpoint                  │
-└─────────────────────────────────────┘
-   │
+   ├─ Clear checkpoint, sync
+   ├─ Remove the mark from FSInfo, sync
    ▼
 Complete
 ```
 
+A resize without FAT growth skips phases 0 and 1. Its commit first writes a
+`FatWritten` checkpoint and marks it in FSInfo, then runs phase 2 behind a
+boot sector that stays valid until the primary write.
+
 ### Boot Sector Invalidation
 
-The **danger zone** is the period when the filesystem is in an inconsistent state (FAT tables being modified). During this period, the boot sector signature is changed from `0xAA55` to `0x0000`.
+The **danger zone** runs from just before the first cluster moves to the
+write of the primary boot sector. During it the boot sector signature is
+`0x0000` instead of `0xAA55`.
 
-This serves two purposes:
+The shift overwrites the old home of each cluster it moves. Behind a valid
+boot sector, a crash during the shift would leave a volume that mounts with
+the old geometry and partly overwritten files, and anything written to it
+before the rerun would destroy data the resume still has to copy.
 
-1. **Protection from other tools**: If the system crashes and reboots, tools like `fsck.fat` or the OS's FAT driver will refuse to mount or operate on the "invalid" filesystem.
+The invalidated signature therefore serves two purposes:
 
-2. **Recovery detection**: When `fat32expander` runs again, it detects the invalidated signature and knows recovery is needed.
+1. **Protection from other tools**: after a crash, `fsck.fat` and the
+   kernel's FAT driver refuse the volume, so nothing writes to it before
+   the rerun.
+
+2. **Recovery detection**: when `fat32expander` runs again, it detects the
+   invalidated signature and knows recovery is needed.
 
 ```rust
-// Enter danger zone
+// Enter the danger zone: checkpoint and FSInfo mark are durable already.
 boot.invalidate_signature();  // Sets bytes 510-511 to 0x0000
 write_boot_sector(&device, &boot)?;
 device.sync()?;
 
-// ... perform FAT operations ...
+// ... shift clusters, extend the FAT, write backup boot sector and FSInfo ...
 
-// Exit danger zone
+// Leave the danger zone: this write is the commit point.
+let mut boot = boot.with_geometry(new_total_sectors, new_fat_size);
 boot.restore_signature();     // Sets bytes 510-511 to 0xAA55
-boot.set_total_sectors_32(new_total_sectors);
-boot.set_fat_size_32(new_fat_size);
 write_boot_sector(&device, &boot)?;
 ```
 
 ### Recovery Algorithm
 
-On startup, `fat32expander` checks for incomplete operations:
+On startup, `fat32expander` looks for an interrupted resize:
 
-```rust
-fn check_for_incomplete_resize(device, boot) -> Option<Checkpoint> {
-    if boot.signature == 0x0000 {
-        // Boot sector invalidated - MUST recover
-        // Read checkpoint from last device sector
-        return read_checkpoint(device);
-    } else if device_size > filesystem_size {
-        // Check for phase 0 crash (before invalidation)
-        if let Some(checkpoint) = read_checkpoint(device) {
-            return Some(checkpoint);
-        }
-    }
-    None
-}
-```
+1. It reads the checkpoint from the sector marked in FSInfo, or from the
+   device's last sector if FSInfo carries no mark. A marked sector past the
+   end of the device is refused with exit code 9.
+2. Behind an **invalidated** boot sector, a checkpoint must exist and must
+   match the volume serial and old geometry of the boot sector. A missing or
+   mismatching record is refused with exit code 9: it is the only way back.
+3. Behind a **valid** boot sector, a matching checkpoint is resumed. A
+   mismatching one belongs to an earlier filesystem on the device; it is
+   reported as ignored and a fresh resize overwrites it.
+4. A resume whose device is now smaller than the checkpoint's new size is
+   refused with exit code 9. A larger device is fine: the resume finishes the
+   size it was interrupted at, and a second run grows the rest.
 
-Recovery behavior depends on the checkpoint phase:
+Recovery behaviour depends on where the crash happened. Each row is a crash
+point of the fault-injection suite:
 
-| Crash Point | Phase | Boot Sector | Recovery Action |
+| Crash point | Phase | Boot sector | Recovery action |
 |-------------|-------|-------------|-----------------|
-| After checkpoint write | Started | Valid (0xAA55) | Resume shift from its first cluster (recorded with the checkpoint) |
-| After data shift | Started | Valid (0xAA55) | Resume shift from recorded progress |
-| After phase 1 checkpoint | DataCopied | Valid (0xAA55) | Skip data shift, continue |
-| After boot invalidation | DataCopied | Invalid (0x0000) | Skip data shift, continue |
-| After FAT write | DataCopied | Invalid (0x0000) | Continue from FAT sync |
-| After phase 2 checkpoint | FatWritten | Invalid (0x0000) | Just restore boot sector |
+| `after_checkpoint_start` | Started | Valid (0xAA55) | Shift from its first cluster |
+| `before_mid_shift_record` | Started | Invalid (0x0000) | Resume the shift from the recorded progress |
+| `after_data_shift` | Started | Invalid (0x0000) | Resume the shift from the recorded progress |
+| `after_checkpoint_data_copied` | DataCopied | Invalid (0x0000) | Skip the shift, write the FAT extension |
+| `after_boot_invalidate` | DataCopied | Invalid (0x0000) | Skip the shift, write the FAT extension |
+| `after_fat_write` | DataCopied | Invalid (0x0000) | Skip the shift, write the FAT extension again |
+| `after_checkpoint_fat_written` | FatWritten | Invalid (0x0000) | Commit only |
+| `before_primary_boot_write` | FatWritten | Invalid (0x0000) | Commit only |
+
+`after_checkpoint_data_copied` and `after_boot_invalidate` stop a fresh run
+at the same moment; only a resume from `DataCopied` passes
+`after_boot_invalidate` alone. Without FAT growth, `before_primary_boot_write`
+leaves a valid boot sector and a `FatWritten` checkpoint, and the rerun
+commits only.
 
 ### Resumable, Not Idempotent
 
