@@ -287,14 +287,16 @@ fn the_commit_phase_writes_boot_backup_and_fsinfo_before_clearing_the_checkpoint
         .iter()
         .rposition(|op| is_write_to(op, l.backup))
         .expect("the commit phase must write the backup boot sector");
-    let fsinfo = ops
-        .iter()
-        .rposition(|op| is_write_to(op, l.fs_info))
-        .expect("the commit phase must write FSInfo");
     let clear = ops
         .iter()
         .rposition(|op| is_write_to(op, l.checkpoint))
         .expect("the commit phase must clear the checkpoint");
+    // [F-T04]: the mark is removed after the clear, so the commit's own
+    // FSInfo write is the last one before it.
+    let fsinfo = ops[..clear]
+        .iter()
+        .rposition(|op| is_write_to(op, l.fs_info))
+        .expect("the commit phase must write FSInfo");
 
     assert!(
         backup < clear,
@@ -308,6 +310,22 @@ fn the_commit_phase_writes_boot_backup_and_fsinfo_before_clearing_the_checkpoint
         ops.last(),
         Some(&Op::Sync),
         "a resize must end with a flush, so nothing it published is left in cache"
+    );
+    // [F-T04]: after the clear, FSInfo is written once more, to remove the
+    // checkpoint mark, and that write is flushed by the final sync.
+    let unmark: Vec<usize> = (clear + 1..ops.len())
+        .filter(|&i| is_write_to(&ops[i], l.fs_info))
+        .collect();
+    assert_eq!(
+        unmark.len(),
+        1,
+        "the checkpoint mark must be removed from FSInfo exactly once, after \
+         the checkpoint is cleared; ops after the clear were {:?}",
+        &ops[clear + 1..]
+    );
+    assert!(
+        ops[unmark[0] + 1..].contains(&Op::Sync),
+        "the removal of the checkpoint mark must be flushed"
     );
 }
 

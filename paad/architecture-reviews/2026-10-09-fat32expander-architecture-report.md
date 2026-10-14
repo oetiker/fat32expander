@@ -162,6 +162,10 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Explanation:** `prepare_resize` clears the mark in the in-memory FSInfo about 470 lines before the commit, which writes and syncs it before the primary boot sector. After a crash at `BeforePrimaryBootWrite`, a device that changed size before the rerun is not found: `CheckpointSlot::locate` falls back to the new last sector and the run fails with `InvalidatedFilesystem`, which is the case the mark ([F-03]) exists for. Also, `mark_checkpoint_slot` read-modify-writes FSInfo from disk while the commit writes a stale in-memory copy.
 - **Evidence:** `src/resize/executor.rs:173-176`, excerpt: "fsinfo.set_resize_record_sector(None);"; `src/resize/executor.rs:640-653`; `src/resize/checkpoint.rs:355-360` (`CheckpointSlot::locate`), `404-414` (`mark_checkpoint_slot`)
 - **Found by:** Integration & Data, Coupling & Dependencies
+- **Status:** Fixed
+- **Status reason:** The early `set_resize_record_sector(None)` and the `fsinfo` field of `Prepared` are gone; the commit takes only the new free count and read-modify-writes FSInfo from disk like `mark_checkpoint_slot`, so the mark stays through the primary boot write. New `unmark_checkpoint_slot` removes it last, after `clear_checkpoint` and its sync. Tests: `a_crash_before_the_primary_boot_write_resumes_after_the_device_grew`, `a_crash_inside_a_commit_without_fat_growth_resumes_after_the_device_grew`. `the_commit_phase_writes_boot_backup_and_fsinfo_before_clearing_the_checkpoint` now finds the commit's FSInfo write before the clear (developer-approved) and also pins the one unmark write after it.
+- **Status date:** 2026-10-14 09:05 UTC
+- **Status commit:** pending
 
 ### [F-T05] FAT mirroring flags and FS version are ignored
 - **Category:** 30 Security as an afterthought (untrusted input not checked)

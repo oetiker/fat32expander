@@ -10,12 +10,12 @@ use crate::fat32::{
     boot_sectors_match, check_resizable_fat_layout, copy_fat_to_other_copies, fat_entry,
     open_fat32_device, read_backup_boot_sector, read_boot_sector_for_recovery, read_fat_table,
     read_fsinfo, write_backup_boot_sector, write_boot_sector, write_fsinfo, zero_fat_extension,
-    BootSector, FSInfo,
+    BootSector,
 };
 use crate::resize::calculator::{calculate_new_size, SizeCalculation};
 use crate::resize::checkpoint::{
-    check_for_incomplete_resize, clear_checkpoint, mark_checkpoint_slot, write_checkpoint,
-    CheckpointSlot, ResizeCheckpoint, ResizePhase,
+    check_for_incomplete_resize, clear_checkpoint, mark_checkpoint_slot, unmark_checkpoint_slot,
+    write_checkpoint, CheckpointSlot, ResizeCheckpoint, ResizePhase,
 };
 use crate::resize::events::{Reporter, ResizeEvent};
 use crate::resize::fault::{maybe_crash_at, CrashPoint};
@@ -139,7 +139,6 @@ struct ResizeRecord {
 struct Prepared {
     device: Device,
     boot: BootSector,
-    fsinfo: FSInfo,
     backup_sector: u16,
     calculation: SizeCalculation,
     fat: Vec<u32>,
@@ -165,7 +164,6 @@ pub fn resize_fat32_with_events(
     let Prepared {
         device,
         boot,
-        mut fsinfo,
         backup_sector,
         calculation,
         fat,
@@ -182,10 +180,7 @@ pub fn resize_fat32_with_events(
         fat_needs_growth: calculation.fat_needs_growth,
     });
 
-    fsinfo.set_free_count(free_clusters_after_resize(&boot, &calculation, &fat));
-    // The commit writes FSInfo without the checkpoint mark, which retires it
-    // ([F-03]).
-    fsinfo.set_resize_record_sector(None);
+    let new_free = free_clusters_after_resize(&boot, &calculation, &fat);
 
     let old_size_bytes = calculation.old_total_sectors as u64 * boot.bytes_per_sector() as u64;
     let new_size_bytes = calculation.new_total_sectors as u64 * boot.bytes_per_sector() as u64;
@@ -209,7 +204,7 @@ pub fn resize_fat32_with_events(
             &device,
             fat_on_disk,
             &calculation,
-            &fsinfo,
+            new_free,
             backup_sector,
             &record,
             &mut report,
@@ -375,7 +370,6 @@ fn prepare_resize(options: &ResizeOptions, report: &mut Reporter) -> Result<Prep
     Ok(Prepared {
         device,
         boot,
-        fsinfo,
         backup_sector,
         calculation,
         fat,
@@ -631,7 +625,7 @@ fn commit_new_geometry(
     device: &Device,
     fat_on_disk: FatOnDisk,
     calculation: &SizeCalculation,
-    fsinfo: &FSInfo,
+    new_free: u32,
     backup_sector: u16,
     record: &ResizeRecord,
     report: &mut Reporter,
@@ -674,10 +668,13 @@ fn commit_new_geometry(
     write_backup_boot_sector(device, &boot, backup_sector)?;
     report.step("Updated backup boot sector".to_string());
 
-    // The free count was set by the caller from the FAT; see
-    // [`free_clusters_after_resize`].
-    let new_free = fsinfo.free_count();
-    write_fsinfo(device, fsinfo, record.fsinfo_sector)?;
+    // The free count comes from the FAT; see [`free_clusters_after_resize`].
+    // FSInfo is read back rather than written from the copy taken before the
+    // resize: the checkpoint mark set since then must stay until the record
+    // it points at is cleared ([F-T04]).
+    let mut fsinfo = read_fsinfo(device, record.fsinfo_sector)?;
+    fsinfo.set_free_count(new_free);
+    write_fsinfo(device, &fsinfo, record.fsinfo_sector)?;
     report.step(format!("Updated FSInfo (free clusters: {})", new_free));
 
     // [F-R26]: the supporting structures must be durable before the commit
@@ -707,6 +704,12 @@ fn commit_new_geometry(
     // Final sync
     device.sync()?;
     report.step("Synced changes to disk".to_string());
+
+    // [F-T04]: the mark goes last, after the record it points at. A crash
+    // just before this leaves a valid boot sector and a mark at an empty
+    // slot, which a rerun reads as nothing to resume.
+    unmark_checkpoint_slot(device, record.fsinfo_sector)?;
+    report.step("Removed checkpoint mark from FSInfo".to_string());
 
     Ok(())
 }

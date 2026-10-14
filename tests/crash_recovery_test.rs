@@ -642,6 +642,35 @@ fn a_crash_in_the_danger_zone_resumes_after_the_device_grew() {
 
 #[test]
 #[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_before_the_primary_boot_write_resumes_after_the_device_grew() {
+    // [F-T04]: the commit used to clear the FSInfo mark before the primary
+    // boot sector landed, so a rerun on a grown device looked for the record
+    // at the new last sector and found none.
+    assert_eq!(
+        crash_resize_to_then_resume("before_primary_boot_write", 250),
+        "FatWritten"
+    );
+}
+
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_inside_a_commit_without_fat_growth_resumes_after_the_device_grew() {
+    // [F-T04], on the commit path that writes its own record.
+    let image = image_ready_for_a_resize_without_fat_growth();
+    resize_crashing_at(image.path(), "before_primary_boot_write");
+    truncate(image.path(), 160);
+
+    let output = resize_expecting_success(image.path());
+    assert_eq!(resumed_phase(&output), "FatWritten");
+    assert_filesystem_is_clean(image.path());
+    assert_files_are_intact(image.path());
+    resize_expecting_success(image.path());
+    assert_filesystem_is_clean(image.path());
+    assert_files_are_intact(image.path());
+}
+
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
 fn a_crash_in_the_data_shift_is_refused_after_the_device_shrank() {
     let image = image_with_files(128, 200);
     resize_crashing_at(image.path(), "after_data_shift");

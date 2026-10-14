@@ -413,6 +413,20 @@ pub(crate) fn mark_checkpoint_slot(
     Ok(())
 }
 
+/// Remove the mark [`mark_checkpoint_slot`] set, once the checkpoint it
+/// points at is cleared.
+///
+/// [F-T04]: the mark has to outlive the record. Cleared earlier, a crash
+/// before the commit point leaves a record that a rerun on a resized device
+/// cannot find.
+pub(crate) fn unmark_checkpoint_slot(device: &Device, fsinfo_sector: u16) -> Result<()> {
+    let mut fsinfo = read_fsinfo(device, fsinfo_sector)?;
+    fsinfo.set_resize_record_sector(None);
+    write_fsinfo(device, &fsinfo, fsinfo_sector)?;
+    device.sync()?;
+    Ok(())
+}
+
 /// Read the checkpoint from its slot, if the slot can hold one
 pub(crate) fn read_checkpoint(
     device: &Device,
