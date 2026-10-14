@@ -227,6 +227,43 @@ fn the_fat_extension_is_flushed_before_the_phase_2_checkpoint() {
     );
 }
 
+/// Safety net for [F-T03]: the first checkpoint, and the FSInfo mark that
+/// finds it, must be durable before the shift writes into the data area.
+/// Without both on disk, a crash after the first move leaves moved data and no
+/// record of the move.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn the_first_checkpoint_and_its_mark_are_durable_before_any_data_moves() {
+    let image = growable_image();
+    // The layout before the resize: the shift writes into the old data area.
+    let l = layout_of(image.path());
+
+    journal::reset();
+    resize(image.path());
+    let ops = journal::recorded();
+
+    let first_data_write = ops
+        .iter()
+        .position(|op| is_write_within(op, l.fat_end, l.checkpoint))
+        .expect("a FAT-growth resize must shift data in the old data area");
+    let before = &ops[..first_data_write];
+
+    let checkpoint = before
+        .iter()
+        .position(|op| is_write_to(op, l.checkpoint))
+        .expect("the first checkpoint must be written before any data moves");
+    let mark = before
+        .iter()
+        .position(|op| is_write_to(op, l.fs_info))
+        .expect("FSInfo must be marked before any data moves");
+    assert!(
+        before[checkpoint.max(mark) + 1..].contains(&Op::Sync),
+        "the checkpoint and its mark must be flushed before the first data \
+         write; ops between them were {:?}",
+        &before[checkpoint.max(mark) + 1..]
+    );
+}
+
 /// [F-R18]'s ground: the commit phase publishes the new geometry and then erases
 /// the checkpoint. That order must hold -- erasing first would leave a device
 /// with an invalidated signature and no recovery record, which the tool's own

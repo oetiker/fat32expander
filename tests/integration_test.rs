@@ -366,6 +366,123 @@ fn rerunning_an_interrupted_commit_counts_the_new_clusters_once() {
     assert!(check_filesystem(image.path()), "Filesystem check failed");
 }
 
+/// The FSInfo sector of `path`, located through its boot sector.
+fn fsinfo_sector(path: &std::path::Path) -> Vec<u8> {
+    let data = std::fs::read(path).expect("Failed to read image");
+    let sector = u16::from_le_bytes([data[48], data[49]]) as usize;
+    data[sector * 512..(sector + 1) * 512].to_vec()
+}
+
+/// `sector` with the FSInfo free count (offset 488, 4 bytes) blanked.
+fn without_free_count(mut sector: Vec<u8>) -> Vec<u8> {
+    sector[488..492].fill(0);
+    sector
+}
+
+/// Safety net for [F-T04]: a resize changes FSInfo in its free count only. No
+/// checkpoint mark is left in the reserved bytes, and no other field is
+/// rewritten from a stale copy.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn a_fat_growth_resize_changes_only_the_free_count_in_fsinfo() {
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 200);
+    let before = fsinfo_sector(image.path());
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        result.fat_grew,
+        "fixture drifted: this case must grow the FAT"
+    );
+
+    assert_eq!(
+        without_free_count(fsinfo_sector(image.path())),
+        without_free_count(before),
+        "a resize may change FSInfo in its free count only"
+    );
+}
+
+/// Safety net for [F-T04], on the commit path that writes its own checkpoint.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn a_resize_without_fat_growth_changes_only_the_free_count_in_fsinfo() {
+    let image = image_ready_for_a_resize_without_fat_growth();
+    let before = fsinfo_sector(image.path());
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        !result.fat_grew,
+        "fixture drifted: this case must not grow the FAT"
+    );
+
+    assert_eq!(
+        without_free_count(fsinfo_sector(image.path())),
+        without_free_count(before),
+        "a resize may change FSInfo in its free count only"
+    );
+}
+
+/// Safety net for [F-T09]: a backup boot sector field of 0 means the volume
+/// has no backup. Such a volume must still grow to a clean filesystem whose
+/// primary boot sector describes the new size.
+#[test]
+#[ignore] // Requires mkfs.fat and dosfsck
+fn a_volume_without_a_backup_boot_sector_is_resized() {
+    let image = create_fat32_image(128);
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(image.path())
+            .expect("Failed to open image");
+        f.seek(SeekFrom::Start(50)).expect("seek");
+        f.write_all(&0u16.to_le_bytes())
+            .expect("Failed to clear the backup boot sector field");
+    }
+    extend_image(image.path(), 200);
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(before.boot().backup_boot_sector(), 0, "fixture drifted");
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        result.fat_grew,
+        "fixture drifted: this case must grow the FAT"
+    );
+
+    let after = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(after.boot().total_sectors_32(), 200 * 2048);
+    assert_eq!(after.boot().backup_boot_sector(), 0);
+
+    // dosfsck exits 1 on every volume without a backup, resized or not, so
+    // its exit code says nothing here. Its report must name no other problem.
+    let output = Command::new("dosfsck")
+        .arg("-n")
+        .arg(image.path())
+        .output()
+        .expect("Failed to run dosfsck");
+    let report = String::from_utf8_lossy(&output.stdout);
+    let problems: Vec<&str> = report
+        .lines()
+        .filter(|l| {
+            !(l.starts_with("fsck.fat ")
+                || l.contains("There is no backup boot sector")
+                || l.contains("Auto-creating backup boot block")
+                || l.contains("Created backup of boot sector")
+                || l.trim().is_empty()
+                || l.contains("Leaving filesystem unchanged")
+                || l.contains(" files, "))
+        })
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "dosfsck found problems beyond the missing backup:\n{}",
+        report
+    );
+}
+
 /// Safety net for [F-10]: a backup boot sector away from the usual sector 6
 /// is legitimate. A relocating resize must accept it and rewrite the backup
 /// where the boot sector says it is.

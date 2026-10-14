@@ -737,6 +737,54 @@ fn a_completed_resize_leaves_nothing_for_a_second_run_to_resume() {
     assert_files_are_intact(image.path());
 }
 
+/// The FSInfo sector of `path`, located through its boot sector.
+fn fsinfo_sector(path: &Path) -> Vec<u8> {
+    let data = std::fs::read(path).expect("read image");
+    let sector = u16::from_le_bytes([data[48], data[49]]) as usize;
+    data[sector * 512..(sector + 1) * 512].to_vec()
+}
+
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_resumed_resize_leaves_the_same_fsinfo_as_an_uninterrupted_one() {
+    // Safety net for [F-T04]: FSInfo carries the checkpoint mark during the
+    // resize and the free count after it. Wherever the run was interrupted,
+    // the resumed run must leave FSInfo byte for byte as an uninterrupted run
+    // does: the right free count and no mark left behind.
+    let reference = image_with_files(128, 200);
+    resize_expecting_success(reference.path());
+    let expected = fsinfo_sector(reference.path());
+
+    for crash_point in [
+        "after_checkpoint_start",
+        "after_boot_invalidate",
+        "before_primary_boot_write",
+    ] {
+        let image = image_with_files(128, 200);
+        resize_crashing_at(image.path(), crash_point);
+        resize_expecting_success(image.path());
+        assert!(
+            fsinfo_sector(image.path()) == expected,
+            "a resize resumed after {} left a different FSInfo than an \
+             uninterrupted one",
+            crash_point
+        );
+    }
+
+    // The commit without FAT growth marks FSInfo too.
+    let reference = image_ready_for_a_resize_without_fat_growth();
+    resize_expecting_success(reference.path());
+    let expected = fsinfo_sector(reference.path());
+    let image = image_ready_for_a_resize_without_fat_growth();
+    resize_crashing_at(image.path(), "before_primary_boot_write");
+    resize_expecting_success(image.path());
+    assert!(
+        fsinfo_sector(image.path()) == expected,
+        "a commit without FAT growth resumed after a crash left a different \
+         FSInfo than an uninterrupted one"
+    );
+}
+
 /// The "FAT tables grew:" line of a resize summary.
 fn fat_grew_line(output: &str) -> String {
     output
