@@ -187,7 +187,7 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Status:** Fixed
 - **Status reason:** TECHGUIDE's phase diagram now draws the danger zone from the boot invalidation before the first move to the primary boot write, with the real commit order (FSInfo mark kept, removed after the checkpoint clear); "Boot Sector Invalidation" explains why the zone opens before the shift and uses `with_geometry`; the recovery pseudocode is replaced by the real rules (FSInfo mark, volume/geometry check, exit 9 cases); the recovery table has one row per crash point (8). README's phase list says data is moved, and the boot sector is invalid from phase 0 to the end of phase 2 instead of "Phase 1 (the critical window)". Docs only; the crash-point name guard test covers the table.
 - **Status date:** 2026-10-14 09:35 UTC
-- **Status commit:** pending
+- **Status commit:** 9ebfc04
 
 ### [F-T07] No test resizes a real block device
 - **Category:** 32 Missing or inadequate test coverage for critical paths
