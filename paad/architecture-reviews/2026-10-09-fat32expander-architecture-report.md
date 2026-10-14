@@ -165,7 +165,7 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Status:** Fixed
 - **Status reason:** The early `set_resize_record_sector(None)` and the `fsinfo` field of `Prepared` are gone; the commit takes only the new free count and read-modify-writes FSInfo from disk like `mark_checkpoint_slot`, so the mark stays through the primary boot write. New `unmark_checkpoint_slot` removes it last, after `clear_checkpoint` and its sync. Tests: `a_crash_before_the_primary_boot_write_resumes_after_the_device_grew`, `a_crash_inside_a_commit_without_fat_growth_resumes_after_the_device_grew`. `the_commit_phase_writes_boot_backup_and_fsinfo_before_clearing_the_checkpoint` now finds the commit's FSInfo write before the clear (developer-approved) and also pins the one unmark write after it.
 - **Status date:** 2026-10-14 09:05 UTC
-- **Status commit:** pending
+- **Status commit:** 03a557a
 
 ### [F-T05] FAT mirroring flags and FS version are ignored
 - **Category:** 30 Security as an afterthought (untrusted input not checked)
