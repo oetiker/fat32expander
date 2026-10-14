@@ -20,7 +20,8 @@
 /// unit test checks those files against [`CrashPoint::ALL`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CrashPoint {
-    /// After writing the phase 0 checkpoint, before the data shift.
+    /// After writing the phase 0 checkpoint, before the boot sector is
+    /// invalidated and the data shift starts.
     AfterCheckpointStart,
     /// Part-way through the data shift: the moves since the first progress
     /// record are on disk, but the second record, which would cover them, is
@@ -28,9 +29,11 @@ pub(crate) enum CrashPoint {
     BeforeMidShiftRecord,
     /// After the data shift, before the phase 1 checkpoint.
     AfterDataShift,
-    /// After the phase 1 checkpoint, before the boot sector is invalidated.
+    /// After the phase 1 checkpoint, before the FAT is written.
     AfterCheckpointDataCopied,
-    /// After the boot sector is invalidated, before the FAT is written.
+    /// At the start of the FAT phase, before the FAT is written. The boot
+    /// sector has been invalidated since phase 0 ([F-T03]); unlike
+    /// `AfterCheckpointDataCopied`, a resume from phase 1 passes this point.
     AfterBootInvalidate,
     /// After the FAT is written, before the phase 2 checkpoint.
     AfterFatWrite,

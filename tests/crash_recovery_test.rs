@@ -737,6 +737,32 @@ fn a_completed_resize_leaves_nothing_for_a_second_run_to_resume() {
     assert_files_are_intact(image.path());
 }
 
+#[test]
+#[ignore = "requires mkfs.fat, dosfsck and mtools"]
+fn a_crash_in_the_data_shift_leaves_a_volume_nothing_mounts() {
+    // [F-T03]: the shift overwrites the old homes of the clusters it moves.
+    // Behind a valid boot sector, a crash there leaves a volume that mounts
+    // with the old geometry and scrambled contents, and an outside write
+    // before the rerun ruins the data the resume still has to copy. So the
+    // boot sector must be invalidated before the first move.
+    for crash_point in ["before_mid_shift_record", "after_data_shift"] {
+        let image = if crash_point == "before_mid_shift_record" {
+            image_with_a_long_shift()
+        } else {
+            image_with_files(128, 200)
+        };
+        resize_crashing_at(image.path(), crash_point);
+        let data = std::fs::read(image.path()).expect("read image");
+        assert_eq!(
+            &data[510..512],
+            &[0, 0],
+            "after a crash at {} the boot sector must carry the invalidated \
+             signature",
+            crash_point
+        );
+    }
+}
+
 /// The FSInfo sector of `path`, located through its boot sector.
 fn fsinfo_sector(path: &Path) -> Vec<u8> {
     let data = std::fs::read(path).expect("read image");

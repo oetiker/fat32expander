@@ -43,9 +43,14 @@ use crate::system::check_not_mounted;
 // the witness be constructed from the record of the run that already did the
 // work.
 
-/// Proof that the cluster data occupies its post-resize sectors.
+/// Proof that the cluster data occupies its post-resize sectors -- and that
+/// the primary boot sector is invalidated.
+///
+/// [F-T03]: the shift overwrites the old homes of the clusters it moves, so
+/// the danger zone opens before the first move, not after the last one.
 #[must_use]
 struct DataShifted {
+    boot: BootSector,
     clusters_relocated: usize,
 }
 
@@ -57,13 +62,20 @@ impl DataShifted {
     /// merely wasteful: the shift walks clusters downward overwriting as it
     /// goes, so a second pass reads sources the first pass already clobbered
     /// ([F-R1], [F-R3]).
-    fn recorded_by_an_earlier_run(clusters_relocated: usize) -> Self {
-        Self { clusters_relocated }
+    ///
+    /// The earlier run invalidated the boot sector on disk before its first
+    /// move; `boot` is the copy read back from there.
+    fn recorded_by_an_earlier_run(mut boot: BootSector, clusters_relocated: usize) -> Self {
+        boot.invalidate_signature();
+        Self {
+            boot,
+            clusters_relocated,
+        }
     }
 }
 
 /// Proof that the FAT extension is on disk and durable -- and that the primary
-/// boot sector is, right now, invalidated.
+/// boot sector is, right now, invalidated, as [`DataShifted`] handed it over.
 ///
 /// That second fact used to be visible only as a mutation of a local `boot`
 /// binding partway down the function, so "is this filesystem currently marked
@@ -81,8 +93,8 @@ impl FatExtended {
     /// The `DataShifted` is consumed rather than inspected: a resume may skip
     /// the work of a phase, but it may not skip the phase's precondition, so
     /// this witness is still unobtainable without one.
-    fn recorded_by_an_earlier_run(boot: BootSector, _shifted: DataShifted) -> Self {
-        Self { boot }
+    fn recorded_by_an_earlier_run(shifted: DataShifted) -> Self {
+        Self { boot: shifted.boot }
     }
 }
 
@@ -432,21 +444,21 @@ fn run_fat_phases(
         return Ok((FatOnDisk::NotWritten(boot), 0));
     }
 
-    // === PHASE 0: Data shift (safe - source preserved) ===
+    // === PHASE 0: Data shift (boot sector invalidated before the first move) ===
     let shifted = if starting_phase == ResizePhase::Started {
-        shift_cluster_data(device, &boot, calculation, &plan, record, report)?
+        shift_cluster_data(device, boot, calculation, &plan, record, report)?
     } else {
         report.step("Skipping data shift (already done)".to_string());
-        DataShifted::recorded_by_an_earlier_run(plan.cluster_count())
+        DataShifted::recorded_by_an_earlier_run(boot, plan.cluster_count())
     };
     let clusters_relocated = shifted.clusters_relocated;
 
-    // === PHASE 1: FAT operations (dangerous - boot sector invalidated) ===
+    // === PHASE 1: FAT operations ===
     let extended = if starting_phase <= ResizePhase::DataCopied {
-        write_fat_extension(device, boot, calculation, shifted, record.slot, report)?
+        write_fat_extension(device, calculation, shifted, record.slot, report)?
     } else {
         report.step("Skipping FAT operations (already done)".to_string());
-        FatExtended::recorded_by_an_earlier_run(boot, shifted)
+        FatExtended::recorded_by_an_earlier_run(shifted)
     };
 
     Ok((FatOnDisk::Written(extended), clusters_relocated))
@@ -454,9 +466,14 @@ fn run_fat_phases(
 
 /// Phase 0: move the affected clusters forward into the sectors the enlarged
 /// FAT will not occupy, recording progress so a crash here can be resumed.
+///
+/// The boot sector goes in valid and comes back invalidated, inside the
+/// witness: the danger zone opens here, before the first move ([F-T03]), and
+/// closes when [`commit_new_geometry`] consumes the [`FatOnDisk`] that
+/// carries it on.
 fn shift_cluster_data(
     device: &Device,
-    boot: &BootSector,
+    mut boot: BootSector,
     calculation: &SizeCalculation,
     plan: &RelocationPlan,
     record: &ResizeRecord,
@@ -478,7 +495,7 @@ fn shift_cluster_data(
     // itself, so no move could ever be replayed and a crash during it could
     // not be resumed. The calculator never plans one; refuse it here, before
     // the first write, rather than run a shift no crash can recover from.
-    if !plan.moves.is_empty() && plan.shift_clusters(boot) == 0 {
+    if !plan.moves.is_empty() && plan.shift_clusters(&boot) == 0 {
         return Err(Error::Calculation(format!(
             "Planned data shift of {} sectors is shorter than one cluster of {} sectors",
             plan.new_first_data_sector - plan.old_first_data_sector,
@@ -502,6 +519,17 @@ fn shift_cluster_data(
 
     maybe_crash_at(CrashPoint::AfterCheckpointStart);
 
+    // [F-T03]: the moves below overwrite the old homes of the clusters they
+    // move. Behind a valid boot sector, a crash from here on would leave a
+    // volume that mounts with the old geometry and scrambled contents, and
+    // any write to it before the rerun would corrupt data the resume still
+    // has to copy. Invalidated, nothing mounts it. The checkpoint and its mark
+    // are durable already, so a rerun finds the record this needs.
+    boot.invalidate_signature();
+    write_boot_sector(device, &boot)?;
+    device.sync()?;
+    report.step("Invalidated boot sector (danger zone)".to_string());
+
     // Execute data shift, recording how far it has got as it descends so a
     // crash here can be resumed rather than replayed from the beginning.
     let mut records_written = 0u32;
@@ -514,8 +542,8 @@ fn shift_cluster_data(
         cp.shift_progress = Some(next_cluster);
         write_checkpoint(device, record.slot, &cp)
     };
-    let mut progress = ShiftProgress::new(plan, boot, resume_from, &mut record_progress);
-    execute_relocation(device, boot, plan, &mut progress, report)?;
+    let mut progress = ShiftProgress::new(plan, &boot, resume_from, &mut record_progress);
+    execute_relocation(device, &boot, plan, &mut progress, report)?;
     let clusters_relocated = plan.cluster_count();
     report.step(format!("Shifted {} clusters forward", clusters_relocated));
 
@@ -528,31 +556,28 @@ fn shift_cluster_data(
 
     maybe_crash_at(CrashPoint::AfterCheckpointDataCopied);
 
-    Ok(DataShifted { clusters_relocated })
+    Ok(DataShifted {
+        boot,
+        clusters_relocated,
+    })
 }
 
-/// Phase 1, the danger zone: mark the filesystem unusable, extend FAT1, mirror
-/// it into the remaining FAT copies, and make all of it durable before the
-/// checkpoint promises that it is.
+/// Phase 1: extend FAT1, mirror it into the remaining FAT copies, and make
+/// all of it durable before the checkpoint promises that it is.
 ///
-/// The boot sector goes in valid and comes back invalidated, inside the
-/// witness. That is the whole of the danger zone: it opens when this function
-/// is called and closes when [`commit_new_geometry`] consumes what it returns,
-/// and neither boundary depends on a comment any more ([F-R15]).
+/// The boot sector arrives invalidated inside the [`DataShifted`] and leaves
+/// the same way inside the [`FatExtended`]; neither boundary of the danger
+/// zone depends on a comment ([F-R15]).
 fn write_fat_extension(
     device: &Device,
-    mut boot: BootSector,
     calculation: &SizeCalculation,
-    _shifted: DataShifted,
+    shifted: DataShifted,
     checkpoint_slot: CheckpointSlot,
     report: &mut Reporter,
 ) -> Result<FatExtended> {
-    // Invalidate boot sector to prevent other tools from operating
-    boot.invalidate_signature();
-    write_boot_sector(device, &boot)?;
-    device.sync()?;
-    report.step("Invalidated boot sector (danger zone)".to_string());
+    let boot = shifted.boot;
 
+    // The boot sector has been invalidated on disk since phase 0 ([F-T03]).
     maybe_crash_at(CrashPoint::AfterBootInvalidate);
 
     // Both after relocation: the FAT1 extension is zeroed over sectors the
@@ -810,7 +835,7 @@ mod tests {
         let mut sink = |_: &ResizeEvent| {};
         let mut report = Reporter::new(&mut sink, false);
 
-        let result = shift_cluster_data(&device, &boot, &calculation, &plan, &record, &mut report);
+        let result = shift_cluster_data(&device, boot, &calculation, &plan, &record, &mut report);
 
         let error = result.err();
         assert!(matches!(error, Some(Error::Calculation(_))), "{error:?}");
