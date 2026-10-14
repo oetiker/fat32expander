@@ -154,7 +154,7 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Status:** Fixed
 - **Status reason:** `shift_cluster_data` now invalidates the boot sector and syncs right after the first checkpoint and its FSInfo mark are durable, before the first move; `DataShifted` carries the invalidated boot sector into the FAT phase, which no longer writes sector 0. `after_checkpoint_start` still sees a valid boot sector; `after_boot_invalidate` stays at the start of the FAT phase. Test: `a_crash_in_the_data_shift_leaves_a_volume_nothing_mounts`. TECHGUIDE/README wording is left to F-T06.
 - **Status date:** 2026-10-14 07:13 UTC
-- **Status commit:** pending
+- **Status commit:** 2566250
 
 ### [F-T04] The commit clears the checkpoint mark before the primary boot sector lands; FSInfo has two writers
 - **Category:** 26 Poor transactional boundaries (also 27 Temporal coupling, 17 No clear ownership of data)
