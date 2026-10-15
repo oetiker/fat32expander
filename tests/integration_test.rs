@@ -523,6 +523,55 @@ fn a_backup_boot_sector_outside_sector_6_is_resized_in_place() {
     assert!(check_filesystem(image.path()), "Filesystem check failed");
 }
 
+/// Safety net for [F-T09]: the sector after the backup boot sector is not
+/// always a backup FSInfo. With the backup in the last reserved sector, it is
+/// the first sector of the first FAT, and a resize must leave it a FAT.
+#[test]
+#[ignore] // Requires mkfs.fat and dosfsck
+fn the_sector_after_a_backup_in_the_last_reserved_sector_stays_a_fat() {
+    let image =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
+    Command::new("truncate")
+        .args(["-s", "128M"])
+        .arg(image.path())
+        .status()
+        .expect("Failed to truncate file");
+    let status = Command::new("mkfs.fat")
+        .args(["-F", "32", "-R", "32", "-b", "31"])
+        .arg(image.path())
+        .status()
+        .expect("Failed to run mkfs.fat");
+    assert!(status.success(), "mkfs.fat failed");
+    extend_image(image.path(), 192);
+
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(before.boot().backup_boot_sector(), 31, "fixture drifted");
+    assert_eq!(before.boot().reserved_sectors(), 32, "fixture drifted");
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        result.fat_grew,
+        "fixture drifted: this case must grow the FAT"
+    );
+
+    let after = get_fs_info(image.path()).expect("Failed to get fs info");
+    let fat1 = 32 * 512;
+    let fat2 = (32 + after.boot().fat_size_32() as usize) * 512;
+    let data = std::fs::read(image.path()).expect("Failed to read image");
+    assert_eq!(
+        data[fat1..fat1 + 4],
+        [0xf8, 0xff, 0xff, 0x0f],
+        "the first FAT must still start with its media entry"
+    );
+    assert_eq!(
+        data[fat1..fat1 + 512],
+        data[fat2..fat2 + 512],
+        "the first sectors of both FATs must agree"
+    );
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+}
+
 #[test]
 #[ignore] // Requires mkfs.fat
 fn test_dry_run() {
