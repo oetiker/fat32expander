@@ -17,9 +17,11 @@ pub fn get_fs_info(device_path: impl AsRef<std::path::Path>) -> Result<FSInfoRep
     let device = open_fat32_device(device_path, false)?;
     let boot = read_boot_sector(&device)?;
 
-    let backup_sector = boot.backup_boot_sector();
-    let backup_boot = read_backup_boot_sector(&device, backup_sector)?;
-    let backup_matches = boot_sectors_match(&boot, &backup_boot);
+    // A volume without a backup has nothing to disagree with its primary.
+    let backup_matches = match boot.backup_location() {
+        Some(sector) => boot_sectors_match(&boot, &read_backup_boot_sector(&device, sector)?),
+        None => true,
+    };
 
     let fsinfo_sector = boot.fs_info_sector();
     let fsinfo = read_fsinfo(&device, fsinfo_sector)?;
@@ -103,7 +105,8 @@ impl FSInfoReport {
         self.free_clusters
     }
 
-    /// Whether the backup boot sector agrees with the primary.
+    /// Whether the backup boot sector agrees with the primary. Always true
+    /// for a volume without a backup ([`BootSector::backup_location`]).
     pub fn backup_matches(&self) -> bool {
         self.backup_matches
     }

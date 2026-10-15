@@ -159,6 +159,15 @@ impl BootSector {
         u16::from_le_bytes([self.raw[50], self.raw[51]])
     }
 
+    /// The backup boot sector, or `None` when the field is 0, which means the
+    /// volume has no backup ([F-T09]).
+    pub fn backup_location(&self) -> Option<u16> {
+        match self.backup_boot_sector() {
+            0 => None,
+            sector => Some(sector),
+        }
+    }
+
     /// Reserved (offset 52, 12 bytes)
     pub fn reserved(&self) -> &[u8] {
         &self.raw[52..64]

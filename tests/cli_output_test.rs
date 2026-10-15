@@ -304,3 +304,29 @@ fn info_prints_the_current_and_the_largest_size_in_bytes_and_mib() {
         "got:\n{stdout}"
     );
 }
+
+/// [F-T09]: a backup boot sector field of 0 means the volume has no backup.
+/// `info` says so, and does not claim that a backup matches the primary.
+#[test]
+fn info_says_none_for_a_volume_without_a_backup_boot_sector() {
+    let image = growable_image();
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(image.path())
+            .expect("open image");
+        f.seek(SeekFrom::Start(50)).expect("seek");
+        f.write_all(&0u16.to_le_bytes())
+            .expect("clear the backup field");
+    }
+
+    let out = run(&["info"], image.path());
+
+    assert_eq!(out.status.code(), Some(0), "stderr:\n{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("  FSInfo sector: 1\n  Backup boot sector: none\n\nUsage:\n"),
+        "got:\n{stdout}"
+    );
+}

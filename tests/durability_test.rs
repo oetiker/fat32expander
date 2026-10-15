@@ -405,6 +405,46 @@ fn the_backup_and_fsinfo_are_durable_before_the_primary_boot_sector_commits() {
     );
 }
 
+/// [F-T09]: a backup boot sector field of 0 means "no backup". The commit
+/// must not take that as sector 0 and write the new geometry there before
+/// FSInfo: the primary boot sector is written once, as the commit point.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn a_volume_without_a_backup_writes_the_primary_only_at_the_commit_point() {
+    let image = growable_image();
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(image.path())
+            .expect("Failed to open image");
+        f.seek(SeekFrom::Start(50)).expect("seek");
+        f.write_all(&0u16.to_le_bytes())
+            .expect("Failed to clear the backup boot sector field");
+    }
+    let l = layout_of(image.path());
+    assert_eq!(l.backup, 0, "fixture drifted");
+
+    journal::reset();
+    resize(image.path());
+    let ops = journal::recorded();
+
+    let commit = ops
+        .iter()
+        .rposition(|op| is_write_to(op, 0))
+        .expect("the resize must write the primary boot sector");
+    let fat_written = ops[..commit]
+        .iter()
+        .rposition(|op| is_write_to(op, l.checkpoint))
+        .expect("the phase 2 checkpoint must be written before the commit point");
+    assert!(
+        !ops[fat_written..commit].iter().any(|op| is_write_to(op, 0)),
+        "sector 0 must not be written between the phase 2 checkpoint and the \
+         commit point; ops were {:?}",
+        &ops[fat_written..commit]
+    );
+}
+
 /// [F-R26] and [F-R56] both move what the last sector holds. Whatever they
 /// change, a completed resize may never leave a record that a later run would
 /// read as an interrupted one.

@@ -213,6 +213,9 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Explanation:** Validation accepts `backup_boot_sector == 0` as "no backup", but the commit still calls `write_backup_boot_sector(…, 0)`, which writes the primary before FSInfo and breaks the "primary written last" rule; the backup check then compares the primary with itself, in `prepare_resize` and in `info`. Separately, the backup FSInfo at `backup_boot_sector + 1` is never updated and keeps the pre-resize free count. Neither case has a test; a crash leaves stale hints, not data loss.
 - **Evidence:** `src/fat32/validation.rs:69, 79-86`, excerpt: "Backup 0 means 'no backup'"; `src/fat32/operations.rs:104-106`; `src/resize/executor.rs:309-310, 637, 643`, excerpt: "write_fsinfo(device, fsinfo, record.fsinfo_sector)?;"; `src/resize/fsinfo.rs:19-21`
 - **Found by:** Integration & Data, Security & Code Quality
+- **Status:** Fixed
+- **Status reason:** New `BootSector::backup_location()` returns `None` for field 0. With no backup, `prepare_resize` skips the check, `get_fs_info` reports `backup_matches` true without comparing, `info` prints "Backup boot sector: none", and the commit writes no backup, so the primary is again the last boot-sector write. The commit now sets the free count in the backup FSInfo at `backup + 1` when that sector is in the reserved area, is not the primary FSInfo and carries both FSInfo signatures; otherwise it is left alone. TECHGUIDE Step 7, section 7 and the phase diagram updated. Tests: safety net `the_sector_after_a_backup_in_the_last_reserved_sector_stays_a_fat` (9cd932e); new `a_volume_without_a_backup_writes_the_primary_only_at_the_commit_point`, `the_backup_fsinfo_carries_the_new_free_count`, `info_says_none_for_a_volume_without_a_backup_boot_sector`.
+- **Status date:** 2026-10-15 14:47 UTC
 
 ### [F-T10] Public low-level API panics or over-allocates on crafted boot sectors
 - **Category:** 30 Security as an afterthought

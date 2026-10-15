@@ -306,19 +306,21 @@ for offset in 0..new_fat_size {
 ### Step 7: Update Metadata
 
 ```rust
-// Update boot sector
-boot.set_total_sectors_32(new_total_sectors);
-boot.set_fat_size_32(new_fat_size);
-write_boot_sector(&device, &boot)?;
+let boot = boot.with_geometry(new_total_sectors, new_fat_size);
 
-// Update backup boot sector
-write_backup_boot_sector(&device, &boot, backup_sector)?;
+// Backup boot sector, unless the field is 0 (no backup)
+if let Some(sector) = boot.backup_location() {
+    write_backup_boot_sector(&device, &boot, sector)?;
+}
 
-// Update FSInfo
-let additional_clusters = new_data_clusters - old_data_clusters;
-fsinfo.set_free_count(old_free + additional_clusters);
+// FSInfo free count, counted from the FAT; the backup FSInfo at
+// backup + 1 gets the same count if that sector holds an FSInfo
+fsinfo.set_free_count(new_free);
 write_fsinfo(&device, &fsinfo, fsinfo_sector)?;
+device.sync()?;
 
+// The primary boot sector is written last: it is the commit point
+write_boot_sector(&device, &boot)?;
 device.sync()?;
 ```
 
@@ -448,12 +450,13 @@ The root directory starts at `root_cluster` (typically cluster 2). If it's in th
 
 ### 7. Backup Boot Sector
 
-FAT32 maintains a backup boot sector (typically at sector 6). Both must be updated:
-
-```rust
-write_boot_sector(&device, &boot)?;           // Primary
-write_backup_boot_sector(&device, &boot, 6)?; // Backup
-```
+FAT32 maintains a backup boot sector (typically at sector 6) and, in the
+sector after it, a backup FSInfo. The resize writes the backup boot sector
+first and the primary last. A backup field of 0 means the volume has no
+backup, and nothing is written for it. The backup FSInfo gets the new free
+count only when its sector lies in the reserved area and already holds an
+FSInfo; with the backup in the last reserved sector, the next sector is the
+first FAT sector and stays untouched.
 
 ### 8. FAT1 and FAT2 Synchronization
 
@@ -545,7 +548,7 @@ Phase 0: Started
 │ Phase 2: FatWritten                 │
 │ - Write backup boot sector          │
 │ - Write FSInfo free count (mark     │
-│   kept), sync                       │
+│   kept) and backup FSInfo, sync     │
 │ - Write primary boot sector: new    │  ◄── Commit point
 │   geometry, signature 0xAA55, sync  │
 └─────────────────────────────────────┘

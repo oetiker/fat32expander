@@ -483,6 +483,38 @@ fn a_volume_without_a_backup_boot_sector_is_resized() {
     );
 }
 
+/// [F-T09]: the backup FSInfo, in the sector after the backup boot sector,
+/// must carry the same free count as the primary FSInfo after a resize, and
+/// change in nothing else.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn the_backup_fsinfo_carries_the_new_free_count() {
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 200);
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(before.boot().backup_boot_sector(), 6, "fixture drifted");
+    let read = |sector: usize| {
+        let data = std::fs::read(image.path()).expect("Failed to read image");
+        data[sector * 512..(sector + 1) * 512].to_vec()
+    };
+    let backup_before = read(7);
+    assert_eq!(&backup_before[0..4], b"RRaA", "fixture drifted");
+
+    resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+
+    let (primary, backup) = (read(1), read(7));
+    assert_eq!(
+        backup[488..492],
+        primary[488..492],
+        "the backup FSInfo must carry the new free count"
+    );
+    assert_eq!(
+        without_free_count(backup),
+        without_free_count(backup_before),
+        "a resize may change the backup FSInfo in its free count only"
+    );
+}
+
 /// Safety net for [F-10]: a backup boot sector away from the usual sector 6
 /// is legitimate. A relocating resize must accept it and rewrite the backup
 /// where the boot sector says it is.

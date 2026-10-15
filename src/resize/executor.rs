@@ -9,8 +9,8 @@ use crate::error::{Error, Result};
 use crate::fat32::{
     boot_sectors_match, check_resizable_fat_layout, copy_fat_to_other_copies, fat_entry,
     open_fat32_device, read_backup_boot_sector, read_boot_sector_for_recovery, read_fat_table,
-    read_fsinfo, write_backup_boot_sector, write_boot_sector, write_fsinfo, zero_fat_extension,
-    BootSector,
+    read_fsinfo, validate_fsinfo, write_backup_boot_sector, write_boot_sector, write_fsinfo,
+    zero_fat_extension, BootSector, FSInfo,
 };
 use crate::resize::calculator::{calculate_new_size, SizeCalculation};
 use crate::resize::checkpoint::{
@@ -139,7 +139,7 @@ struct ResizeRecord {
 struct Prepared {
     device: Device,
     boot: BootSector,
-    backup_sector: u16,
+    backup_sector: Option<u16>,
     calculation: SizeCalculation,
     fat: Vec<u32>,
     record: ResizeRecord,
@@ -314,33 +314,36 @@ fn prepare_resize(options: &ResizeOptions, report: &mut Reporter) -> Result<Prep
 
     // Read backup boot sector. The match check is skipped on a resume and
     // behind an invalidated boot sector, both of which rewrite the backup.
-    let backup_sector = boot.backup_boot_sector();
-    let backup_boot = read_backup_boot_sector(&device, backup_sector)?;
-    // A verified checkpoint means the disagreement may be this tool's own
-    // interrupted commit, which writes the backup first and rewrites it on
-    // resume ([F-04]).
-    if incomplete_resize.is_some() {
-        report.step(format!(
+    // A volume without a backup has nothing to check ([F-T09]).
+    let backup_sector = boot.backup_location();
+    match backup_sector {
+        None => report.step("No backup boot sector".to_string()),
+        // A verified checkpoint means the disagreement may be this tool's own
+        // interrupted commit, which writes the backup first and rewrites it
+        // on resume ([F-04]).
+        Some(sector) if incomplete_resize.is_some() => report.step(format!(
             "Backup boot sector at sector {} will be rewritten by the resumed resize",
-            backup_sector
-        ));
-    } else if boot.is_signature_valid() && !boot_sectors_match(&boot, &backup_boot) {
-        // [F-R4]: refusing is the default, and the override has to be an
-        // explicit act by the caller -- it commits to the primary being the
-        // correct copy, and the resize then rewrites the backup from it.
-        if !options.ignores_backup_mismatch() {
-            return Err(Error::BackupMismatch);
+            sector
+        )),
+        Some(sector) => {
+            let backup_boot = read_backup_boot_sector(&device, sector)?;
+            if boot.is_signature_valid() && !boot_sectors_match(&boot, &backup_boot) {
+                // [F-R4]: refusing is the default, and the override has to be
+                // an explicit act by the caller -- it commits to the primary
+                // being the correct copy, and the resize then rewrites the
+                // backup from it.
+                if !options.ignores_backup_mismatch() {
+                    return Err(Error::BackupMismatch);
+                }
+                report.step(format!(
+                    "Backup boot sector at sector {} does not match the primary; \
+                     proceeding on the caller's explicit instruction",
+                    sector
+                ));
+            } else {
+                report.step(format!("Verified backup boot sector at sector {}", sector));
+            }
         }
-        report.step(format!(
-            "Backup boot sector at sector {} does not match the primary; \
-             proceeding on the caller's explicit instruction",
-            backup_sector
-        ));
-    } else {
-        report.step(format!(
-            "Verified backup boot sector at sector {}",
-            backup_sector
-        ));
     }
 
     // Calculate new size (use checkpoint values if resuming)
@@ -626,7 +629,7 @@ fn commit_new_geometry(
     fat_on_disk: FatOnDisk,
     calculation: &SizeCalculation,
     new_free: u32,
-    backup_sector: u16,
+    backup_sector: Option<u16>,
     record: &ResizeRecord,
     report: &mut Reporter,
 ) -> Result<()> {
@@ -665,8 +668,14 @@ fn commit_new_geometry(
     // (`ResizeOptions::ignore_backup_mismatch`), but the escape asks the
     // user to vouch for the primary, so leaving the window open would have
     // meant asking them to vouch for a state this code created itself.
-    write_backup_boot_sector(device, &boot, backup_sector)?;
-    report.step("Updated backup boot sector".to_string());
+    //
+    // [F-T09]: a volume without a backup gets no backup write. Taking the
+    // field's 0 as a sector number wrote the new geometry to the primary here,
+    // before FSInfo, and made that write the commit point.
+    if let Some(sector) = backup_sector {
+        write_backup_boot_sector(device, &boot, sector)?;
+        report.step("Updated backup boot sector".to_string());
+    }
 
     // The free count comes from the FAT; see [`free_clusters_after_resize`].
     // FSInfo is read back rather than written from the copy taken before the
@@ -676,6 +685,11 @@ fn commit_new_geometry(
     fsinfo.set_free_count(new_free);
     write_fsinfo(device, &fsinfo, record.fsinfo_sector)?;
     report.step(format!("Updated FSInfo (free clusters: {})", new_free));
+    if let Some(sector) = backup_sector {
+        if update_backup_fsinfo(device, &boot, sector, new_free)? {
+            report.step(format!("Updated backup FSInfo at sector {}", sector + 1));
+        }
+    }
 
     // [F-R26]: the supporting structures must be durable before the commit
     // point publishes a geometry that assumes them.
@@ -712,6 +726,38 @@ fn commit_new_geometry(
     report.step("Removed checkpoint mark from FSInfo".to_string());
 
     Ok(())
+}
+
+/// Set the free count in the backup FSInfo, the sector after the backup boot
+/// sector, to `new_free`, and report whether it was written ([F-T09]).
+///
+/// That sector holds a backup FSInfo by convention only. It is written only
+/// when it lies in the reserved area, is not the primary FSInfo, and already
+/// reads as an FSInfo; anything else there, such as the first FAT sector when
+/// the backup is the last reserved sector, is left alone. Only the free count
+/// changes, as in the primary.
+fn update_backup_fsinfo(
+    device: &Device,
+    boot: &BootSector,
+    backup_sector: u16,
+    new_free: u32,
+) -> Result<bool> {
+    let Some(sector) = backup_sector.checked_add(1) else {
+        return Ok(false);
+    };
+    if sector >= boot.reserved_sectors() || sector == boot.fs_info_sector() {
+        return Ok(false);
+    }
+    let data = device.read_sector(sector as u64)?;
+    let Some(mut fsinfo) = FSInfo::from_bytes(&data)
+        .ok()
+        .filter(|fsinfo| validate_fsinfo(fsinfo).is_ok())
+    else {
+        return Ok(false);
+    };
+    fsinfo.set_free_count(new_free);
+    write_fsinfo(device, &fsinfo, sector)?;
+    Ok(true)
 }
 
 /// The free-cluster count of the resized filesystem.

@@ -60,14 +60,16 @@ pub fn render_fs_info(info: &FSInfoReport) -> String {
         "  FSInfo sector: {}\n",
         info.boot().fs_info_sector()
     ));
-    out.push_str(&format!(
-        "  Backup boot sector: {}\n",
-        info.boot().backup_boot_sector()
-    ));
-    out.push_str(&format!(
-        "  Backup matches primary: {}\n",
-        if info.backup_matches() { "Yes" } else { "NO" }
-    ));
+    match info.boot().backup_location() {
+        Some(sector) => {
+            out.push_str(&format!("  Backup boot sector: {}\n", sector));
+            out.push_str(&format!(
+                "  Backup matches primary: {}\n",
+                if info.backup_matches() { "Yes" } else { "NO" }
+            ));
+        }
+        None => out.push_str("  Backup boot sector: none\n"),
+    }
 
     out.push_str("\nUsage:\n");
     if info.free_clusters() == FSInfo::UNKNOWN_FREE {
