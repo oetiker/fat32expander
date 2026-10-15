@@ -216,6 +216,7 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Status:** Fixed
 - **Status reason:** New `BootSector::backup_location()` returns `None` for field 0. With no backup, `prepare_resize` skips the check, `get_fs_info` reports `backup_matches` true without comparing, `info` prints "Backup boot sector: none", and the commit writes no backup, so the primary is again the last boot-sector write. The commit now sets the free count in the backup FSInfo at `backup + 1` when that sector is in the reserved area, is not the primary FSInfo and carries both FSInfo signatures; otherwise it is left alone. TECHGUIDE Step 7, section 7 and the phase diagram updated. Tests: safety net `the_sector_after_a_backup_in_the_last_reserved_sector_stays_a_fat` (9cd932e); new `a_volume_without_a_backup_writes_the_primary_only_at_the_commit_point`, `the_backup_fsinfo_carries_the_new_free_count`, `info_says_none_for_a_volume_without_a_backup_boot_sector`.
 - **Status date:** 2026-10-15 14:47 UTC
+- **Status commit:** 3be8551
 
 ### [F-T10] Public low-level API panics or over-allocates on crafted boot sectors
 - **Category:** 30 Security as an afterthought
