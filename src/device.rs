@@ -79,8 +79,14 @@ pub const PROBE_BYTES: usize = 4096;
 /// off the device. A read-only open stays shared, so `info` still works on a
 /// mounted device, and a regular file never gets the flag, because Linux
 /// defines `O_EXCL` without `O_CREAT` only for block devices.
+///
+/// Only Linux documents that meaning. POSIX leaves `O_EXCL` without
+/// `O_CREAT` undefined, so the flag is not set on macOS and illumos, and the
+/// mount check is the only guard there.
 fn opens_exclusively(path: &Path, writable: bool) -> bool {
-    writable && std::fs::metadata(path).is_ok_and(|m| m.file_type().is_block_device())
+    cfg!(target_os = "linux")
+        && writable
+        && std::fs::metadata(path).is_ok_and(|m| m.file_type().is_block_device())
 }
 
 /// The error for a failed open; an exclusive open the kernel refused as busy

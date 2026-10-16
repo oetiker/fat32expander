@@ -33,7 +33,7 @@ src/
 ├── lib.rs               # Library exports
 ├── error.rs             # Error types (thiserror)
 ├── device.rs            # Sector-based device I/O wrapper
-├── system.rs            # Mount checking via /proc/mounts
+├── system.rs            # Mount check and device size, per system
 ├── fat32/
 │   ├── mod.rs           # Module exports
 │   ├── structs.rs       # BootSector, FSInfo with byte-level accessors
@@ -120,7 +120,11 @@ Key test scenarios:
 
 ## Dependencies
 
-- **Runtime**: Linux only (uses `/proc/mounts` for mount checking)
+- **Runtime**: Linux, macOS, illumos. The mount table comes from `/proc/mounts`,
+  `getfsstat` and `/etc/mnttab`; the disk size from `BLKGETSIZE64`,
+  `DKIOCGETBLOCK*` and `DKIOCGMEDIAINFO`. `O_EXCL` locks the device on Linux
+  only. `scripts/test-macos.sh` (CI job `macos`) is the only real-device test
+  outside Linux; illumos has unit tests only.
 - **Build**: Rust
 - **Testing**: `dosfstools` (mkfs.fat, dosfsck), `mtools` (mcopy, mdir, mmd)
 

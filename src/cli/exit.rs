@@ -144,6 +144,7 @@ mod tests {
     fn an_unreadable_mount_table_has_its_own_exit_code() {
         let e = Error::MountTableUnreadable {
             device: "/dev/sdx1".to_string(),
+            table: "/proc/mounts",
             source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         };
         assert_eq!(code(e), exit::MOUNT_STATE_UNKNOWN);
@@ -263,6 +264,7 @@ mod tests {
             (
                 Error::MountTableUnreadable {
                     device: s(),
+                    table: "/proc/mounts",
                     source: io(),
                 },
                 12,
