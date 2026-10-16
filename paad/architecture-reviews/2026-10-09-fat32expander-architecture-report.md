@@ -195,6 +195,9 @@ This is the third report. All 29 flaws of `2026-10-02-fat32expander-architecture
 - **Explanation:** Every resize, including the QEMU suites, runs on an image file. On the main target (a grown partition), the `O_EXCL`/EBUSY → exit 4 path, `BLKGETSIZE64` sizing and the refusal of a mounted device are tested only with synthetic inputs, although the QEMU VM has root and loop devices.
 - **Evidence:** `scripts/qemu/run-vm.sh:210`, excerpt: "/bin/fat32expander resize --verbose \"$FAT_IMAGE\""; `scripts/qemu/run-vm-multistage.sh:142, 183`; `scripts/qemu/test-crash-recovery.sh:281, 319`
 - **Found by:** Security & Code Quality
+- **Status:** Fixed
+- **Status reason:** New QEMU scenario `test-block-device` (`scripts/qemu/run-vm-blockdev.sh`, dispatched by `TEST_DATA_TYPE="blockdev"` in `test-qemu.sh`). The guest builds a disk with an MBR and one 128 MiB partition, attaches it with `losetup -P`, and checks: resize of mounted `/dev/loop0p1` exits 4 with "currently mounted"; with the partition mounted through a second device node, which the `/proc/mounts` check cannot match, the exclusive open fails with EBUSY and resize exits 4 with "is in use"; after growing disk and partition to 256 MiB and re-reading the table, resize of `/dev/loop0p1` (sized by `BLKGETSIZE64`) passes `fsck.fat`, fills the partition and keeps every checksum. The crash-recovery suite still runs on image files.
+- **Status date:** 2026-10-16 05:07 UTC
 
 ### [F-T08] No crash point inside the shift loop
 - **Category:** 32 Missing or inadequate test coverage for critical paths
