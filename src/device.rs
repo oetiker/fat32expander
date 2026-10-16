@@ -89,10 +89,20 @@ fn opens_exclusively(path: &Path, writable: bool) -> bool {
         && std::fs::metadata(path).is_ok_and(|m| m.file_type().is_block_device())
 }
 
-/// The error for a failed open; an exclusive open the kernel refused as busy
-/// is a device in use, not one that cannot be opened.
-fn open_error(path: String, source: std::io::Error, exclusive: bool) -> Error {
-    if exclusive && source.raw_os_error() == Some(libc::EBUSY) {
+/// Whether the kernel refusing an open with `EBUSY` means the device is in
+/// use. On Linux only the exclusive claim draws `EBUSY`. macOS refuses every
+/// open of the block device of a mounted volume with it, read-only ones too:
+/// the `macos` CI job saw `info` and `resize` on a mounted `/dev/disk7` stop
+/// with "Cannot open device" and exit 3 instead of exit 4. illumos is taken
+/// to behave like macOS; no test has run there.
+fn busy_means_in_use(exclusive: bool, linux: bool) -> bool {
+    exclusive || !linux
+}
+
+/// The error for a failed open; an open the kernel refused as busy, where
+/// that means in use, is a device in use, not one that cannot be opened.
+fn open_error(path: String, source: std::io::Error, busy_is_in_use: bool) -> Error {
+    if busy_is_in_use && source.raw_os_error() == Some(libc::EBUSY) {
         Error::DeviceBusy(path)
     } else {
         Error::DeviceOpen { path, source }
@@ -128,9 +138,10 @@ impl Device {
         if exclusive {
             options.custom_flags(libc::O_EXCL);
         }
-        let file = options
-            .open(&path_buf)
-            .map_err(|source| open_error(path_display.clone(), source, exclusive))?;
+        let file = options.open(&path_buf).map_err(|source| {
+            let in_use = busy_means_in_use(exclusive, cfg!(target_os = "linux"));
+            open_error(path_display.clone(), source, in_use)
+        })?;
 
         let size = Self::size_of(&file)?;
 
@@ -846,5 +857,15 @@ mod tests {
             open_error("/dev/sdx1".to_string(), busy(), false),
             Error::DeviceOpen { .. }
         ));
+    }
+
+    /// On Linux only the exclusive claim draws `EBUSY`; macOS refuses even a
+    /// read-only open of a mounted volume's block device with it.
+    #[test]
+    fn a_busy_open_means_in_use_off_linux_even_without_an_exclusive_claim() {
+        assert!(busy_means_in_use(true, true));
+        assert!(!busy_means_in_use(false, true));
+        assert!(busy_means_in_use(true, false));
+        assert!(busy_means_in_use(false, false));
     }
 }
