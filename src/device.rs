@@ -46,6 +46,10 @@ pub mod journal {
     }
 
     thread_local! {
+        // clippy 0.1.99 flags every `const` thread-local on illumos, which
+        // has no native TLS and expands the macro differently; the same
+        // static passes on Linux and macOS.
+        #[cfg_attr(target_os = "illumos", allow(clippy::missing_const_for_thread_local))]
         static JOURNAL: RefCell<Vec<Op>> = const { RefCell::new(Vec::new()) };
     }
 
@@ -79,18 +83,70 @@ pub const PROBE_BYTES: usize = 4096;
 /// off the device. A read-only open stays shared, so `info` still works on a
 /// mounted device, and a regular file never gets the flag, because Linux
 /// defines `O_EXCL` without `O_CREAT` only for block devices.
+///
+/// Only Linux documents that meaning. POSIX leaves `O_EXCL` without
+/// `O_CREAT` undefined, so the flag is not set on macOS and illumos, and the
+/// mount check is the only guard there.
 fn opens_exclusively(path: &Path, writable: bool) -> bool {
-    writable && std::fs::metadata(path).is_ok_and(|m| m.file_type().is_block_device())
+    cfg!(target_os = "linux")
+        && writable
+        && std::fs::metadata(path).is_ok_and(|m| m.file_type().is_block_device())
 }
 
-/// The error for a failed open; an exclusive open the kernel refused as busy
-/// is a device in use, not one that cannot be opened.
-fn open_error(path: String, source: std::io::Error, exclusive: bool) -> Error {
-    if exclusive && source.raw_os_error() == Some(libc::EBUSY) {
+/// Whether the kernel refusing an open with `EBUSY` means the device is in
+/// use. On Linux only the exclusive claim draws `EBUSY`. macOS refuses every
+/// open of the block device of a mounted volume with it, read-only ones too:
+/// the `macos` CI job saw `info` and `resize` on a mounted `/dev/disk7` stop
+/// with "Cannot open device" and exit 3 instead of exit 4. illumos is taken
+/// to behave like macOS; no test has run there.
+fn busy_means_in_use(exclusive: bool, linux: bool) -> bool {
+    exclusive || !linux
+}
+
+/// The error for a failed open; an open the kernel refused as busy, where
+/// that means in use, is a device in use, not one that cannot be opened.
+fn open_error(path: String, source: std::io::Error, busy_is_in_use: bool) -> Error {
+    if busy_is_in_use && source.raw_os_error() == Some(libc::EBUSY) {
         Error::DeviceBusy(path)
     } else {
         Error::DeviceOpen { path, source }
     }
+}
+
+/// Flush a file or device, including the write cache of the drive.
+#[cfg(not(target_os = "macos"))]
+fn sync_file(file: &File) -> std::io::Result<()> {
+    file.sync_all()
+}
+
+/// macOS: `sync_all` calls `fcntl(F_FULLFSYNC)`, which only filesystems
+/// support; on a raw disk device it fails with `ENOTTY`, as the `macos` CI
+/// job saw on `/dev/rdisk7`. A disk device is flushed with `fsync` for the
+/// kernel's buffers and `DKIOCSYNCHRONIZECACHE` for the drive's write cache,
+/// which is what `F_FULLFSYNC` does for a file.
+#[cfg(target_os = "macos")]
+fn sync_file(file: &File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    let kind = file.metadata()?.file_type();
+    if !kind.is_block_device() && !kind.is_char_device() {
+        return file.sync_all();
+    }
+
+    // From <sys/disk.h>: _IO('d', 22).
+    const DKIOCSYNCHRONIZECACHE: libc::c_ulong = 0x2000_6416;
+
+    // SAFETY: `fd` is borrowed from `file`, which outlives both calls. fsync
+    // takes only the descriptor, and DKIOCSYNCHRONIZECACHE takes no argument,
+    // so no memory is shared with the kernel.
+    unsafe {
+        if libc::fsync(file.as_raw_fd()) == -1
+            || libc::ioctl(file.as_raw_fd(), DKIOCSYNCHRONIZECACHE) == -1
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 impl Device {
@@ -122,9 +178,10 @@ impl Device {
         if exclusive {
             options.custom_flags(libc::O_EXCL);
         }
-        let file = options
-            .open(&path_buf)
-            .map_err(|source| open_error(path_display.clone(), source, exclusive))?;
+        let file = options.open(&path_buf).map_err(|source| {
+            let in_use = busy_means_in_use(exclusive, cfg!(target_os = "linux"));
+            open_error(path_display.clone(), source, in_use)
+        })?;
 
         let size = Self::size_of(&file)?;
 
@@ -299,7 +356,7 @@ impl Device {
 
     /// Flush all writes to disk
     pub fn sync(&self) -> Result<()> {
-        self.file.sync_all().map_err(|source| Error::DeviceSync {
+        sync_file(&self.file).map_err(|source| Error::DeviceSync {
             path: self.path.display().to_string(),
             source,
         })?;
@@ -840,5 +897,15 @@ mod tests {
             open_error("/dev/sdx1".to_string(), busy(), false),
             Error::DeviceOpen { .. }
         ));
+    }
+
+    /// On Linux only the exclusive claim draws `EBUSY`; macOS refuses even a
+    /// read-only open of a mounted volume's block device with it.
+    #[test]
+    fn a_busy_open_means_in_use_off_linux_even_without_an_exclusive_claim() {
+        assert!(busy_means_in_use(true, true));
+        assert!(!busy_means_in_use(false, true));
+        assert!(busy_means_in_use(true, false));
+        assert!(busy_means_in_use(false, false));
     }
 }

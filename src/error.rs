@@ -237,9 +237,11 @@ pub enum Error {
 
     /// [F-06]: the mount check could not look, so it cannot vouch for the
     /// device. No device was touched.
-    #[error("Cannot tell whether {device} is mounted: failed to read /proc/mounts: {source}")]
+    #[error("Cannot tell whether {device} is mounted: failed to read {table}: {source}")]
     MountTableUnreadable {
         device: String,
+        /// What could not be read: `/proc/mounts`, `/etc/mnttab`, ...
+        table: &'static str,
         #[source]
         source: std::io::Error,
     },

@@ -120,7 +120,7 @@ as the tool changes.
 | 8 | Backup boot sector does not match the primary — re-run with `--ignore-backup-mismatch` to trust the primary and rewrite the backup from it |
 | 9 | An interrupted resize needs recovery and could not be recovered automatically |
 | 10 | I/O failure reading or writing the device |
-| 12 | Could not check whether the device is mounted — `/proc/mounts` is unreadable |
+| 12 | Could not check whether the device is mounted: the mount table could not be read |
 | 13 | The grown filesystem would have more clusters than FAT32 allows (268,435,445) — the filesystem needs a larger cluster size for this device |
 
 Code 11 previously meant "root privileges required". The tool no longer guesses
@@ -202,7 +202,8 @@ make test-qemu-one TEST=test-fragmented
 ## Requirements
 
 ### Runtime
-- Linux (uses `/proc/mounts` for mount detection)
+- Linux, macOS or illumos. CI tests Linux and macOS on real disk devices;
+  illumos builds, but no test has run on an illumos system yet.
 - Write access to the target device. That usually means root for a block
   device, but the tool does not require root as such — membership of `disk`,
   a suitable ACL, or simply owning the image file all work.
@@ -218,7 +219,15 @@ make test-qemu-one TEST=test-fragmented
 
 ## Limitations
 
-- Linux only (mount detection via `/proc/mounts`)
+- Linux, macOS and illumos only. Windows is not supported.
+- On macOS and illumos the device is not locked during a resize: nothing
+  stops a mount after the mount check has passed. Keep the volume unmounted
+  until the resize has finished.
+- On macOS, pass the disk device (`/dev/diskN` or `/dev/rdiskN`), not the
+  image file of an attached disk image: a mounted image is detected only
+  through its disk device.
+- On illumos, a FAT volume mounted through the `p0:c` logical-drive syntax of
+  `pcfs` is not detected as mounted. Unmount it before a resize.
 - Expand only; cannot shrink filesystems (see below)
 - Recovery requires running the same tool version that started the operation
 

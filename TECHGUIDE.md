@@ -337,7 +337,7 @@ src/
 ├── lib.rs               # Library exports
 ├── error.rs             # Error types (thiserror)
 ├── device.rs            # Sector-based device I/O
-├── system.rs            # Mount detection via /proc/mounts
+├── system.rs            # Mount check and device size, per system
 ├── fat32/
 │   ├── mod.rs           # Module exports
 │   ├── structs.rs       # BootSector, FSInfo with byte-level accessors
