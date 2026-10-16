@@ -4,7 +4,8 @@ use tempfile::NamedTempFile;
 
 /// Create a FAT32 test image of the specified size in MB
 fn create_fat32_image(size_mb: u32) -> NamedTempFile {
-    let file = NamedTempFile::new().expect("Failed to create temp file");
+    let file =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
     let path = file.path();
 
     // Create file of specified size
@@ -56,23 +57,21 @@ fn test_info_command() {
     let image = create_fat32_image(128);
     let info = get_fs_info(image.path()).expect("Failed to get fs info");
 
-    assert_eq!(info.bytes_per_sector, 512);
-    assert!(info.data_clusters > 65525, "Should be FAT32");
-    assert!(!info.can_grow, "Same size should not be growable");
+    assert_eq!(info.boot().bytes_per_sector(), 512);
+    assert!(info.data_clusters() > 65525, "Should be FAT32");
+    assert!(!info.can_grow(), "Same size should not be growable");
 }
 
 #[test]
 #[ignore] // Requires mkfs.fat and dosfsck
 fn test_resize_without_fat_growth() {
-    // Create a 128MB FAT32 image
-    let image = create_fat32_image(128);
-
-    // Extend to 150MB (small increase, shouldn't require FAT growth)
-    extend_image(image.path(), 150);
+    // [F-12]: 128 -> 150 MB, which this test used before, grows the FAT. See
+    // the fixture for why a fresh mkfs.fat image always does.
+    let image = image_ready_for_a_resize_without_fat_growth();
 
     // Get info before resize
     let info_before = get_fs_info(image.path()).expect("Failed to get fs info");
-    assert!(info_before.can_grow);
+    assert!(info_before.can_grow());
 
     // Resize
     let options = ResizeOptions::new(image.path())
@@ -80,11 +79,15 @@ fn test_resize_without_fat_growth() {
         .verbose(false);
     let result = resize_fat32(options).expect("Resize failed");
 
+    assert!(
+        !result.fat_grew,
+        "fixture drifted: this case must not grow the FAT"
+    );
     assert!(result.new_size_bytes > result.old_size_bytes);
 
     // Get info after resize
     let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
-    assert!(!info_after.can_grow, "Should be at max size now");
+    assert!(!info_after.can_grow(), "Should be at max size now");
 
     // Verify filesystem integrity
     assert!(check_filesystem(image.path()), "Filesystem check failed");
@@ -101,7 +104,7 @@ fn test_resize_with_fat_growth() {
 
     // Get info before resize
     let info_before = get_fs_info(image.path()).expect("Failed to get fs info");
-    assert!(info_before.can_grow);
+    assert!(info_before.can_grow());
 
     // Resize
     let options = ResizeOptions::new(image.path())
@@ -114,13 +117,490 @@ fn test_resize_with_fat_growth() {
 
     // Get info after resize
     let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
-    assert!(!info_after.can_grow, "Should be at max size now");
+    assert!(!info_after.can_grow(), "Should be at max size now");
     assert!(
-        info_after.data_clusters > info_before.data_clusters,
+        info_after.data_clusters() > info_before.data_clusters(),
         "Should have more clusters"
     );
 
     // Verify filesystem integrity
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+}
+
+/// Create a FAT32 test image with an explicit cluster size.
+fn create_fat32_image_with_cluster_size(size_mb: u32, sectors_per_cluster: u32) -> NamedTempFile {
+    let file =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
+    let path = file.path();
+
+    Command::new("truncate")
+        .arg("-s")
+        .arg(format!("{}M", size_mb))
+        .arg(path)
+        .status()
+        .expect("Failed to truncate file");
+
+    let status = Command::new("mkfs.fat")
+        .arg("-F")
+        .arg("32")
+        .arg("-s")
+        .arg(sectors_per_cluster.to_string())
+        .arg(path)
+        .status()
+        .expect("Failed to run mkfs.fat");
+
+    assert!(status.success(), "mkfs.fat failed");
+
+    file
+}
+
+/// Copy a file into the image with mtools.
+fn mcopy_into(image: &std::path::Path, source: &std::path::Path, dest_name: &str) {
+    let status = Command::new("mcopy")
+        .arg("-i")
+        .arg(image)
+        .arg(source)
+        .arg(format!("::{}", dest_name))
+        .status()
+        .expect("Failed to run mcopy");
+    assert!(status.success(), "mcopy failed for {}", dest_name);
+}
+
+/// Read a file back out of the image with mtools.
+fn mcopy_out(image: &std::path::Path, name: &str) -> Vec<u8> {
+    let out = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let status = Command::new("mcopy")
+        .arg("-i")
+        .arg(image)
+        .arg("-n")
+        .arg(format!("::{}", name))
+        .arg(out.path())
+        .status()
+        .expect("Failed to run mcopy");
+    assert!(status.success(), "mcopy failed reading {}", name);
+    std::fs::read(out.path()).unwrap()
+}
+
+/// Extend an image file to an exact size in KiB.
+fn extend_image_kib(path: &std::path::Path, new_size_kib: u64) {
+    Command::new("truncate")
+        .arg("-s")
+        .arg(format!("{}K", new_size_kib))
+        .arg(path)
+        .status()
+        .expect("Failed to extend file");
+}
+
+/// A geometry where the total FAT growth is not a whole number of clusters.
+///
+/// 256 MiB at 4 sectors per cluster gives a FAT of 1020 sectors; growing the
+/// volume to 262400 KiB takes it to 1023, so the two FAT copies grow by 6
+/// sectors in total - not a multiple of the 4-sector cluster. Rounding that up
+/// to 2 whole clusters used to shift the data area 8 sectors instead of 6,
+/// leaving every file 2 sectors past where the committed boot sector points.
+///
+/// Most geometries grow the FAT by a multiple of the cluster size, which is why
+/// this went unnoticed; the increase here has to be small enough that the FAT
+/// gains only a few sectors.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn test_resize_with_unaligned_fat_growth_preserves_files() {
+    let image = create_fat32_image_with_cluster_size(256, 4);
+
+    let payloads: Vec<(String, Vec<u8>)> = (0..20)
+        .map(|i| {
+            let name = format!("FILE{:03}.BIN", i);
+            let content: Vec<u8> = (0..4096u32).map(|b| (b as u8) ^ (i as u8)).collect();
+            (name, content)
+        })
+        .collect();
+
+    for (name, content) in &payloads {
+        let src = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        std::fs::write(src.path(), content).unwrap();
+        mcopy_into(image.path(), src.path(), name);
+    }
+
+    // 262400 KiB = 524800 sectors: FAT 1020 -> 1023, a 6-sector growth.
+    extend_image_kib(image.path(), 262_400);
+
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
+    let result = resize_fat32(options).expect("Resize failed");
+    // Guard the geometry: 2 FATs x 3 sectors = 6 sectors of growth against a
+    // 4-sector cluster. If mkfs.fat ever picks different numbers here, this test
+    // stops exercising the unaligned path and needs revisiting.
+    assert!(result.fat_grew, "this geometry must exercise FAT growth");
+    assert_eq!(result.old_fat_size, 1020);
+    assert_eq!(result.new_fat_size, 1023);
+
+    assert!(
+        check_filesystem(image.path()),
+        "dosfsck reported errors after an unaligned FAT growth"
+    );
+
+    for (name, content) in &payloads {
+        assert_eq!(
+            &mcopy_out(image.path(), name),
+            content,
+            "{} did not survive the resize",
+            name
+        );
+    }
+}
+
+/// The FSInfo free count is extrapolated from the executor's own copy of the
+/// data-cluster formula. Pin the relationship it must hold to, since that copy
+/// has no unit-level seam.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn test_free_cluster_count_tracks_added_clusters() {
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 256);
+
+    let info_before = get_fs_info(image.path()).expect("Failed to get fs info");
+
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
+    resize_fat32(options).expect("Resize failed");
+
+    let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
+
+    let added_clusters = info_after.data_clusters() - info_before.data_clusters();
+    assert!(added_clusters > 0, "resize should add clusters");
+    assert_eq!(
+        info_after.free_clusters(),
+        info_before.free_clusters() + added_clusters,
+        "free count must grow by exactly the number of clusters added"
+    );
+}
+
+/// A filesystem whose FAT already has room for the grown volume.
+///
+/// `mkfs.fat` sizes the FAT tighter than the formula the resize uses, so a
+/// freshly made image always takes the FAT-growth path, however small the
+/// increase. A filesystem this tool has already grown carries a formula-sized
+/// FAT: 128 MiB grown to 129 MiB (264192 sectors) has a FAT of 2048 sectors,
+/// which still covers 264224 sectors. Growing by those 32 sectors therefore
+/// takes the no-growth path.
+fn image_ready_for_a_resize_without_fat_growth() -> NamedTempFile {
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 129);
+    resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("First resize failed");
+    extend_image_kib(image.path(), 264224 / 2);
+    image
+}
+
+/// Safety net for [F-04] and [F-12]: a resize that does not grow the FAT must
+/// still add the new clusters to the free count exactly once, and keep files.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn a_resize_without_fat_growth_adds_the_new_clusters_and_keeps_files() {
+    let image = image_ready_for_a_resize_without_fat_growth();
+    let payload: Vec<u8> = (0..40 * 1024u32).map(|i| (i % 251) as u8).collect();
+    let source =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create payload file");
+    std::fs::write(source.path(), &payload).expect("Failed to write payload");
+    mcopy_into(image.path(), source.path(), "NOGROW.BIN");
+
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        !result.fat_grew,
+        "fixture drifted: this case must not grow the FAT"
+    );
+    assert_eq!(result.clusters_relocated, 0);
+    assert!(result.new_size_bytes > result.old_size_bytes);
+
+    let after = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(after.boot().total_sectors(), 264224);
+    assert_eq!(after.boot().fat_size(), before.boot().fat_size());
+    let added_clusters = after.data_clusters() - before.data_clusters();
+    assert!(added_clusters > 0, "resize should add clusters");
+    assert_eq!(
+        after.free_clusters(),
+        before.free_clusters() + added_clusters,
+        "free count must grow by exactly the number of clusters added"
+    );
+    assert!(!after.can_grow(), "Should be at max size now");
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+    assert_eq!(mcopy_out(image.path(), "NOGROW.BIN"), payload);
+}
+
+/// [F-04]: the commit must be safe to run twice. A crash after the backup boot
+/// sector and FSInfo are written, but before the primary boot sector, leaves
+/// the old primary next to a new backup. Rerunning with the backup override
+/// commits again, and must not add the new clusters to the free count twice.
+#[test]
+#[ignore] // Requires mkfs.fat and dosfsck
+fn rerunning_an_interrupted_commit_counts_the_new_clusters_once() {
+    let image = image_ready_for_a_resize_without_fat_growth();
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    let old_primary = std::fs::read(image.path()).expect("Failed to read image")[..512].to_vec();
+
+    resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+
+    // The on-disk state of a crash just before the primary boot sector write.
+    let mut data = std::fs::read(image.path()).expect("Failed to read image");
+    data[..512].copy_from_slice(&old_primary);
+    std::fs::write(image.path(), &data).expect("Failed to write image");
+
+    resize_fat32(
+        ResizeOptions::new(image.path())
+            .dry_run(false)
+            .ignore_backup_mismatch(true),
+    )
+    .expect("Rerun failed");
+
+    let after = get_fs_info(image.path()).expect("Failed to get fs info");
+    let added_clusters = after.data_clusters() - before.data_clusters();
+    assert_eq!(
+        after.free_clusters(),
+        before.free_clusters() + added_clusters,
+        "a rerun of the commit must count the new clusters once"
+    );
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+}
+
+/// The FSInfo sector of `path`, located through its boot sector.
+fn fsinfo_sector(path: &std::path::Path) -> Vec<u8> {
+    let data = std::fs::read(path).expect("Failed to read image");
+    let sector = u16::from_le_bytes([data[48], data[49]]) as usize;
+    data[sector * 512..(sector + 1) * 512].to_vec()
+}
+
+/// `sector` with the FSInfo free count (offset 488, 4 bytes) blanked.
+fn without_free_count(mut sector: Vec<u8>) -> Vec<u8> {
+    sector[488..492].fill(0);
+    sector
+}
+
+/// Safety net for [F-T04]: a resize changes FSInfo in its free count only. No
+/// checkpoint mark is left in the reserved bytes, and no other field is
+/// rewritten from a stale copy.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn a_fat_growth_resize_changes_only_the_free_count_in_fsinfo() {
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 200);
+    let before = fsinfo_sector(image.path());
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        result.fat_grew,
+        "fixture drifted: this case must grow the FAT"
+    );
+
+    assert_eq!(
+        without_free_count(fsinfo_sector(image.path())),
+        without_free_count(before),
+        "a resize may change FSInfo in its free count only"
+    );
+}
+
+/// Safety net for [F-T04], on the commit path that writes its own checkpoint.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn a_resize_without_fat_growth_changes_only_the_free_count_in_fsinfo() {
+    let image = image_ready_for_a_resize_without_fat_growth();
+    let before = fsinfo_sector(image.path());
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        !result.fat_grew,
+        "fixture drifted: this case must not grow the FAT"
+    );
+
+    assert_eq!(
+        without_free_count(fsinfo_sector(image.path())),
+        without_free_count(before),
+        "a resize may change FSInfo in its free count only"
+    );
+}
+
+/// Safety net for [F-T09]: a backup boot sector field of 0 means the volume
+/// has no backup. Such a volume must still grow to a clean filesystem whose
+/// primary boot sector describes the new size.
+#[test]
+#[ignore] // Requires mkfs.fat and dosfsck
+fn a_volume_without_a_backup_boot_sector_is_resized() {
+    let image = create_fat32_image(128);
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(image.path())
+            .expect("Failed to open image");
+        f.seek(SeekFrom::Start(50)).expect("seek");
+        f.write_all(&0u16.to_le_bytes())
+            .expect("Failed to clear the backup boot sector field");
+    }
+    extend_image(image.path(), 200);
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(before.boot().backup_boot_sector(), 0, "fixture drifted");
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        result.fat_grew,
+        "fixture drifted: this case must grow the FAT"
+    );
+
+    let after = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(after.boot().total_sectors_32(), 200 * 2048);
+    assert_eq!(after.boot().backup_boot_sector(), 0);
+
+    // dosfsck exits 1 on every volume without a backup, resized or not, so
+    // its exit code says nothing here. Its report must name no other problem.
+    let output = Command::new("dosfsck")
+        .arg("-n")
+        .arg(image.path())
+        .output()
+        .expect("Failed to run dosfsck");
+    let report = String::from_utf8_lossy(&output.stdout);
+    let problems: Vec<&str> = report
+        .lines()
+        .filter(|l| {
+            !(l.starts_with("fsck.fat ")
+                || l.contains("There is no backup boot sector")
+                || l.contains("Auto-creating backup boot block")
+                || l.contains("Created backup of boot sector")
+                || l.trim().is_empty()
+                || l.contains("Leaving filesystem unchanged")
+                || l.contains(" files, "))
+        })
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "dosfsck found problems beyond the missing backup:\n{}",
+        report
+    );
+}
+
+/// [F-T09]: the backup FSInfo, in the sector after the backup boot sector,
+/// must carry the same free count as the primary FSInfo after a resize, and
+/// change in nothing else.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn the_backup_fsinfo_carries_the_new_free_count() {
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 200);
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(before.boot().backup_boot_sector(), 6, "fixture drifted");
+    let read = |sector: usize| {
+        let data = std::fs::read(image.path()).expect("Failed to read image");
+        data[sector * 512..(sector + 1) * 512].to_vec()
+    };
+    let backup_before = read(7);
+    assert_eq!(&backup_before[0..4], b"RRaA", "fixture drifted");
+
+    resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+
+    let (primary, backup) = (read(1), read(7));
+    assert_eq!(
+        backup[488..492],
+        primary[488..492],
+        "the backup FSInfo must carry the new free count"
+    );
+    assert_eq!(
+        without_free_count(backup),
+        without_free_count(backup_before),
+        "a resize may change the backup FSInfo in its free count only"
+    );
+}
+
+/// Safety net for [F-10]: a backup boot sector away from the usual sector 6
+/// is legitimate. A relocating resize must accept it and rewrite the backup
+/// where the boot sector says it is.
+#[test]
+#[ignore] // Requires mkfs.fat and dosfsck
+fn a_backup_boot_sector_outside_sector_6_is_resized_in_place() {
+    let image =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
+    Command::new("truncate")
+        .args(["-s", "128M"])
+        .arg(image.path())
+        .status()
+        .expect("Failed to truncate file");
+    let status = Command::new("mkfs.fat")
+        .args(["-F", "32", "-R", "64", "-b", "12"])
+        .arg(image.path())
+        .status()
+        .expect("Failed to run mkfs.fat");
+    assert!(status.success(), "mkfs.fat failed");
+    extend_image(image.path(), 192);
+
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(before.boot().backup_boot_sector(), 12, "fixture drifted");
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        result.fat_grew,
+        "fixture drifted: this case must grow the FAT"
+    );
+
+    let data = std::fs::read(image.path()).expect("Failed to read image");
+    assert_eq!(
+        data[12 * 512..13 * 512],
+        data[..512],
+        "the backup at sector 12 must match the new primary"
+    );
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+}
+
+/// Safety net for [F-T09]: the sector after the backup boot sector is not
+/// always a backup FSInfo. With the backup in the last reserved sector, it is
+/// the first sector of the first FAT, and a resize must leave it a FAT.
+#[test]
+#[ignore] // Requires mkfs.fat and dosfsck
+fn the_sector_after_a_backup_in_the_last_reserved_sector_stays_a_fat() {
+    let image =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
+    Command::new("truncate")
+        .args(["-s", "128M"])
+        .arg(image.path())
+        .status()
+        .expect("Failed to truncate file");
+    let status = Command::new("mkfs.fat")
+        .args(["-F", "32", "-R", "32", "-b", "31"])
+        .arg(image.path())
+        .status()
+        .expect("Failed to run mkfs.fat");
+    assert!(status.success(), "mkfs.fat failed");
+    extend_image(image.path(), 192);
+
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(before.boot().backup_boot_sector(), 31, "fixture drifted");
+    assert_eq!(before.boot().reserved_sectors(), 32, "fixture drifted");
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        result.fat_grew,
+        "fixture drifted: this case must grow the FAT"
+    );
+
+    let after = get_fs_info(image.path()).expect("Failed to get fs info");
+    let fat1 = 32 * 512;
+    let fat2 = (32 + after.boot().fat_size_32() as usize) * 512;
+    let data = std::fs::read(image.path()).expect("Failed to read image");
+    assert_eq!(
+        data[fat1..fat1 + 4],
+        [0xf8, 0xff, 0xff, 0x0f],
+        "the first FAT must still start with its media entry"
+    );
+    assert_eq!(
+        data[fat1..fat1 + 512],
+        data[fat2..fat2 + 512],
+        "the first sectors of both FATs must agree"
+    );
     assert!(check_filesystem(image.path()), "Filesystem check failed");
 }
 
@@ -147,8 +627,11 @@ fn test_dry_run() {
 
     // Verify no changes were made
     let info_after = get_fs_info(image.path()).expect("Failed to get fs info");
-    assert_eq!(info_before.total_sectors, info_after.total_sectors);
-    assert_eq!(info_before.fat_size_sectors, info_after.fat_size_sectors);
+    assert_eq!(
+        info_before.boot().total_sectors(),
+        info_after.boot().total_sectors()
+    );
+    assert_eq!(info_before.boot().fat_size(), info_after.boot().fat_size());
 }
 
 #[test]
@@ -186,4 +669,527 @@ fn test_resize_with_data() {
 
     // Verify filesystem integrity
     assert!(check_filesystem(image.path()), "Filesystem check failed");
+}
+
+// ---------------------------------------------------------------------------
+// Safety-net tests written before the [F-R5]/[F-R6]/[F-R7]/[F-R8] fixes.
+//
+// These pin behaviour that must survive tightened validation and the removal of
+// the CLI's substring-matched recovery entry. They assert what the tool does
+// today on legitimate and on plainly-broken input; they are not tests of the
+// fixes themselves.
+// ---------------------------------------------------------------------------
+
+/// Create a FAT32 image with explicit mkfs geometry.
+fn create_fat32_image_with_sector_size(size_mb: u32, sector_size: u32, spc: u32) -> NamedTempFile {
+    let file =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
+    let path = file.path();
+
+    Command::new("truncate")
+        .arg("-s")
+        .arg(format!("{}M", size_mb))
+        .arg(path)
+        .status()
+        .expect("Failed to truncate file");
+
+    let status = Command::new("mkfs.fat")
+        .arg("-F")
+        .arg("32")
+        .arg("-S")
+        .arg(sector_size.to_string())
+        .arg("-s")
+        .arg(spc.to_string())
+        .arg(path)
+        .status()
+        .expect("Failed to run mkfs.fat");
+
+    assert!(
+        status.success(),
+        "mkfs.fat failed for sector_size={sector_size} spc={spc}"
+    );
+
+    file
+}
+
+/// Real filesystems produced by `mkfs.fat` must keep validating and reporting
+/// sane geometry across sector sizes. Guards the [F-R7]/[F-R8] fixes against
+/// rejecting or mis-measuring legitimate volumes — the unit-level equivalent
+/// uses synthetic boot sectors, this one uses what mkfs actually writes.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn mkfs_produced_filesystems_validate_across_sector_sizes() {
+    // (size_mb, sector_size, sectors_per_cluster)
+    //
+    // Each case must clear FAT32's 65525-cluster floor. `mkfs.fat -F 32` will
+    // happily format below it (128MB at spc=8 gives 32700 clusters), producing
+    // a volume that is FAT16 by the spec's own definition and that this tool
+    // rightly refuses — so the image has to be sized against the cluster size.
+    let cases = [(128u32, 512u32, 1u32), (512, 512, 8), (512, 4096, 1)];
+
+    for (size_mb, sector_size, spc) in cases {
+        let image = create_fat32_image_with_sector_size(size_mb, sector_size, spc);
+        let label = format!("size={size_mb}MB sector_size={sector_size} spc={spc}");
+
+        let info = get_fs_info(image.path())
+            .unwrap_or_else(|e| panic!("get_fs_info rejected a real filesystem ({label}): {e:?}"));
+
+        assert_eq!(
+            info.boot().bytes_per_sector() as u32,
+            sector_size,
+            "bps {label}"
+        );
+        assert_eq!(info.boot().sectors_per_cluster() as u32, spc, "spc {label}");
+        assert!(
+            info.data_clusters() >= 65525,
+            "mkfs volume reported as non-FAT32 ({label}): {} clusters",
+            info.data_clusters()
+        );
+        assert!(
+            check_filesystem(image.path()),
+            "dosfsck rejected a freshly made image ({label})"
+        );
+    }
+}
+
+/// The FAT of a valid image must read back in full: one entry per 4 bytes of
+/// FAT, with cluster 2 (the root directory) allocated. Guards [F-R6]'s
+/// allocation bound against being set tight enough to truncate a real FAT.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn fat_table_reads_back_in_full_for_a_valid_image() {
+    use fat32expander::fat32::{fat_entry, open_fat32_device, read_boot_sector, read_fat_table};
+
+    let image = create_fat32_image(128);
+    let device = open_fat32_device(image.path(), false).expect("open failed");
+    let boot = read_boot_sector(&device).expect("read_boot_sector failed");
+
+    let expected_entries = (boot.fat_size() as usize * boot.bytes_per_sector() as usize) / 4;
+    let fat = read_fat_table(&device, &boot, 0).expect("read_fat_table failed");
+
+    assert_eq!(
+        fat.len(),
+        expected_entries,
+        "FAT entry count must cover the whole declared FAT"
+    );
+    assert!(
+        !fat_entry::is_free(fat[boot.root_cluster() as usize]),
+        "root cluster must be marked in use"
+    );
+
+    // The two FAT copies must agree on a freshly made filesystem.
+    let fat2 = read_fat_table(&device, &boot, 1).expect("read_fat_table(1) failed");
+    assert_eq!(fat, fat2, "FAT1 and FAT2 must match on a fresh image");
+}
+
+/// A device that is not FAT32 at all must be reported as an error. After
+/// [F-R5] replaces the CLI's substring match with a typed error, this is what
+/// stops an unrelated failure from being routed into crash recovery.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn non_fat32_device_is_rejected() {
+    let file =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
+    Command::new("truncate")
+        .arg("-s")
+        .arg("64M")
+        .arg(file.path())
+        .status()
+        .expect("truncate failed");
+
+    // Zeroed image: no boot signature, no FAT32 anything.
+    let result = get_fs_info(file.path());
+    assert!(
+        result.is_err(),
+        "get_fs_info must reject a device that is not FAT32"
+    );
+
+    let options = ResizeOptions::new(file.path())
+        .dry_run(false)
+        .verbose(false);
+    assert!(
+        resize_fat32(options).is_err(),
+        "resize_fat32 must reject a device that is not FAT32"
+    );
+}
+
+/// An invalidated boot signature with no checkpoint on the device is not
+/// recoverable, and must fail rather than be treated as a resumable resize.
+/// [F-R5]'s fix changes how this reaches the CLI; the outcome must not change.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn invalidated_boot_sector_without_a_checkpoint_is_not_recoverable() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let image = create_fat32_image(128);
+    extend_image(image.path(), 256);
+
+    // Zero the boot signature, exactly as the executor's danger zone does.
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(image.path())
+            .expect("open for invalidation failed");
+        f.seek(SeekFrom::Start(510)).expect("seek failed");
+        f.write_all(&[0x00, 0x00]).expect("write failed");
+        f.sync_all().expect("sync failed");
+
+        let mut sig = [0u8; 2];
+        f.seek(SeekFrom::Start(510)).expect("seek failed");
+        f.read_exact(&mut sig).expect("read failed");
+        assert_eq!(sig, [0x00, 0x00], "boot signature was not invalidated");
+    }
+
+    // get_fs_info uses the strict reader, so it must fail.
+    assert!(
+        get_fs_info(image.path()).is_err(),
+        "get_fs_info must fail on an invalidated boot sector"
+    );
+
+    // resize_fat32 uses the recovery reader, finds no checkpoint, and must
+    // refuse rather than proceed on a filesystem it cannot reconstruct.
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
+    assert!(
+        resize_fat32(options).is_err(),
+        "resize must refuse an invalidated filesystem with no checkpoint"
+    );
+}
+
+// ===== Group A safety net: device geometry on real filesystems =====
+//
+// The unit tests in `device.rs` and `checkpoint.rs` pin the arithmetic. These
+// pin it against filesystems `mkfs.fat` actually produced, at a sector size
+// that is not the 512 `Device::open` used to hardcode ([F-R23]) and that only
+// the boot-sector reader's side effect ([F-R40]) used to supply.
+
+/// [F-R23]/[F-R40]: after the boot sector has been read, the device must
+/// address sectors the way the filesystem does. The last sector -- where the
+/// checkpoint goes -- must be readable at that geometry, and the sector count
+/// must match the file's real size.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn device_geometry_matches_a_4096_byte_sector_filesystem() {
+    use fat32expander::fat32::{open_fat32_device, read_boot_sector};
+
+    // Sized so each case clears FAT32's 65525-cluster floor and pushes the
+    // sector count past 65535, or mkfs writes a FAT16-shaped boot sector.
+    for (size_mb, sector_size) in [(128u32, 512u32), (512, 1024), (512, 2048), (512, 4096)] {
+        let image = create_fat32_image_with_sector_size(size_mb, sector_size, 1);
+        let len = std::fs::metadata(image.path()).unwrap().len();
+        let label = format!("size={size_mb}MB sector_size={sector_size}");
+
+        let device = open_fat32_device(image.path(), false).expect("open failed");
+        let boot = read_boot_sector(&device).expect("read_boot_sector failed");
+
+        assert_eq!(
+            boot.bytes_per_sector() as u32,
+            sector_size,
+            "mkfs geometry {label}"
+        );
+        assert_eq!(
+            device.sector_size(),
+            sector_size,
+            "device must address sectors as the filesystem does, {label}"
+        );
+        assert_eq!(
+            device.total_sectors(),
+            len / sector_size as u64,
+            "total_sectors must match the real device size, {label}"
+        );
+
+        // The checkpoint sector must be reachable at this geometry.
+        let last = device.total_sectors() - 1;
+        let data = device
+            .read_sector(last)
+            .unwrap_or_else(|e| panic!("last sector must be readable, {label}: {e}"));
+        assert_eq!(
+            data.len(),
+            sector_size as usize,
+            "short sector read {label}"
+        );
+
+        // And reading one past it must not silently succeed.
+        assert!(
+            device.read_sector(last + 1).is_err(),
+            "reading past the last sector must fail, {label}"
+        );
+    }
+}
+
+/// [F-R40]: `read_boot_sector` is named as a reader but reconfigures the
+/// device. Whether or not it keeps doing so, calling it twice must yield the
+/// same boot sector -- a reader whose answer depends on how often it has been
+/// called is not one.
+#[test]
+#[ignore] // Requires mkfs.fat
+fn read_boot_sector_returns_the_same_answer_on_repeated_calls() {
+    use fat32expander::fat32::{open_fat32_device, read_boot_sector};
+
+    for (size_mb, sector_size) in [(128u32, 512u32), (512, 4096)] {
+        let image = create_fat32_image_with_sector_size(size_mb, sector_size, 1);
+        let label = format!("size={size_mb}MB sector_size={sector_size}");
+
+        let device = open_fat32_device(image.path(), false).expect("open failed");
+        let first = read_boot_sector(&device).expect("first read failed");
+        let second = read_boot_sector(&device).expect("second read failed");
+
+        assert_eq!(
+            first.bytes_per_sector(),
+            second.bytes_per_sector(),
+            "bytes_per_sector drifted between calls, {label}"
+        );
+        assert_eq!(
+            first.total_sectors(),
+            second.total_sectors(),
+            "total_sectors drifted between calls, {label}"
+        );
+        assert_eq!(
+            first.fat_size(),
+            second.fat_size(),
+            "fat_size drifted between calls, {label}"
+        );
+        assert_eq!(
+            first.reserved_sectors(),
+            second.reserved_sectors(),
+            "reserved_sectors drifted between calls, {label}"
+        );
+        assert_eq!(
+            first.root_cluster(),
+            second.root_cluster(),
+            "root_cluster drifted between calls, {label}"
+        );
+        assert_eq!(
+            device.sector_size(),
+            sector_size,
+            "the device must still address sectors correctly, {label}"
+        );
+    }
+}
+
+/// The end-to-end net for the whole group: a real resize, with FAT growth and
+/// a file to preserve, on a filesystem whose sector size is not 512. Every
+/// Group A fix changes how the device establishes or bounds its geometry, and
+/// this is the case where a mistake in any of them shows up as corruption
+/// rather than as a failing assertion.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn resize_preserves_files_on_a_4096_byte_sector_filesystem() {
+    let image = create_fat32_image_with_sector_size(512, 4096, 1);
+
+    let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let source = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    std::fs::write(source.path(), &payload).unwrap();
+    mcopy_into(image.path(), source.path(), "PAYLOAD.BIN");
+
+    // 512 MB -> 1024 MB doubles the cluster count, forcing the FAT to grow
+    // (128 -> 256 sectors at this geometry) and so a data shift.
+    extend_image(image.path(), 1024);
+
+    let info_before = get_fs_info(image.path()).expect("info before failed");
+    assert_eq!(info_before.boot().bytes_per_sector(), 4096);
+    assert!(info_before.can_grow());
+
+    let options = ResizeOptions::new(image.path())
+        .dry_run(false)
+        .verbose(false);
+    let result = resize_fat32(options).expect("resize failed");
+    assert!(result.new_size_bytes > result.old_size_bytes);
+
+    assert!(
+        check_filesystem(image.path()),
+        "dosfsck failed after resizing a 4096-byte-sector filesystem"
+    );
+
+    let info_after = get_fs_info(image.path()).expect("info after failed");
+    assert_eq!(
+        info_after.boot().bytes_per_sector(),
+        4096,
+        "the sector size must not have been rewritten"
+    );
+
+    assert_eq!(
+        mcopy_out(image.path(), "PAYLOAD.BIN"),
+        payload,
+        "the file must survive the resize byte for byte"
+    );
+}
+
+/// Safety net for [F-R60]. CLAUDE.md still describes the abandoned
+/// cluster-renumbering design, under which relocating cluster 2 would force
+/// `root_cluster` to be rewritten. The implementation preserves cluster
+/// numbers and moves only physical sectors, so `root_cluster` must come out
+/// the far side of a relocating resize untouched. (`set_root_cluster`, which
+/// had no callers, was removed in [F-17].)
+///
+/// Nothing asserted this. `test_resize_with_fat_growth` checks cluster counts
+/// and `dosfsck`, neither of which distinguishes "root cluster preserved" from
+/// "root cluster rewritten consistently", which is precisely the pair the two
+/// designs disagree about.
+#[test]
+#[ignore]
+fn root_cluster_survives_a_relocating_resize() {
+    let image = create_fat32_image(128);
+    let payload = vec![0x5Au8; 96 * 1024];
+    let source =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create payload file");
+    std::fs::write(source.path(), &payload).expect("Failed to write payload");
+    mcopy_into(image.path(), source.path(), "ROOTCHK.BIN");
+
+    let before = get_fs_info(image.path()).expect("Failed to get fs info");
+    let root_before = before.boot().root_cluster();
+
+    extend_image(image.path(), 256);
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(
+        result.fat_grew,
+        "fixture drifted: this case must grow the FAT, or it does not relocate anything"
+    );
+    assert!(
+        result.clusters_relocated > 0,
+        "fixture drifted: no cluster was relocated, so the invariant is untested"
+    );
+
+    let after = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(
+        after.boot().root_cluster(),
+        root_before,
+        "root_cluster was rewritten; the code has moved back to renumbering clusters"
+    );
+    assert_eq!(
+        mcopy_out(image.path(), "ROOTCHK.BIN"),
+        payload,
+        "the file must survive the relocating resize byte for byte"
+    );
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+}
+
+/// Copy `count` files of each size in `sizes` into the image, each with its
+/// own byte pattern, and return them as (name, content).
+fn copy_payloads(image: &std::path::Path, count: usize, sizes: &[usize]) -> Vec<(String, Vec<u8>)> {
+    let mut payloads = Vec::new();
+    for (s, &size) in sizes.iter().enumerate() {
+        for i in 0..count {
+            let name = format!("F{s}_{i:02}.BIN");
+            let seed = (s * count + i) as u32;
+            let content: Vec<u8> = (0..size as u32)
+                .map(|b| (b.wrapping_mul(31) ^ seed.wrapping_mul(97)) as u8)
+                .collect();
+            let src = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+            std::fs::write(src.path(), &content).unwrap();
+            mcopy_into(image, src.path(), &name);
+            payloads.push((name, content));
+        }
+    }
+    payloads
+}
+
+/// Assert every payload reads back byte for byte.
+fn assert_payloads_intact(image: &std::path::Path, payloads: &[(String, Vec<u8>)]) {
+    for (name, content) in payloads {
+        assert_eq!(
+            &mcopy_out(image, name),
+            content,
+            "{} did not survive the resize",
+            name
+        );
+    }
+}
+
+/// Safety net for [F-T01]. At this geometry both FATs together would grow by
+/// less than one cluster, so the shift would move every cluster in use by
+/// part of a cluster and no progress could be recorded. The calculator rounds
+/// such a growth up to one cluster, and every file must survive the resize.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn a_shift_shorter_than_one_cluster_keeps_every_file() {
+    // 32 KiB clusters, and a FAT that needs to grow by only one sector per
+    // copy. The image is sparse, so its nominal size costs no disk.
+    let image = create_fat32_image_with_cluster_size(2200, 64);
+    let payloads = copy_payloads(image.path(), 3, &[100, 32_768, 70_000, 300_000]);
+
+    extend_image(image.path(), 2308);
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(result.fat_grew, "fixture drifted: the FAT must grow");
+    assert!(
+        (result.new_fat_size - result.old_fat_size) * 2 >= 64,
+        "the calculator must round a short FAT growth up to one cluster ({} -> {} per FAT)",
+        result.old_fat_size,
+        result.new_fat_size
+    );
+    assert!(
+        result.clusters_relocated > 0,
+        "fixture drifted: nothing moved"
+    );
+
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+    assert_payloads_intact(image.path(), &payloads);
+}
+
+/// Safety net for [F-T05]. A volume with one FAT has no copy to mirror to,
+/// and the resize reads and extends that one FAT. It must keep working.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn a_single_fat_volume_grows_and_keeps_every_file() {
+    let image =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
+    extend_image(image.path(), 256);
+    let status = Command::new("mkfs.fat")
+        .args(["-F", "32", "-f", "1"])
+        .arg(image.path())
+        .status()
+        .expect("Failed to run mkfs.fat");
+    assert!(status.success(), "mkfs.fat failed");
+    let payloads = copy_payloads(image.path(), 5, &[100, 4096, 50_000]);
+
+    extend_image(image.path(), 512);
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(result.fat_grew, "fixture drifted: the FAT must grow");
+    let info = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(
+        info.boot().num_fats(),
+        1,
+        "fixture drifted: not a one-FAT volume"
+    );
+
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+    assert_payloads_intact(image.path(), &payloads);
+}
+
+/// [F-T05]: with mirroring off and FAT 0 active, FAT 0 is the live FAT, which
+/// is the one the resize reads and extends. Such a volume still grows and
+/// keeps every file, and stays unmirrored.
+#[test]
+#[ignore] // Requires mkfs.fat, dosfsck and mtools
+fn a_volume_with_mirroring_off_and_fat_0_active_grows_and_keeps_every_file() {
+    let image = create_fat32_image(256);
+    let payloads = copy_payloads(image.path(), 5, &[100, 4096, 50_000]);
+    let mut data = std::fs::read(image.path()).unwrap();
+    let backup = get_fs_info(image.path())
+        .expect("Failed to get fs info")
+        .boot()
+        .backup_boot_sector() as usize;
+    for sector in [0, backup] {
+        data[sector * 512 + 40..sector * 512 + 42].copy_from_slice(&0x0080u16.to_le_bytes());
+    }
+    std::fs::write(image.path(), &data).unwrap();
+
+    extend_image(image.path(), 512);
+
+    let result =
+        resize_fat32(ResizeOptions::new(image.path()).dry_run(false)).expect("Resize failed");
+    assert!(result.fat_grew, "fixture drifted: the FAT must grow");
+    let info = get_fs_info(image.path()).expect("Failed to get fs info");
+    assert_eq!(info.boot().ext_flags(), 0x0080, "mirroring must stay off");
+
+    assert!(check_filesystem(image.path()), "Filesystem check failed");
+    assert_payloads_intact(image.path(), &payloads);
 }

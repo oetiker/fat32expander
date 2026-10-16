@@ -22,6 +22,8 @@
 
 CARGO := cargo
 BINARY_NAME := fat32expander
+# Where cargo writes its output: CARGO_TARGET_DIR when set, else target/
+TARGET_DIR := $(or $(CARGO_TARGET_DIR),target)
 
 # Target triples
 TARGET_LINUX_X64    := x86_64-unknown-linux-musl
@@ -57,21 +59,21 @@ static: linux-x64
 # Linux x86_64 (static, musl)
 linux-x64:
 	$(CARGO) build --release --target $(TARGET_LINUX_X64)
-	@echo "Built: target/$(TARGET_LINUX_X64)/release/$(BINARY_NAME)"
+	@echo "Built: $(TARGET_DIR)/$(TARGET_LINUX_X64)/release/$(BINARY_NAME)"
 
 # Linux ARM64 (static, musl)
 # Requires: rustup target add aarch64-unknown-linux-musl
 #           Install cross-compiler: apt install gcc-aarch64-linux-gnu
 linux-arm64:
 	$(CARGO) build --release --target $(TARGET_LINUX_ARM64)
-	@echo "Built: target/$(TARGET_LINUX_ARM64)/release/$(BINARY_NAME)"
+	@echo "Built: $(TARGET_DIR)/$(TARGET_LINUX_ARM64)/release/$(BINARY_NAME)"
 
 # Windows x86_64
 # Requires: rustup target add x86_64-pc-windows-gnu
 #           Install cross-compiler: apt install gcc-mingw-w64-x86-64
 windows:
 	$(CARGO) build --release --target $(TARGET_WINDOWS_X64)
-	@echo "Built: target/$(TARGET_WINDOWS_X64)/release/$(BINARY_NAME).exe"
+	@echo "Built: $(TARGET_DIR)/$(TARGET_WINDOWS_X64)/release/$(BINARY_NAME).exe"
 
 # macOS x86_64
 # Requires: rustup target add x86_64-apple-darwin
@@ -79,7 +81,7 @@ windows:
 #           On macOS: Works natively
 macos-x64:
 	$(CARGO) build --release --target $(TARGET_MACOS_X64)
-	@echo "Built: target/$(TARGET_MACOS_X64)/release/$(BINARY_NAME)"
+	@echo "Built: $(TARGET_DIR)/$(TARGET_MACOS_X64)/release/$(BINARY_NAME)"
 
 # macOS ARM64 (Apple Silicon)
 # Requires: rustup target add aarch64-apple-darwin
@@ -87,7 +89,7 @@ macos-x64:
 #           On macOS: Works natively
 macos-arm64:
 	$(CARGO) build --release --target $(TARGET_MACOS_ARM64)
-	@echo "Built: target/$(TARGET_MACOS_ARM64)/release/$(BINARY_NAME)"
+	@echo "Built: $(TARGET_DIR)/$(TARGET_MACOS_ARM64)/release/$(BINARY_NAME)"
 
 # Build all targets (will fail if cross-compilers not installed)
 all-targets: linux-x64 linux-arm64 windows macos-x64 macos-arm64
@@ -108,9 +110,9 @@ setup-targets:
 # Create distribution directory with all binaries
 dist: linux-x64 linux-arm64 windows
 	@mkdir -p $(DIST_DIR)
-	cp target/$(TARGET_LINUX_X64)/release/$(BINARY_NAME) $(DIST_DIR)/$(BINARY_NAME)-linux-x64
-	cp target/$(TARGET_LINUX_ARM64)/release/$(BINARY_NAME) $(DIST_DIR)/$(BINARY_NAME)-linux-arm64
-	cp target/$(TARGET_WINDOWS_X64)/release/$(BINARY_NAME).exe $(DIST_DIR)/$(BINARY_NAME)-windows-x64.exe
+	cp $(TARGET_DIR)/$(TARGET_LINUX_X64)/release/$(BINARY_NAME) $(DIST_DIR)/$(BINARY_NAME)-linux-x64
+	cp $(TARGET_DIR)/$(TARGET_LINUX_ARM64)/release/$(BINARY_NAME) $(DIST_DIR)/$(BINARY_NAME)-linux-arm64
+	cp $(TARGET_DIR)/$(TARGET_WINDOWS_X64)/release/$(BINARY_NAME).exe $(DIST_DIR)/$(BINARY_NAME)-windows-x64.exe
 	@echo "Distribution binaries in $(DIST_DIR)/"
 	@ls -la $(DIST_DIR)/
 
@@ -135,7 +137,7 @@ test: test-unit
 # Clean build artifacts
 clean:
 	$(CARGO) clean
-	rm -rf /tmp/fat32expander-qemu
+	rm -rf "$${TMPDIR:-/tmp}/fat32expander-qemu"
 
 # Format code
 fmt:
@@ -154,11 +156,11 @@ check: fmt-check lint test-unit
 
 # Show filesystem info (usage: make info DEVICE=/path/to/device)
 info: release
-	./target/release/$(BINARY_NAME) info $(DEVICE)
+	$(TARGET_DIR)/release/$(BINARY_NAME) info $(DEVICE)
 
 # Dry run resize (usage: make dry-run DEVICE=/path/to/device)
 dry-run: release
-	./target/release/$(BINARY_NAME) resize --dry-run --verbose $(DEVICE)
+	$(TARGET_DIR)/release/$(BINARY_NAME) resize --dry-run --verbose $(DEVICE)
 
 # Help
 help:

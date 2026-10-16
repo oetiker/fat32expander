@@ -9,7 +9,9 @@ export PATH="$PATH:/sbin:/usr/sbin"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-WORK_DIR="${TMPDIR:-/tmp}/fat32expander-test-$$"
+# Images go under the cargo target directory unless TMPDIR says otherwise:
+# /tmp is often small or a tmpfs held in memory.
+WORK_DIR="${TMPDIR:-${CARGO_TARGET_DIR:-$PROJECT_DIR/target}/tmp}/fat32expander-test-$$"
 BINARY="$PROJECT_DIR/target/release/fat32expander"
 
 # Colors for output
@@ -67,11 +69,22 @@ check_prerequisites() {
         log_warn "Install mtools package for comprehensive testing"
     fi
 
-    if [ ! -f "$BINARY" ]; then
-        log_info "Building release binary..."
-        cd "$PROJECT_DIR"
-        cargo build --release
+    # Always rebuild. Building only when the binary is absent means a stale
+    # binary from an earlier commit is tested silently, and the suite reports
+    # "All tests passed" for code that is no longer in the tree.
+    log_info "Building release binary..."
+    cd "$PROJECT_DIR"
+    cargo build --release
+
+    # Respect CARGO_TARGET_DIR: with it set, cargo does not write to
+    # $PROJECT_DIR/target, and the path below would be a leftover from a
+    # previous layout rather than what was just built.
+    BINARY="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}/release/fat32expander"
+    if [ ! -x "$BINARY" ]; then
+        log_error "Build succeeded but no binary at $BINARY"
+        exit 1
     fi
+    log_info "Testing binary: $BINARY"
 }
 
 # Create a test image
@@ -229,8 +242,15 @@ test_simple_resize() {
     log_test "Simple Resize (No FAT Growth)"
 
     local img="$WORK_DIR/test_simple.img"
+    # mkfs.fat sizes the FAT tighter than the resize does, so growing a fresh
+    # image always grows the FAT ([F-12]: this used 128 -> 140 MB, which did).
+    # 128 MiB grown to 129 MiB by this tool has a FAT that still covers
+    # 264224 sectors, so the second step does not grow it.
     create_image "$img" 128
-    extend_image "$img" 140
+    extend_image "$img" 129
+    run_resize "$img" > /dev/null
+    log_info "Extending image to 264224 sectors"
+    truncate -s $((264224 * 512)) "$img"
 
     log_info "Before resize:"
     show_info "$img" | grep -E "(Total sectors|FAT size|Can grow)"
@@ -238,7 +258,13 @@ test_simple_resize() {
     check_fs "$img" "before resize"
 
     log_info "Running resize..."
-    run_resize "$img" --verbose --force
+    local output
+    output=$(run_resize "$img" --verbose)
+    echo "$output"
+    if ! grep -q "FAT tables grew: false" <<< "$output"; then
+        log_error "Fixture drifted: this resize grew the FAT"
+        return 1
+    fi
 
     log_info "After resize:"
     show_info "$img" | grep -E "(Total sectors|FAT size|Can grow)"
@@ -262,7 +288,7 @@ test_fat_growth_resize() {
     check_fs "$img" "before resize"
 
     log_info "Running resize..."
-    run_resize "$img" --verbose --force
+    run_resize "$img" --verbose
 
     log_info "After resize:"
     show_info "$img" | grep -E "(Total sectors|FAT size|Can grow|Root directory cluster)"
@@ -284,7 +310,7 @@ test_dry_run() {
     before_sectors=$(show_info "$img" | grep "Total sectors" | awk '{print $NF}')
 
     log_info "Running dry run..."
-    run_resize "$img" --dry-run --verbose --force
+    run_resize "$img" --dry-run --verbose
 
     local after_sectors
     after_sectors=$(show_info "$img" | grep "Total sectors" | awk '{print $NF}')
@@ -306,14 +332,32 @@ test_already_max_size() {
     create_image "$img" 128
     # Don't extend - already at max
 
-    log_info "Running resize (should fail)..."
-    if run_resize "$img" --force 2>&1; then
-        log_error "Resize should have failed but didn't"
-        exit 1
+    # A resize that finds nothing to do is a successful no-op, not a failure:
+    # the tool has to be safe to re-run from a provisioning script that does not
+    # track whether it already ran. It must still say why it did nothing.
+    log_info "Running resize (should succeed as a no-op)..."
+    local output
+    if output=$(run_resize "$img" 2>&1); then
+        if echo "$output" | grep -q "maximum size"; then
+            log_info "Resize correctly reported nothing to do"
+        else
+            log_error "Resize succeeded but did not explain why there was nothing to do"
+            echo "$output"
+            exit 1
+        fi
     else
-        log_info "Resize correctly failed (filesystem already at max size)"
-        log_info "Test passed!"
+        log_error "Resize of an already-maximal filesystem should succeed, but exited $?"
+        echo "$output"
+        exit 1
     fi
+
+    # Re-running must behave identically -- that is what idempotent means here.
+    if ! run_resize "$img" >/dev/null 2>&1; then
+        log_error "Second resize should also have succeeded"
+        exit 1
+    fi
+
+    log_info "Test passed!"
 }
 
 # Test 6: Large resize (FAT must grow significantly)
@@ -330,7 +374,7 @@ test_large_resize() {
     check_fs "$img" "before resize"
 
     log_info "Running resize..."
-    run_resize "$img" --verbose --force
+    run_resize "$img" --verbose
 
     log_info "After resize:"
     show_info "$img" | grep -E "(Total sectors|FAT size|Data clusters)"
@@ -362,7 +406,7 @@ test_resize_with_simple_files() {
     check_fs "$img" "before resize"
 
     log_info "Running resize..."
-    run_resize "$img" --verbose --force
+    run_resize "$img" --verbose
 
     check_fs "$img" "after resize"
 
@@ -395,7 +439,7 @@ test_resize_with_nested_dirs() {
     check_fs "$img" "before resize"
 
     log_info "Running resize..."
-    run_resize "$img" --verbose --force
+    run_resize "$img" --verbose
 
     check_fs "$img" "after resize"
 
@@ -430,7 +474,7 @@ test_resize_with_deep_hierarchy() {
     check_fs "$img" "before resize"
 
     log_info "Running resize (large growth with deep directories)..."
-    run_resize "$img" --verbose --force
+    run_resize "$img" --verbose
 
     check_fs "$img" "after resize"
 

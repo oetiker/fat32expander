@@ -61,6 +61,7 @@ Contains hints for the operating system:
 | 0x1E4 | 4 | signature2 | 0x61417272 |
 | 0x1E8 | 4 | free_count | Number of free clusters |
 | 0x1EC | 4 | next_free | Hint for next free cluster |
+| 0x1F0 | 12 | reserved | During a resize only: `RSZP` and the checkpoint sector (u64) |
 | 0x1FC | 4 | signature3 | 0xAA550000 |
 
 #### File Allocation Table (FAT)
@@ -305,19 +306,21 @@ for offset in 0..new_fat_size {
 ### Step 7: Update Metadata
 
 ```rust
-// Update boot sector
-boot.set_total_sectors_32(new_total_sectors);
-boot.set_fat_size_32(new_fat_size);
-write_boot_sector(&device, &boot)?;
+let boot = boot.with_geometry(new_total_sectors, new_fat_size);
 
-// Update backup boot sector
-write_backup_boot_sector(&device, &boot, backup_sector)?;
+// Backup boot sector, unless the field is 0 (no backup)
+if let Some(sector) = boot.backup_location() {
+    write_backup_boot_sector(&device, &boot, sector)?;
+}
 
-// Update FSInfo
-let additional_clusters = new_data_clusters - old_data_clusters;
-fsinfo.set_free_count(old_free + additional_clusters);
+// FSInfo free count, counted from the FAT; the backup FSInfo at
+// backup + 1 gets the same count if that sector holds an FSInfo
+fsinfo.set_free_count(new_free);
 write_fsinfo(&device, &fsinfo, fsinfo_sector)?;
+device.sync()?;
 
+// The primary boot sector is written last: it is the commit point
+write_boot_sector(&device, &boot)?;
 device.sync()?;
 ```
 
@@ -329,7 +332,8 @@ device.sync()?;
 
 ```
 src/
-├── main.rs              # CLI entry point (clap-based)
+├── main.rs              # CLI entry point: clap definitions, main, dispatch
+├── cli/                 # Binary-only modules (exit codes, output, resize, version)
 ├── lib.rs               # Library exports
 ├── error.rs             # Error types (thiserror)
 ├── device.rs            # Sector-based device I/O
@@ -342,8 +346,14 @@ src/
 └── resize/
     ├── mod.rs           # Module exports
     ├── calculator.rs    # Size calculations for resize
+    ├── checkpoint.rs    # On-disk checkpoint format and its sector I/O
+    ├── events.rs        # What a resize reports while it runs
+    ├── executor.rs      # Main resize orchestration
+    ├── fault.rs         # Crash points for the fault-injection feature
+    ├── fsinfo.rs        # Read-only filesystem query
+    ├── options.rs       # ResizeOptions and ResizeResult
     ├── relocator.rs     # Data shifting logic
-    └── executor.rs      # Main resize orchestration
+    └── testutil.rs      # Shared fixtures for the unit tests
 ```
 
 ### Key Data Structures
@@ -363,8 +373,10 @@ impl BootSector {
     pub fn total_sectors(&self) -> u32;
     pub fn root_cluster(&self) -> u32;
     pub fn first_data_sector(&self) -> u64;
-    pub fn data_clusters(&self) -> u32;
-    pub fn cluster_to_sector(&self, cluster: u32) -> u64;
+    // `None` when the layout does not fit in the volume, or the cluster is
+    // outside it.
+    pub fn data_clusters(&self) -> Option<u32>;
+    pub fn cluster_to_sector(&self, cluster: u32) -> Option<u64>;
 }
 
 // Resize calculation results
@@ -438,12 +450,13 @@ The root directory starts at `root_cluster` (typically cluster 2). If it's in th
 
 ### 7. Backup Boot Sector
 
-FAT32 maintains a backup boot sector (typically at sector 6). Both must be updated:
-
-```rust
-write_boot_sector(&device, &boot)?;           // Primary
-write_backup_boot_sector(&device, &boot, 6)?; // Backup
-```
+FAT32 maintains a backup boot sector (typically at sector 6) and, in the
+sector after it, a backup FSInfo. The resize writes the backup boot sector
+first and the primary last. A backup field of 0 means the volume has no
+backup, and nothing is written for it. The backup FSInfo gets the new free
+count only when its sector lies in the reserved area and already holds an
+FSInfo; with the backup in the last reserved sector, the next sector is the
+first FAT sector and stays untouched.
 
 ### 8. FAT1 and FAT2 Synchronization
 
@@ -475,7 +488,8 @@ Filesystem resize operations are inherently dangerous. If power is lost or the s
 
 #### Checkpoint Storage
 
-A checkpoint is stored in the **last sector of the device** (beyond the filesystem boundary):
+A checkpoint is stored in the **last sector the device had when the resize
+started** (beyond the filesystem boundary):
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -484,120 +498,195 @@ A checkpoint is stored in the **last sector of the device** (beyond the filesyst
                                                       └─► Last sector
 ```
 
+Right after the first checkpoint is written, and before any data moves, the
+sector number is marked in FSInfo's reserved bytes at offset 0x1F0 (see
+below). A rerun reads the checkpoint from the marked sector, so it finds it
+even if the device has grown since the crash. If the device has shrunk past
+the marked sector, the rerun refuses with exit code 9. Without a mark (a crash
+before the mark was written, or a run of an older build) the rerun looks in
+the device's current last sector. The commit removes the mark as its last
+write, after it has cleared the checkpoint, so a crash at any earlier point
+still leaves the mark that leads a rerun to the record.
+
 The checkpoint contains:
-- Magic signature (0xFA32CHKP)
+- Magic signature (`FAT32RSZ`) and format version (bytes 0-8)
 - Current phase (Started, DataCopied, FatWritten)
-- Old and new filesystem parameters (total_sectors, fat_size)
+- Old and new filesystem parameters (total_sectors, fat_size), CRC32 at byte 28
+- Optionally, from byte 32, the shift progress: `PRG1`, the next cluster to move, CRC32
+- From format version 2, at byte 44, the volume serial of the filesystem (boot
+  sector offset 67) and its CRC32
+
+A record whose volume serial or old geometry differs from the boot sector's
+was not written for this filesystem, so a record left in the last sector of a
+reformatted device is never resumed. Behind a valid boot sector such a record
+is ignored and a fresh resize overwrites it: every phase that keeps the boot
+sector valid also keeps the old geometry and serial in it. Behind an
+invalidated boot sector the record is the only way back, so a mismatch is
+refused with exit code 9. Version 1 records, which have no serial, are still
+read. A record with any other version comes from a newer build and is refused
+with exit code 9.
 
 #### The Three Phases
 
 ```
 Phase 0: Started
    │
-   ▼
-┌─────────────────────────────────────┐
-│ Data Shift (copy clusters forward)  │  ◄── Safe: source data preserved
-└─────────────────────────────────────┘
-   │
-   ▼
-Phase 1: DataCopied
+   ├─ Write checkpoint, mark its sector in FSInfo, sync
    │
    ▼
 ┌─────────────────────────────────────┐
 │ *** DANGER ZONE ***                 │
-│ - Invalidate boot sector (0x0000)   │  ◄── Prevents other tools from
-│ - Extend FAT tables                 │      operating on corrupt state
-│ - Sync FAT1 to FAT2                 │
+│ - Invalidate boot sector (0x0000)   │  ◄── From here on, nothing mounts
+│ - Shift clusters forward, highest   │      the volume or writes to it
+│   first, recording progress         │
+│   (old homes are overwritten)       │
+│                                     │
+│ Phase 1: DataCopied                 │
+│ - Extend FAT1, copy it to FAT2      │
+│ - Sync                              │
+│                                     │
+│ Phase 2: FatWritten                 │
+│ - Write backup boot sector          │
+│ - Write FSInfo free count (mark     │
+│   kept) and backup FSInfo, sync     │
+│ - Write primary boot sector: new    │  ◄── Commit point
+│   geometry, signature 0xAA55, sync  │
 └─────────────────────────────────────┘
    │
-   ▼
-Phase 2: FatWritten
-   │
-   ▼
-┌─────────────────────────────────────┐
-│ - Restore boot sector (0xAA55)      │
-│ - Update boot sector parameters     │
-│ - Update backup boot sector         │
-│ - Update FSInfo                     │
-│ - Clear checkpoint                  │
-└─────────────────────────────────────┘
-   │
+   ├─ Clear checkpoint, sync
+   ├─ Remove the mark from FSInfo, sync
    ▼
 Complete
 ```
 
+A resize without FAT growth skips phases 0 and 1. Its commit first writes a
+`FatWritten` checkpoint and marks it in FSInfo, then runs phase 2 behind a
+boot sector that stays valid until the primary write.
+
 ### Boot Sector Invalidation
 
-The **danger zone** is the period when the filesystem is in an inconsistent state (FAT tables being modified). During this period, the boot sector signature is changed from `0xAA55` to `0x0000`.
+The **danger zone** runs from just before the first cluster moves to the
+write of the primary boot sector. During it the boot sector signature is
+`0x0000` instead of `0xAA55`.
 
-This serves two purposes:
+The shift overwrites the old home of each cluster it moves. Behind a valid
+boot sector, a crash during the shift would leave a volume that mounts with
+the old geometry and partly overwritten files, and anything written to it
+before the rerun would destroy data the resume still has to copy.
 
-1. **Protection from other tools**: If the system crashes and reboots, tools like `fsck.fat` or the OS's FAT driver will refuse to mount or operate on the "invalid" filesystem.
+The invalidated signature therefore serves two purposes:
 
-2. **Recovery detection**: When `fat32expander` runs again, it detects the invalidated signature and knows recovery is needed.
+1. **Protection from other tools**: after a crash, `fsck.fat` and the
+   kernel's FAT driver refuse the volume, so nothing writes to it before
+   the rerun.
+
+2. **Recovery detection**: when `fat32expander` runs again, it detects the
+   invalidated signature and knows recovery is needed.
 
 ```rust
-// Enter danger zone
+// Enter the danger zone: checkpoint and FSInfo mark are durable already.
 boot.invalidate_signature();  // Sets bytes 510-511 to 0x0000
 write_boot_sector(&device, &boot)?;
 device.sync()?;
 
-// ... perform FAT operations ...
+// ... shift clusters, extend the FAT, write backup boot sector and FSInfo ...
 
-// Exit danger zone
+// Leave the danger zone: this write is the commit point.
+let mut boot = boot.with_geometry(new_total_sectors, new_fat_size);
 boot.restore_signature();     // Sets bytes 510-511 to 0xAA55
-boot.set_total_sectors_32(new_total_sectors);
-boot.set_fat_size_32(new_fat_size);
 write_boot_sector(&device, &boot)?;
 ```
 
 ### Recovery Algorithm
 
-On startup, `fat32expander` checks for incomplete operations:
+On startup, `fat32expander` looks for an interrupted resize:
 
-```rust
-fn check_for_incomplete_resize(device, boot) -> Option<Checkpoint> {
-    if boot.signature == 0x0000 {
-        // Boot sector invalidated - MUST recover
-        // Read checkpoint from last device sector
-        return read_checkpoint(device);
-    } else if device_size > filesystem_size {
-        // Check for phase 0 crash (before invalidation)
-        if let Some(checkpoint) = read_checkpoint(device) {
-            return Some(checkpoint);
-        }
-    }
-    None
-}
-```
+1. It reads the checkpoint from the sector marked in FSInfo, or from the
+   device's last sector if FSInfo carries no mark. A marked sector past the
+   end of the device is refused with exit code 9.
+2. Behind an **invalidated** boot sector, a checkpoint must exist and must
+   match the volume serial and old geometry of the boot sector. A missing or
+   mismatching record is refused with exit code 9: it is the only way back.
+3. Behind a **valid** boot sector, a matching checkpoint is resumed. A
+   mismatching one belongs to an earlier filesystem on the device; it is
+   reported as ignored and a fresh resize overwrites it.
+4. A resume whose device is now smaller than the checkpoint's new size is
+   refused with exit code 9. A larger device is fine: the resume finishes the
+   size it was interrupted at, and a second run grows the rest.
 
-Recovery behavior depends on the checkpoint phase:
+Recovery behaviour depends on where the crash happened. Each row is a crash
+point of the fault-injection suite:
 
-| Crash Point | Phase | Boot Sector | Recovery Action |
+| Crash point | Phase | Boot sector | Recovery action |
 |-------------|-------|-------------|-----------------|
-| After checkpoint write | Started | Valid (0xAA55) | Re-run entire resize |
-| After data shift | Started | Valid (0xAA55) | Re-run data shift (idempotent) |
-| After phase 1 checkpoint | DataCopied | Valid (0xAA55) | Skip data shift, continue |
-| After boot invalidation | DataCopied | Invalid (0x0000) | Skip data shift, continue |
-| After FAT write | DataCopied | Invalid (0x0000) | Continue from FAT sync |
-| After phase 2 checkpoint | FatWritten | Invalid (0x0000) | Just restore boot sector |
+| `after_checkpoint_start` | Started | Valid (0xAA55) | Shift from its first cluster |
+| `before_mid_shift_record` | Started | Invalid (0x0000) | Resume the shift from the recorded progress |
+| `after_data_shift` | Started | Invalid (0x0000) | Resume the shift from the recorded progress |
+| `after_checkpoint_data_copied` | DataCopied | Invalid (0x0000) | Skip the shift, write the FAT extension |
+| `after_boot_invalidate` | DataCopied | Invalid (0x0000) | Skip the shift, write the FAT extension |
+| `after_fat_write` | DataCopied | Invalid (0x0000) | Skip the shift, write the FAT extension again |
+| `after_checkpoint_fat_written` | FatWritten | Invalid (0x0000) | Commit only |
+| `before_primary_boot_write` | FatWritten | Invalid (0x0000) | Commit only |
 
-### Idempotent Operations
+`after_checkpoint_data_copied` and `after_boot_invalidate` stop a fresh run
+at the same moment; only a resume from `DataCopied` passes
+`after_boot_invalidate` alone. Without FAT growth, `before_primary_boot_write`
+leaves a valid boot sector and a `FatWritten` checkpoint, and the rerun
+commits only.
 
-The data shift operation is designed to be **idempotent** - running it multiple times produces the same result:
+### Resumable, Not Idempotent
+
+The data shift is **not** idempotent. Running it twice over the same device
+corrupts data, so recovery resumes it from a recorded position rather than
+replaying it.
+
+Clusters are copied highest-first, so the destination of cluster `c` is the old
+home of cluster `c + k`, where `k` is the shift distance in clusters. With
+`k = 2` and clusters 2, 3, 4 occupying sectors 100, 101, 102:
 
 ```
-Original:  [FAT][Cluster2 @ sector 100][Cluster3 @ sector 101]...
-After 1x:  [FAT][...][Cluster2 @ sector 200][Cluster3 @ sector 201]...
-After 2x:  [FAT][...][Cluster2 @ sector 200][Cluster3 @ sector 201]...  (same)
+Start:     100=c2  101=c3  102=c4
+After 1x:  100=c2  101=c3  102=c2  103=c3  104=c4   <- correct
+Restart:   moving c4 reads sector 102, which now holds c2, and writes that
+           to 104. c4 is destroyed.
 ```
 
-This works because:
-1. Source data is **copied**, not moved (original preserved)
-2. We always read from the **old** sector position
-3. We always write to the **new** sector position
+A first pass is safe because `c + k` has already been moved by the time `c` is
+written. That same overlap is what makes a restart unsafe: `old_home(c)` is
+overwritten by the move of `c - k`, which happens *later* in the descending
+pass.
 
-If a crash happens during data shift and we restart, re-running the shift just copies the same data again.
+The claim this section used to make - that source data is copied rather than
+moved, so the original is preserved - holds only while the old and new data
+ranges are disjoint, i.e. while `k` exceeds the highest used cluster. On any
+filesystem with more than `k` clusters in use it is false. The crash-recovery
+suite could not detect this because its geometry kept the ranges disjoint; see
+`assert_overlapping_shift` in `scripts/qemu/test-crash-recovery.sh`, which now
+fails the suite if that ever becomes true again.
+
+Recovery therefore records progress:
+
+1. Before any move that lies `min(1024, k)` clusters or more below the last
+   record, the checkpoint records the next cluster still to move. The distance
+   is counted in clusters, not moves: free clusters get no move, so counting
+   moves would let a batch on a fragmented filesystem descend further than `k`.
+2. The preceding batch is synced before that record advances, so the record
+   never runs ahead of the data.
+3. A resume skips every move above the recorded cluster.
+
+Replaying the moves within `k` clusters of the record is harmless -
+`old_home(c)` survives until the pass descends `k` clusters below it - which is
+why progress need not be recorded after every single move.
+
+If a checkpoint carries no progress record the position is unknown, and the
+resume is **refused** rather than guessed.
+
+Every shift moves the data by at least one cluster (`k >= 1`). At `k == 0` a
+cluster's destination overlaps its own source, so no move could be replayed and
+a crash during the shift could not be resumed. When the FAT would grow by less
+than one cluster in total, the calculator grows it further, which costs less
+than one cluster of space [F-T01]. The data shift refuses a plan with `k == 0`
+before its first write.
 
 ### Testing Crash Recovery
 
@@ -613,11 +702,15 @@ FAT32_CRASH_AT=after_boot_invalidate ./fat32expander resize image.img
 
 Available crash points:
 - `after_checkpoint_start`
+- `before_mid_shift_record` (part-way through the data shift, before the
+  second progress record; fires only when the shift records progress more
+  than once)
 - `after_data_shift`
 - `after_checkpoint_data_copied`
 - `after_boot_invalidate`
 - `after_fat_write`
 - `after_checkpoint_fat_written`
+- `before_primary_boot_write`
 
 **Note:** Fault injection is only available when built with `--features fault-injection` and is never included in production builds.
 

@@ -139,7 +139,7 @@ echo ""
 echo "=== STAGE 2: Resizing to 128MB ==="
 dd if=/dev/zero bs=1M count=64 >> "$FAT_IMAGE" 2>/dev/null
 
-/bin/fat32expander resize --verbose --force "$FAT_IMAGE"
+/bin/fat32expander resize --verbose "$FAT_IMAGE"
 if [ $? -ne 0 ]; then
     echo "GUEST_ERROR: First resize failed"
     echo o > /proc/sysrq-trigger; sleep 999
@@ -180,7 +180,7 @@ echo ""
 echo "=== STAGE 3: Resizing to 256MB ==="
 dd if=/dev/zero bs=1M count=128 >> "$FAT_IMAGE" 2>/dev/null
 
-/bin/fat32expander resize --verbose --force "$FAT_IMAGE"
+/bin/fat32expander resize --verbose "$FAT_IMAGE"
 if [ $? -ne 0 ]; then
     echo "GUEST_ERROR: Second resize failed"
     echo o > /proc/sysrq-trigger; sleep 999

@@ -342,6 +342,19 @@ run_test() {
         else
             log_info "Test PASSED: $test_name"
         fi
+    elif [ "$TEST_DATA_TYPE" = "blockdev" ]; then
+        # Partition of a loop device instead of an image file
+        if ! "$SCRIPT_DIR/run-vm-blockdev.sh" \
+                "$work_dir" \
+                "$BINARY" \
+                "$ALPINE_KERNEL" \
+                "$ALPINE_INITRD" \
+                "$timeout"; then
+            log_error "Test FAILED: $test_name"
+            result=1
+        else
+            log_info "Test PASSED: $test_name"
+        fi
     else
         # Create test data script for standard single-resize test
         local test_data_script="$work_dir/test-data.sh"
@@ -401,6 +414,11 @@ main() {
         fi
         tests=("$test_file")
     else
+        # NOTE: this discovers scripts/qemu/tests/ only. test-crash-recovery.sh
+        # deliberately sits one level up - it builds its own fault-injection
+        # binary and drives the VM differently - so it is NOT run from here.
+        # CI invokes it as a separate step. Adding a suite outside tests/
+        # without a matching workflow step means it never runs anywhere.
         mapfile -t tests < <(find "$SCRIPT_DIR/tests" -name "test-*.sh" -type f | sort)
     fi
 

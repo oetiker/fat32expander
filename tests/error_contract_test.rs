@@ -1,0 +1,1285 @@
+//! Safety-net tests for the CLI's error contract.
+//!
+//! These pin behaviour that must survive the [F-R5], [F-R29], [F-R30], [F-R31]
+//! and [F-R33] fixes. They deliberately assert on *observable* CLI behaviour --
+//! which failures enter crash recovery, and that every failure mode is
+//! distinguishable and non-zero -- rather than on the mechanism, because the
+//! mechanism is exactly what those fixes replace.
+//!
+//! No `mkfs.fat` is needed: the CLI's recovery decision is taken on the error
+//! returned by `get_fs_info`, which a hand-built image reaches directly.
+
+use std::process::{Command, Output};
+use tempfile::NamedTempFile;
+
+const BIN: &str = env!("CARGO_BIN_EXE_fat32expander");
+
+/// An image whose boot sector is a plausible FAT32 layout except that the boot
+/// signature is set to `signature`.
+///
+/// The boot sector must be otherwise well-formed: `read_boot_sector` checks the
+/// declared sector size before validation ever inspects the signature, so a
+/// zeroed image fails for the wrong reason and never reaches the CLI's recovery
+/// decision at all.
+fn image_with_signature(size_mb: u64, signature: u16) -> NamedTempFile {
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
+    let mut data = vec![0u8; (size_mb * 1024 * 1024) as usize];
+
+    let total_sectors: u32 = (size_mb * 1024 * 1024 / 512) as u32;
+    data[0] = 0xEB;
+    data[1] = 0x58;
+    data[2] = 0x90;
+    data[3..11].copy_from_slice(b"MSDOS5.0");
+    data[11..13].copy_from_slice(&512u16.to_le_bytes()); // bytes per sector
+    data[13] = 1; // sectors per cluster
+    data[14..16].copy_from_slice(&32u16.to_le_bytes()); // reserved sectors
+    data[16] = 2; // number of FATs
+    data[21] = 0xF8; // media descriptor
+    data[32..36].copy_from_slice(&total_sectors.to_le_bytes());
+    data[36..40].copy_from_slice(&64u32.to_le_bytes()); // FAT size in sectors
+    data[44..48].copy_from_slice(&2u32.to_le_bytes()); // root cluster
+    data[48] = 0x01; // FSInfo sector
+    data[50] = 0x06; // backup boot sector
+    data[82..90].copy_from_slice(b"FAT32   ");
+    data[510] = (signature & 0xFF) as u8;
+    data[511] = (signature >> 8) as u8;
+
+    std::fs::write(file.path(), &data).expect("write image");
+    file
+}
+
+/// A healthy FAT32 image: `fs_mb` megabytes of filesystem inside a `file_mb`
+/// megabyte file, so `file_mb > fs_mb` yields a filesystem the tool can grow.
+///
+/// Built by hand for the same reason as `image_with_signature` -- no `mkfs.fat`
+/// dependency, so these run on every `cargo test` rather than only under
+/// `--ignored`. The geometry is chosen to clear the FAT32 minimum of 65525
+/// clusters; below that the tool correctly rejects the image as FAT12/16.
+fn valid_image(file_mb: u64, fs_mb: u64) -> NamedTempFile {
+    let file = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
+    let mut data = vec![0u8; (file_mb * 1024 * 1024) as usize];
+
+    let total_sectors: u32 = (fs_mb * 1024 * 1024 / 512) as u32;
+    data[0] = 0xEB;
+    data[1] = 0x58;
+    data[2] = 0x90;
+    data[3..11].copy_from_slice(b"MSDOS5.0");
+    data[11..13].copy_from_slice(&512u16.to_le_bytes());
+    data[13] = 1; // sectors per cluster
+    data[14..16].copy_from_slice(&32u16.to_le_bytes()); // reserved sectors
+    data[16] = 2; // number of FATs
+    data[21] = 0xF8; // media descriptor
+    data[32..36].copy_from_slice(&total_sectors.to_le_bytes());
+    data[36..40].copy_from_slice(&1024u32.to_le_bytes()); // FAT size in sectors
+    data[44..48].copy_from_slice(&2u32.to_le_bytes()); // root cluster
+    data[48] = 0x01; // FSInfo sector
+    data[50] = 0x06; // backup boot sector
+    data[82..90].copy_from_slice(b"FAT32   ");
+    data[510] = 0x55;
+    data[511] = 0xAA;
+
+    // FSInfo at sector 1, with both counts set to the "unknown" sentinel.
+    let o = 512;
+    data[o..o + 4].copy_from_slice(b"RRaA");
+    data[o + 484..o + 488].copy_from_slice(b"rrAa");
+    data[o + 488..o + 492].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    data[o + 492..o + 496].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    data[o + 508..o + 512].copy_from_slice(&0xAA55_0000u32.to_le_bytes());
+
+    // Backup boot sector at sector 6 must match the primary.
+    let primary = data[0..512].to_vec();
+    data[6 * 512..7 * 512].copy_from_slice(&primary);
+
+    std::fs::write(file.path(), &data).expect("write image");
+    file
+}
+
+fn run(args: &[&std::ffi::OsStr]) -> Output {
+    Command::new(BIN)
+        .args(args)
+        .output()
+        .expect("failed to run fat32expander")
+}
+
+/// Run `resize` against `path`, with no override flags at all.
+///
+/// This used to pass `--force`, purely to get past the `geteuid() == 0` gate
+/// that [F-R46] removed -- the test suite does not run as root, and a file
+/// image it owns needs no privileges to rewrite. The kernel decides write
+/// access; there is nothing left here to bypass.
+fn run_resize(path: &std::path::Path) -> Output {
+    Command::new(BIN)
+        .arg("resize")
+        .arg(path)
+        .output()
+        .expect("failed to run fat32expander")
+}
+
+/// Run `resize` against `path`, opting in to overriding a backup mismatch.
+fn run_resize_ignoring_backup_mismatch(path: &std::path::Path) -> Output {
+    Command::new(BIN)
+        .arg("resize")
+        .arg(path)
+        .arg("--ignore-backup-mismatch")
+        .output()
+        .expect("failed to run fat32expander")
+}
+
+fn stderr_of(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// A growable image whose backup boot sector disagrees with the primary.
+///
+/// Sector 6 is a byte-for-byte copy of the primary in `valid_image`; changing
+/// the total-sector count there is enough for `boot_sectors_match` to reject
+/// the pair, and leaves everything else about the image healthy so the run
+/// reaches the mismatch check rather than failing validation first.
+fn image_with_mismatched_backup(file_mb: u64, fs_mb: u64) -> NamedTempFile {
+    let file = valid_image(file_mb, fs_mb);
+    let mut data = std::fs::read(file.path()).expect("read image");
+
+    let backup_total_sectors_at = 6 * 512 + 32;
+    let divergent: u32 = (fs_mb * 1024 * 1024 / 512) as u32 / 2;
+    data[backup_total_sectors_at..backup_total_sectors_at + 4]
+        .copy_from_slice(&divergent.to_le_bytes());
+
+    std::fs::write(file.path(), &data).expect("write image");
+    file
+}
+
+/// A backup boot sector that disagrees with the primary must stop the resize,
+/// and must say what stopped it.
+///
+/// [F-R4]/[F-R46]: `--force` has stopped being a general-purpose bypass. What
+/// did not change is that a mismatch is refused *unless the user opts in
+/// specifically* -- an override that ended up defaulting to on would trade a
+/// false promise for silent data loss, since overriding rewrites the backup
+/// from a primary that the mismatch says might itself be the corrupt copy.
+///
+/// The assertions here are the contract; only the argv `run_resize` builds
+/// changed when the flag was renamed.
+#[test]
+fn a_backup_mismatch_is_refused_and_says_so() {
+    let image = image_with_mismatched_backup(96, 64);
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert!(
+        !output.status.success(),
+        "a backup mismatch must not be resized through by default.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.to_lowercase().contains("backup"),
+        "the refusal must name the backup boot sector as the reason.\noutput:\n{combined}"
+    );
+
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resize must not modify the image by a single byte"
+    );
+}
+
+/// Safety net for [F-05]: the refusal has its own exit code, and it tells the
+/// user which flag overrides it.
+#[test]
+fn a_backup_mismatch_exits_8_and_names_the_override() {
+    let image = image_with_mismatched_backup(96, 64);
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(8),
+        "a backup mismatch must exit 8.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("--ignore-backup-mismatch"),
+        "the refusal must name the override flag.\noutput:\n{combined}"
+    );
+}
+
+/// Safety net for [F-05]: before it changes anything, a resize tells the user
+/// how big the filesystem is and how big it will be, in bytes.
+#[test]
+fn a_dry_run_reports_the_current_and_the_new_size() {
+    let image = valid_image(96, 64);
+
+    let output = run(&[
+        std::ffi::OsStr::new("resize"),
+        std::ffi::OsStr::new("--dry-run"),
+        image.path().as_os_str(),
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    let current = (64u64 * 1024 * 1024).to_string();
+    let new = (96u64 * 1024 * 1024).to_string();
+    assert!(
+        stdout.contains(&current),
+        "the current size ({current} bytes) must be reported.\nstdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&new),
+        "the new size ({new} bytes) must be reported.\nstdout:\n{stdout}"
+    );
+}
+
+/// [F-05]: a device smaller than the filesystem on it is a truncated image or
+/// the wrong device. The CLI used to read that as "already at maximum size"
+/// and exit 0; the documented code is 7.
+#[test]
+fn a_device_smaller_than_its_filesystem_exits_7() {
+    let image = valid_image(64, 96);
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "a device smaller than its filesystem must exit 7.\noutput:\n{combined}"
+    );
+    assert!(
+        !combined.contains("Nothing to do"),
+        "a truncated device is not a no-op.\noutput:\n{combined}"
+    );
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resize must not modify the image"
+    );
+}
+
+/// Write a version-1 checkpoint record into the last sector of `path`.
+///
+/// Built by hand from the documented layout (TECHGUIDE, `checkpoint.rs`), so
+/// the test needs no access to the crate's internals.
+fn plant_checkpoint(path: &std::path::Path, phase: u8, geometry: [u32; 4]) {
+    let mut data = std::fs::read(path).expect("read image");
+    let at = data.len() - 512;
+    let mut record = [0u8; 512];
+    record[0..8].copy_from_slice(b"FAT32RSZ");
+    record[8] = 1; // version
+    record[9] = phase;
+    for (i, value) in geometry.iter().enumerate() {
+        record[12 + 4 * i..16 + 4 * i].copy_from_slice(&value.to_le_bytes());
+    }
+    let crc = crc32fast::hash(&record[0..28]);
+    record[28..32].copy_from_slice(&crc.to_le_bytes());
+    data[at..].copy_from_slice(&record);
+    std::fs::write(path, &data).expect("write image");
+}
+
+/// Write a version-2 checkpoint record, which names its volume, into the last
+/// sector of `path`. Same hand-built layout as [`plant_checkpoint`], plus the
+/// volume serial and its CRC at bytes 44..52.
+fn plant_checkpoint_for_volume(path: &std::path::Path, phase: u8, geometry: [u32; 4], volume: u32) {
+    plant_checkpoint(path, phase, geometry);
+    let mut data = std::fs::read(path).expect("read image");
+    let at = data.len() - 512;
+    let record = &mut data[at..];
+    record[8] = 2; // version
+    let crc = crc32fast::hash(&record[0..28]);
+    record[28..32].copy_from_slice(&crc.to_le_bytes());
+    record[44..48].copy_from_slice(&volume.to_le_bytes());
+    let crc = crc32fast::hash(&record[44..48]);
+    record[48..52].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(path, &data).expect("write image");
+}
+
+/// The total sector count in the boot sector of `path`.
+fn boot_total_sectors(path: &std::path::Path) -> u32 {
+    let data = std::fs::read(path).expect("read image");
+    u32::from_le_bytes([data[32], data[33], data[34], data[35]])
+}
+
+/// [F-02]: a checkpoint whose old geometry is not the geometry in a valid boot
+/// sector next to it was not written by an interrupted resize of this
+/// filesystem: every phase that keeps the boot sector valid keeps the old
+/// geometry in it. Such a record is left over from an earlier filesystem on
+/// the device. It must not be resumed, and it must not block a resize either:
+/// the run ignores it, says so, and resizes the filesystem it found.
+#[test]
+fn a_stale_checkpoint_behind_a_valid_boot_sector_is_ignored() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    // FatWritten (2) from a filesystem 1 MiB smaller, with the same FAT size.
+    plant_checkpoint(
+        image.path(),
+        2,
+        [fs_sectors - 2048, device_sectors, 1024, 1024],
+    );
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a stale checkpoint must not block the resize.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("Ignoring a resize checkpoint"),
+        "the run must say it ignored the checkpoint.\noutput:\n{combined}"
+    );
+    assert!(
+        !combined.contains("Resuming"),
+        "a stale checkpoint must not be resumed.\noutput:\n{combined}"
+    );
+    assert_eq!(boot_total_sectors(image.path()), device_sectors);
+}
+
+/// [F-16]: a checkpoint for another volume, behind a valid boot sector, is
+/// left over from the filesystem that was on the device before it was
+/// reformatted. It is ignored like any other stale record.
+#[test]
+fn a_checkpoint_from_another_volume_is_ignored() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    // Geometry that matches this filesystem; only the volume differs.
+    plant_checkpoint_for_volume(
+        image.path(),
+        2,
+        [fs_sectors, device_sectors, 1024, 1024],
+        0xDEAD_BEEF,
+    );
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a checkpoint for another volume must not block the resize.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("Ignoring a resize checkpoint"),
+        "the run must say it ignored the checkpoint.\noutput:\n{combined}"
+    );
+    assert_eq!(boot_total_sectors(image.path()), device_sectors);
+}
+
+/// [F-02]: behind an invalidated boot sector the checkpoint is the only way
+/// back to a usable filesystem, so a record that does not match is not
+/// ignored: the run refuses as needing recovery, without a single write.
+#[test]
+fn a_mismatched_checkpoint_behind_an_invalidated_boot_sector_is_refused() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    plant_checkpoint(
+        image.path(),
+        2,
+        [fs_sectors - 2048, device_sectors, 1024, 1024],
+    );
+    let mut data = std::fs::read(image.path()).expect("read image");
+    data[510] = 0x00;
+    data[511] = 0x00;
+    std::fs::write(image.path(), &data).expect("write image");
+    let before = data;
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(9),
+        "a mismatched checkpoint behind an invalidated boot sector must exit 9.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("does not match this filesystem"),
+        "the refusal must name the checkpoint.\noutput:\n{combined}"
+    );
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resume must not modify the image by a single byte"
+    );
+}
+
+/// Safety net for [F-06]: a checkpoint that matches the boot sector but whose
+/// new geometry cannot hold a filesystem is not one a resume can use. It must
+/// be refused, say why, and leave the image alone. The exit code is not pinned
+/// here: which code this refusal gets is what [F-06] changes.
+#[test]
+fn a_checkpoint_whose_new_geometry_does_not_fit_is_refused() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    // DataCopied (1) from this very filesystem, but with a FAT so large that
+    // the two copies alone overrun the new volume.
+    plant_checkpoint(
+        image.path(),
+        1,
+        [fs_sectors, device_sectors, 1024, device_sectors / 2],
+    );
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert!(
+        !output.status.success(),
+        "an unusable checkpoint must not be resumed.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("does not fit"),
+        "the refusal must say the checkpoint geometry does not fit.\noutput:\n{combined}"
+    );
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resume must not modify the image by a single byte"
+    );
+}
+
+/// [F-06]: an unusable checkpoint is a filesystem that needs recovery, so it
+/// exits 9, not 1.
+#[test]
+fn a_checkpoint_whose_new_geometry_does_not_fit_exits_9() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    plant_checkpoint(
+        image.path(),
+        1,
+        [fs_sectors, device_sectors, 1024, device_sectors / 2],
+    );
+
+    let output = run_resize(image.path());
+    assert_eq!(
+        output.status.code(),
+        Some(9),
+        "an unusable checkpoint must exit 9.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+}
+
+/// [F-10]: a backup boot sector pointer into the FAT is a corrupt boot
+/// sector, not a backup that disagrees. `--ignore-backup-mismatch` must not
+/// turn it into a boot sector written over a FAT sector.
+#[test]
+fn a_backup_pointer_into_the_fat_is_refused_even_with_the_override() {
+    let image = valid_image(96, 64);
+    let mut data = std::fs::read(image.path()).expect("read image");
+    // Sector 100 lies inside the first FAT (sectors 32..1056).
+    data[50..52].copy_from_slice(&100u16.to_le_bytes());
+    std::fs::write(image.path(), &data).expect("write image");
+    let before = data;
+
+    let output = run_resize_ignoring_backup_mismatch(image.path());
+
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "a corrupt backup pointer is not a usable FAT32 filesystem.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resize must not modify the image by a single byte"
+    );
+}
+
+/// [F-03]: a record that plans a filesystem larger than the device cannot be
+/// resumed: the commit would describe sectors the device does not have. It
+/// must be refused as needing recovery, without a write.
+#[test]
+fn a_checkpoint_planning_beyond_the_device_is_refused() {
+    let image = valid_image(96, 64);
+    let fs_sectors = 64 * 1024 * 1024 / 512;
+    let device_sectors = 96 * 1024 * 1024 / 512;
+    plant_checkpoint(
+        image.path(),
+        2,
+        [fs_sectors, device_sectors + 2048, 1024, 1024],
+    );
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+
+    assert_eq!(
+        output.status.code(),
+        Some(9),
+        "a record larger than the device needs recovery.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        stderr_of(&output).contains("device size changed"),
+        "the refusal must say why.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a refused resume must not modify the image by a single byte"
+    );
+}
+
+/// [F-R4]: the override must actually reach the library.
+///
+/// The CLI used to print "Use --force to proceed anyway" and then hand
+/// `resize_fat32` an options struct with no override field in it, so the
+/// library refused a second time and the advertised escape was a dead end.
+/// Opting in must now get past the mismatch.
+#[test]
+fn the_backup_mismatch_override_actually_proceeds() {
+    let image = image_with_mismatched_backup(96, 64);
+
+    let output = run_resize_ignoring_backup_mismatch(image.path());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr_of(&output)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "opting in to the mismatch override must complete the resize.\noutput:\n{combined}"
+    );
+
+    let after = std::fs::read(image.path()).expect("read image");
+    let total_sectors = u32::from_le_bytes(after[32..36].try_into().unwrap());
+    assert!(
+        total_sectors as u64 > 64 * 1024 * 1024 / 512,
+        "the override must produce a real resize, not just a silent pass, got {total_sectors}"
+    );
+
+    // The rewritten backup must now agree with the primary -- the override
+    // exists to repair the disagreement, not to leave it in place.
+    let backup_total_sectors =
+        u32::from_le_bytes(after[6 * 512 + 32..6 * 512 + 36].try_into().unwrap());
+    assert_eq!(
+        backup_total_sectors, total_sectors,
+        "after a forced resize the backup must match the primary again"
+    );
+}
+
+/// A device the caller cannot write must fail with a message that names it.
+///
+/// [F-R46] removes the `geteuid() == 0` gate in favour of letting the open
+/// fail, on the grounds that the kernel is the authority on write access. That
+/// only holds if the resulting diagnostic is still usable: the failure has to
+/// name the device, or a script driving several devices cannot tell which one
+/// refused.
+#[test]
+fn an_unwritable_device_fails_and_names_the_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Permission bits do not apply to root, so under root this asserts
+    // nothing. Skip loudly rather than pass hollowly.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: running as root, permission bits do not apply");
+        return;
+    }
+
+    let image = valid_image(96, 64);
+    std::fs::set_permissions(image.path(), std::fs::Permissions::from_mode(0o444))
+        .expect("set read-only");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let path = image.path().display().to_string();
+
+    assert!(
+        !output.status.success(),
+        "a device that cannot be written must not report success.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains(&path),
+        "the failure must name the device {path} it refers to.\noutput:\n{combined}"
+    );
+
+    // Let the tempfile clean itself up.
+    let _ = std::fs::set_permissions(image.path(), std::fs::Permissions::from_mode(0o644));
+}
+
+/// The success path through the binary: a growable filesystem must actually be
+/// resized, and report it.
+///
+/// Nothing else covers this. `integration_test.rs` drives the library directly
+/// and never observes an exit code, and every other test in this file asserts a
+/// failure, a no-op, or a dry run -- so removing the privilege gate could break
+/// the one path users actually run and the suite would stay green.
+#[test]
+fn a_cli_resize_of_a_growable_filesystem_succeeds_and_grows_it() {
+    let image = valid_image(96, 64);
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr_of(&output)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "resizing a growable filesystem must exit 0.\noutput:\n{combined}"
+    );
+
+    // The filesystem must now claim the whole 96 MB file rather than its
+    // original 64 MB, read back off the device rather than from the report.
+    let after = std::fs::read(image.path()).expect("read image");
+    let total_sectors = u32::from_le_bytes(after[32..36].try_into().unwrap());
+    assert!(
+        total_sectors as u64 > 64 * 1024 * 1024 / 512,
+        "the resized filesystem must declare more sectors than it started with, got {total_sectors}"
+    );
+}
+
+/// [F-20]: with no cluster in use there is nothing to shift, and the resize
+/// used to skip the FAT phase yet still commit the larger FAT. FAT1 then grew
+/// over the head of the old FAT2, and FAT2 at its new offset was never
+/// written. Both copies must come out identical, with nothing from cluster 2
+/// up marked in use.
+#[test]
+fn a_resize_with_nothing_to_shift_still_writes_both_fats() {
+    let image = valid_image(96, 64);
+    let mut data = std::fs::read(image.path()).unwrap();
+    // FAT entries 0 and 1 (media and end-of-chain marker) in both copies,
+    // root cluster left free: nothing for the shift to move.
+    for fat_start in [32 * 512, (32 + 1024) * 512] {
+        data[fat_start..fat_start + 4].copy_from_slice(&0x0FFF_FFF8u32.to_le_bytes());
+        data[fat_start + 4..fat_start + 8].copy_from_slice(&0x0FFF_FFFFu32.to_le_bytes());
+    }
+    std::fs::write(image.path(), &data).unwrap();
+
+    let output = run_resize(image.path());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the resize must succeed.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+
+    let after = std::fs::read(image.path()).unwrap();
+    let fat_size = u32::from_le_bytes(after[36..40].try_into().unwrap()) as usize;
+    assert!(fat_size > 1024, "the FAT must have grown, got {fat_size}");
+    let fat1 = &after[32 * 512..(32 + fat_size) * 512];
+    let fat2 = &after[(32 + fat_size) * 512..(32 + 2 * fat_size) * 512];
+    assert!(fat1 == fat2, "FAT2 must mirror FAT1 after the resize");
+    assert_eq!(&fat1[0..8], &data[32 * 512..32 * 512 + 8]);
+    if let Some(i) = fat1[8..]
+        .chunks(4)
+        .position(|e| u32::from_le_bytes(e.try_into().unwrap()) & 0x0FFF_FFFF != 0)
+    {
+        panic!("FAT1 marks cluster {} in use", i + 2);
+    }
+}
+
+/// A zeroed boot signature is how this tool marks a filesystem mid-resize, so
+/// the CLI must treat it as a possible interrupted resize and enter recovery.
+///
+/// This is the behaviour [F-R5] currently achieves by substring-matching a
+/// formatted error message. The fix replaces the mechanism; this outcome must
+/// not change, or users of a genuinely crashed filesystem lose their recovery
+/// path silently.
+#[test]
+fn invalidated_boot_signature_makes_the_cli_attempt_recovery() {
+    let image = image_with_signature(8, 0x0000);
+    let output = run_resize(image.path());
+    let stderr = stderr_of(&output);
+
+    assert!(
+        stderr.contains("Attempting recovery"),
+        "an invalidated (0x0000) boot signature must enter crash recovery.\n\
+         stderr was:\n{stderr}"
+    );
+    assert!(
+        !output.status.success(),
+        "a zeroed image has no recoverable filesystem, so the run must still fail"
+    );
+}
+
+/// A boot signature that is neither valid nor the tool's own invalidation
+/// marker is a corrupt or non-FAT32 device, not an interrupted resize.
+/// Entering recovery here would drive the resize machinery over a filesystem
+/// this tool never touched.
+#[test]
+fn garbage_boot_signature_does_not_make_the_cli_attempt_recovery() {
+    let image = image_with_signature(8, 0x1234);
+    let output = run_resize(image.path());
+    let stderr = stderr_of(&output);
+
+    assert!(
+        !stderr.contains("Attempting recovery"),
+        "a garbage (0x1234) boot signature must NOT be mistaken for an \
+         interrupted resize.\nstderr was:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("Failed to read filesystem info"),
+        "the failure must be reported as an unreadable filesystem.\n\
+         stderr was:\n{stderr}"
+    );
+    assert!(!output.status.success(), "a garbage image must fail");
+}
+
+/// The recovery decision must depend on the state of the device, not on the
+/// device being absent. A missing path is a plain open failure.
+#[test]
+fn a_missing_device_does_not_make_the_cli_attempt_recovery() {
+    let output = run_resize(std::path::Path::new(
+        "/nonexistent/fat32expander/safety/net/device.img",
+    ));
+    let stderr = stderr_of(&output);
+
+    assert!(
+        !stderr.contains("Attempting recovery"),
+        "a missing device must not enter crash recovery.\nstderr was:\n{stderr}"
+    );
+    assert!(!output.status.success(), "a missing device must fail");
+}
+
+/// Every failure mode must remain non-zero and carry a message that tells the
+/// modes apart. [F-R31] will give them distinct exit *codes*; that must not
+/// come at the cost of collapsing the messages, and no mode may start
+/// succeeding.
+#[test]
+fn distinct_failure_modes_stay_non_zero_and_distinguishable() {
+    let missing = run_resize(std::path::Path::new(
+        "/nonexistent/fat32expander/safety/net/device.img",
+    ));
+    let garbage_image = image_with_signature(8, 0x1234);
+    let garbage = run_resize(garbage_image.path());
+    let invalidated_image = image_with_signature(8, 0x0000);
+    let invalidated = run_resize(invalidated_image.path());
+
+    for (name, output) in [
+        ("missing device", &missing),
+        ("garbage filesystem", &garbage),
+        ("invalidated filesystem", &invalidated),
+    ] {
+        assert!(
+            !output.status.success(),
+            "{name} must exit non-zero, got {:?}",
+            output.status.code()
+        );
+    }
+
+    // The three must not be reported identically -- a caller has to be able to
+    // tell them apart from the output alone.
+    let missing_err = stderr_of(&missing);
+    let garbage_err = stderr_of(&garbage);
+    let invalidated_err = stderr_of(&invalidated);
+
+    assert_ne!(
+        missing_err, garbage_err,
+        "a missing device and a corrupt filesystem must not report identically"
+    );
+    assert_ne!(
+        garbage_err, invalidated_err,
+        "a corrupt filesystem and an interrupted resize must not report identically"
+    );
+}
+
+/// The device path must appear in the failure output. [F-R29] and [F-R30] add
+/// errno and sector context; the path must survive that change, since it is
+/// the only thing identifying *which* device failed when a script drives
+/// several.
+#[test]
+fn failures_name_the_device_they_refer_to() {
+    let image = image_with_signature(8, 0x1234);
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        stderr_of(&output),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let path = image.path().display().to_string();
+
+    assert!(
+        combined.contains(&path),
+        "the failing device path {path} must appear in the output.\n\
+         output was:\n{combined}"
+    );
+}
+
+/// [F-R31]: a calling script must be able to branch on *why* the run failed.
+/// Before this, every one of these exited 1.
+///
+/// The codes are grouped by what the caller should do about the failure, not
+/// one-per-variant -- the error enum changes shape too often for that to be a
+/// stable ABI.
+#[test]
+fn failure_modes_get_distinct_exit_codes() {
+    let missing = run_resize(std::path::Path::new(
+        "/nonexistent/fat32expander/exit/code/device.img",
+    ));
+    assert_eq!(
+        missing.status.code(),
+        Some(3),
+        "a device that cannot be opened must exit 3.\nstderr:\n{}",
+        stderr_of(&missing)
+    );
+
+    let garbage_image = image_with_signature(8, 0x1234);
+    let garbage = run_resize(garbage_image.path());
+    assert_eq!(
+        garbage.status.code(),
+        Some(5),
+        "an unusable filesystem must exit 5.\nstderr:\n{}",
+        stderr_of(&garbage)
+    );
+
+    // A *valid* filesystem whose signature is zeroed is a genuinely interrupted
+    // resize: recovery is attempted, finds no checkpoint, and gives up.
+    let interrupted_image = valid_image(96, 64);
+    let mut data = std::fs::read(interrupted_image.path()).unwrap();
+    data[510] = 0x00;
+    data[511] = 0x00;
+    std::fs::write(interrupted_image.path(), &data).unwrap();
+
+    let interrupted = run_resize(interrupted_image.path());
+    assert_eq!(
+        interrupted.status.code(),
+        Some(9),
+        "an interrupted resize that cannot be recovered must exit 9.\nstderr:\n{}",
+        stderr_of(&interrupted)
+    );
+
+    // The 8 MB fixture is too small to be valid FAT32, so it enters recovery
+    // (its signature is the invalidation marker) and then fails validation.
+    // That is a filesystem problem, not a recovery problem, and must be told
+    // apart from the case above.
+    let too_small_image = image_with_signature(8, 0x0000);
+    let too_small = run_resize(too_small_image.path());
+    assert_eq!(
+        too_small.status.code(),
+        Some(5),
+        "entering recovery and then failing validation must exit 5, not 9.\nstderr:\n{}",
+        stderr_of(&too_small)
+    );
+}
+
+/// Safety net for [F-22]. A boot sector declaring a sector size FAT32 does
+/// not permit is refused as an unusable filesystem (exit 5), the message
+/// names the size it found, and nothing is written. The wording of the rest
+/// of the message is what [F-22] changes, so it is not pinned here.
+#[test]
+fn an_unsupported_sector_size_exits_5_names_the_size_and_writes_nothing() {
+    let image = valid_image(64, 64);
+    let mut data = std::fs::read(image.path()).unwrap();
+    data[11..13].copy_from_slice(&8192u16.to_le_bytes());
+    std::fs::write(image.path(), &data).unwrap();
+
+    let output = run_resize(image.path());
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "an unsupported sector size must exit 5.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        stderr_of(&output).contains("8192"),
+        "the error must name the sector size it found.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    assert_eq!(
+        std::fs::read(image.path()).unwrap(),
+        data,
+        "a refused device must not be written"
+    );
+}
+
+/// `valid_image(80, 64)`, a volume with room to grow, with `bytes` written at
+/// `offset` of both the primary and the backup boot sector, so the backup
+/// still matches.
+fn growable_image_with_boot_bytes(offset: usize, bytes: &[u8]) -> NamedTempFile {
+    let image = valid_image(80, 64);
+    let mut data = std::fs::read(image.path()).unwrap();
+    for sector in [0, 6] {
+        let at = sector * 512 + offset;
+        data[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+    std::fs::write(image.path(), &data).unwrap();
+    image
+}
+
+/// Run `resize` on `image` and assert it was refused with exit 5, with a
+/// message containing `expected`, and that nothing was written.
+fn assert_refused_as_unusable(image: &NamedTempFile, expected: &str) {
+    let before = std::fs::read(image.path()).unwrap();
+    let output = run_resize(image.path());
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "an unsupported FAT layout must exit 5.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        stderr_of(&output).contains(expected),
+        "the error must say {expected:?}.\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        std::fs::read(image.path()).unwrap() == before,
+        "a refused device must not be written"
+    );
+}
+
+/// [F-T05]: a FAT32 version other than 0.0 is a format this tool does not
+/// know, so `resize` refuses it before writing anything.
+#[test]
+fn a_fat32_version_other_than_0_0_is_refused_and_writes_nothing() {
+    let image = growable_image_with_boot_bytes(42, &[1, 0]);
+    assert_refused_as_unusable(&image, "version");
+}
+
+/// [F-T05]: with mirroring off, only the active FAT is current. The resize
+/// reads, extends and mirrors FAT 0, so a volume whose active FAT is another
+/// one is refused before anything is written.
+#[test]
+fn a_volume_whose_active_fat_is_not_fat_0_is_refused_and_writes_nothing() {
+    let image = growable_image_with_boot_bytes(40, &[0x81, 0]);
+    assert_refused_as_unusable(&image, "active FAT");
+}
+
+/// Safety net for [F-28]. `version` reports the package version and a
+/// `git:` provenance field, whatever [F-28] changes about when that field is
+/// refreshed.
+#[test]
+fn version_names_the_package_version_and_a_git_hash() {
+    let output = run(&[std::ffi::OsStr::new("version")]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "`version` must name the package version, got:\n{stdout}"
+    );
+    let hash = stdout
+        .split("git:")
+        .nth(1)
+        .unwrap_or_else(|| panic!("`version` must carry a git: field, got:\n{stdout}"));
+    assert!(
+        !hash
+            .trim_end_matches(|c: char| c == ')' || c.is_whitespace())
+            .is_empty(),
+        "the git: field must not be empty, got:\n{stdout}"
+    );
+}
+
+/// [F-28]: the build script watched `.git/HEAD`, which names a branch and does
+/// not change on a commit, so `version` kept an older commit's hash. Skipped
+/// where there is no git checkout to compare against, as in a source tarball.
+#[test]
+fn version_names_the_commit_it_was_built_from() {
+    let head = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output();
+    let Ok(head) = head else { return };
+    if !head.status.success() {
+        return;
+    }
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let output = run(&[std::ffi::OsStr::new("version")]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("git:{head})")),
+        "`version` must name HEAD ({head}), got:\n{stdout}"
+    );
+}
+
+/// A resize that finds nothing to do is not a failure. Running the tool twice
+/// must succeed twice, which is what makes it safe to put in a provisioning
+/// script that does not track whether it has already run.
+///
+/// This is a deliberate behaviour change made with the developer's approval:
+/// before, "already at maximum size" exited non-zero.
+#[test]
+fn a_filesystem_already_at_maximum_size_exits_zero() {
+    let image = valid_image(64, 64);
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run_resize(image.path());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr_of(&output)
+    );
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a filesystem with no room to grow must exit 0.\noutput:\n{combined}"
+    );
+    assert!(
+        combined.contains("maximum size"),
+        "it must still say why there was nothing to do.\noutput:\n{combined}"
+    );
+
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a no-op resize must not modify the image by a single byte"
+    );
+}
+
+/// Running it a second time must behave identically to the first -- that is
+/// what "idempotent" has to mean for a script that reruns it.
+#[test]
+fn resizing_an_already_maximal_filesystem_twice_succeeds_twice() {
+    let image = valid_image(64, 64);
+
+    for attempt in 1..=2 {
+        let output = run_resize(image.path());
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "attempt {attempt} must exit 0.\nstderr:\n{}",
+            stderr_of(&output)
+        );
+    }
+}
+
+/// The other half of [F-R31], and the half nothing else covers: giving failures
+/// distinct non-zero exit codes means rewriting how `main` returns, and the way
+/// that goes wrong is the *success* path picking up a non-zero code.
+///
+/// Every test that runs the binary today asserts a failure, and
+/// `integration_test.rs` calls the library directly and never observes an exit
+/// code at all -- so a `resize` that reported failure on a completed resize
+/// would pass the entire suite. These three pin the successful commands at 0.
+#[test]
+fn version_exits_zero() {
+    let output = run(&[std::ffi::OsStr::new("version")]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "`version` must exit 0.\nstderr was:\n{}",
+        stderr_of(&output)
+    );
+}
+
+#[test]
+fn info_on_a_healthy_filesystem_exits_zero() {
+    let image = valid_image(64, 64);
+    let output = run(&[std::ffi::OsStr::new("info"), image.path().as_os_str()]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "`info` on a healthy filesystem must exit 0.\nstderr was:\n{}",
+        stderr_of(&output)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("FAT32 Filesystem Information"),
+        "`info` must actually report, not exit 0 having done nothing"
+    );
+}
+
+/// A dry run is the success path that also touches the resize machinery, so it
+/// exercises far more of `main` than `info` does -- and it must still exit 0.
+/// It must also leave the image byte-identical, which is what makes a 0 here
+/// mean "previewed successfully" rather than "wrote something and survived".
+#[test]
+fn a_dry_run_on_a_growable_filesystem_exits_zero_and_changes_nothing() {
+    let image = valid_image(96, 64);
+    let before = std::fs::read(image.path()).expect("read image");
+
+    let output = run(&[
+        std::ffi::OsStr::new("resize"),
+        std::ffi::OsStr::new("--dry-run"),
+        image.path().as_os_str(),
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a dry-run resize of a growable filesystem must exit 0.\nstderr was:\n{}",
+        stderr_of(&output)
+    );
+
+    let after = std::fs::read(image.path()).expect("read image");
+    assert!(
+        before == after,
+        "a dry run must not modify the image by a single byte"
+    );
+}
+
+// --- Safety net for [F-07] / [F-08] -----------------------------------------
+//
+// Both fixes change where the resize's progress messages and its operations
+// log come from. These pin *that* the user sees them, with or without
+// `--verbose`, and not on which stream: settling the stream is what [F-08] is
+// for, so stdout and stderr are always read joined.
+
+/// `valid_image`, with cluster 2 (the root directory) marked in use in both
+/// FATs, so a resize that grows the FAT has exactly one cluster to shift.
+fn valid_image_with_root_in_use(file_mb: u64, fs_mb: u64) -> NamedTempFile {
+    let file = valid_image(file_mb, fs_mb);
+    let mut data = std::fs::read(file.path()).expect("read image");
+    for fat_start in [32 * 512, (32 + 1024) * 512] {
+        let entries = [0x0FFF_FFF8u32, 0x0FFF_FFFF, 0x0FFF_FFFF];
+        for (i, entry) in entries.iter().enumerate() {
+            let o = fat_start + i * 4;
+            data[o..o + 4].copy_from_slice(&entry.to_le_bytes());
+        }
+    }
+    std::fs::write(file.path(), &data).expect("write image");
+    file
+}
+
+fn run_resize_verbose(path: &std::path::Path) -> Output {
+    Command::new(BIN)
+        .arg("resize")
+        .arg(path)
+        .arg("--verbose")
+        .output()
+        .expect("failed to run fat32expander")
+}
+
+fn combined_output(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr_of(output)
+    )
+}
+
+#[test]
+fn a_cli_resize_lists_the_operations_it_performed() {
+    let image = valid_image_with_root_in_use(96, 64);
+    let output = run_resize(image.path());
+    let combined = combined_output(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output:\n{combined}");
+    for expected in [
+        "Operations performed:",
+        "Verified device is not mounted",
+        "Planned data shift for 1 clusters",
+        "Resize complete!",
+    ] {
+        assert!(
+            combined.contains(expected),
+            "a resize must report {expected:?}.\noutput:\n{combined}"
+        );
+    }
+}
+
+#[test]
+fn a_verbose_cli_resize_shows_the_layout_and_the_shift() {
+    let image = valid_image_with_root_in_use(96, 64);
+    let output = run_resize_verbose(image.path());
+    let combined = combined_output(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output:\n{combined}");
+    for expected in [
+        "After resize:",
+        "FAT needs growth: true",
+        "Data shift plan",
+        "1 clusters will be moved",
+        "Old first data sector:",
+        "Moving cluster 2 from sector",
+    ] {
+        assert!(
+            combined.contains(expected),
+            "a verbose resize must show {expected:?}.\noutput:\n{combined}"
+        );
+    }
+}
+
+#[test]
+fn a_quiet_cli_resize_omits_the_verbose_detail() {
+    let image = valid_image_with_root_in_use(96, 64);
+    let output = run_resize(image.path());
+    let combined = combined_output(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output:\n{combined}");
+    for absent in [
+        "After resize:",
+        "Data shift plan",
+        "Old first data sector:",
+        "Moving cluster",
+    ] {
+        assert!(
+            !combined.contains(absent),
+            "a resize without --verbose must not show {absent:?}.\noutput:\n{combined}"
+        );
+    }
+}
+
+/// [F-07]: the list of completed steps used to be printed only after a
+/// successful resize, so a failed one left no record of how far it got. A
+/// refusal here comes after the device was opened and read.
+#[test]
+fn a_failed_resize_lists_the_steps_it_completed() {
+    let image = image_with_mismatched_backup(96, 64);
+    let output = run_resize(image.path());
+    let stderr = stderr_of(&output);
+
+    assert_eq!(output.status.code(), Some(8), "stderr:\n{stderr}");
+    for expected in [
+        "Operations performed before the failure:",
+        "Verified device is not mounted",
+        "Read boot sector",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "a failed resize must report {expected:?} on stderr.\nstderr:\n{stderr}"
+        );
+    }
+}
+
+/// [F-07]: "nothing to do" travels as an error but is not a failure, so it
+/// gets no failure report.
+#[test]
+fn a_resize_with_nothing_to_do_reports_no_failure() {
+    let image = valid_image(64, 64);
+    let output = run_resize(image.path());
+    let combined = combined_output(&output);
+
+    assert_eq!(output.status.code(), Some(0), "output:\n{combined}");
+    assert!(
+        !combined.contains("before the failure"),
+        "output:\n{combined}"
+    );
+}

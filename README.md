@@ -100,6 +100,38 @@ truncate -s 2G disk.img
 fat32expander resize disk.img
 ```
 
+### Exit Codes
+
+Failures are reported with distinct exit codes so a calling script can tell
+them apart without parsing messages. Codes are grouped by what the caller
+should do about the failure, not one per internal error, so they stay stable
+as the tool changes.
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success — including a resize that found nothing to do |
+| 1 | Unexpected internal failure |
+| 2 | Invalid command line (produced by the argument parser) |
+| 3 | Device could not be opened — check the path, permissions, and whether it is in use |
+| 4 | Device is mounted (also through a loop device), or another program holds it — unmount it or stop that program first |
+| 5 | Not a usable FAT32 filesystem |
+| 6 | Already at maximum size *(reserved; a no-op resize exits 0)* |
+| 7 | Device is smaller than the filesystem claims — truncated image or wrong device |
+| 8 | Backup boot sector does not match the primary — re-run with `--ignore-backup-mismatch` to trust the primary and rewrite the backup from it |
+| 9 | An interrupted resize needs recovery and could not be recovered automatically |
+| 10 | I/O failure reading or writing the device |
+| 12 | Could not check whether the device is mounted — `/proc/mounts` is unreadable |
+| 13 | The grown filesystem would have more clusters than FAT32 allows (268,435,445) — the filesystem needs a larger cluster size for this device |
+
+Code 11 previously meant "root privileges required". The tool no longer guesses
+at write access from the effective uid — it attempts the open and reports what
+the kernel says, so a caller who cannot write the device now gets code 3. The
+number is not reused.
+
+`resize` is safe to re-run: a filesystem that is already at its maximum size
+exits 0 rather than reporting an error, so the tool can be called
+unconditionally from a provisioning script.
+
 ## How It Works
 
 ### FAT32 Layout
@@ -118,8 +150,9 @@ When a FAT32 filesystem grows significantly, the FAT (File Allocation Table) may
 
 ### Safety Features
 
-- Refuses to operate on mounted filesystems
+- Refuses to operate on mounted filesystems, including an image file mounted through a loop device, and holds a block device exclusively while it resizes
 - Validates boot sector and backup boot sector match
+- Refuses a volume whose FAT mirroring is off with an active FAT other than the first, and a FAT32 version other than 0.0
 - Verifies filesystem structure before modifications
 - Syncs all changes to disk at each phase
 
@@ -128,15 +161,15 @@ When a FAT32 filesystem grows significantly, the FAT (File Allocation Table) may
 If the resize operation is interrupted (power loss, system crash, kill signal), the tool can resume on the next run:
 
 1. **Checkpoint system** - Progress is recorded at each phase
-2. **Boot sector invalidation** - During critical operations, the boot sector signature is temporarily set to an invalid value (0x0000), preventing other tools from operating on the inconsistent filesystem
+2. **Boot sector invalidation** - Before the first data cluster moves, the boot sector signature is set to an invalid value (0x0000), so no other tool mounts or writes to the filesystem while it is inconsistent
 3. **Automatic resume** - Running the tool again detects the incomplete state and continues from the last checkpoint
 
 The operation proceeds in three phases:
-- **Phase 0 (Started)**: Data clusters are copied to new positions
-- **Phase 1 (DataCopied)**: FAT tables are extended (boot sector invalid during this phase)
-- **Phase 2 (FatWritten)**: Boot sector is restored with new parameters
+- **Phase 0 (Started)**: Data clusters are moved to their new positions, overwriting their old ones
+- **Phase 1 (DataCopied)**: FAT tables are extended
+- **Phase 2 (FatWritten)**: The backup boot sector and FSInfo are updated, then the boot sector is written with the new parameters and a valid signature
 
-If a crash occurs during Phase 1 (the critical window), the filesystem will appear invalid to other tools until `fat32expander` completes the recovery.
+The boot sector stays invalid from the start of Phase 0 until the end of Phase 2. A crash in between leaves a filesystem that other tools treat as invalid until `fat32expander` completes the recovery.
 
 ## Testing
 
@@ -170,7 +203,9 @@ make test-qemu-one TEST=test-fragmented
 
 ### Runtime
 - Linux (uses `/proc/mounts` for mount detection)
-- Root privileges (for block devices)
+- Write access to the target device. That usually means root for a block
+  device, but the tool does not require root as such — membership of `disk`,
+  a suitable ACL, or simply owning the image file all work.
 
 ### Building
 - Rust 1.70+

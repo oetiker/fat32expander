@@ -4,11 +4,13 @@
 #
 # Tests that fat32expander can recover from crashes at ALL injection points:
 #   - after_checkpoint_start
+#   - before_mid_shift_record
 #   - after_data_shift
 #   - after_checkpoint_data_copied
 #   - after_boot_invalidate
 #   - after_fat_write
 #   - after_checkpoint_fat_written
+#   - before_primary_boot_write
 #
 # For each crash point:
 # 1. Creates FAT32 image with test data
@@ -60,7 +62,7 @@ ensure_prerequisites() {
         exit 1
     fi
 
-    BINARY="$PROJECT_DIR/target/x86_64-unknown-linux-musl/release/fat32expander"
+    BINARY="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}/x86_64-unknown-linux-musl/release/fat32expander"
     if [ ! -x "$BINARY" ]; then
         log_error "Binary not found at $BINARY"
         exit 1
@@ -143,7 +145,7 @@ MOUNT_POINT="/mnt/fat"
 mkdir -p "$MOUNT_POINT"
 
 # All crash points to test (in order they occur during resize)
-CRASH_POINTS="after_checkpoint_start after_data_shift after_checkpoint_data_copied after_boot_invalidate after_fat_write after_checkpoint_fat_written"
+CRASH_POINTS="after_checkpoint_start before_mid_shift_record after_data_shift after_checkpoint_data_copied after_boot_invalidate after_fat_write after_checkpoint_fat_written before_primary_boot_write"
 
 # Track results
 TESTS_PASSED=0
@@ -176,9 +178,24 @@ create_test_image() {
     mkdir -p subdir
     echo "Nested file content" > subdir/nested.txt
 
-    # Create fewer files to reduce tmpfs usage (20 instead of 100)
+    # The amount of data here is load-bearing, not arbitrary.
+    #
+    # A resume of the data shift only re-reads clobbered source sectors when
+    # the old and new data ranges overlap, i.e. when
+    #
+    #     total FAT growth (sectors) < highest used cluster x sectors_per_cluster
+    #
+    # With ~90KB of data the highest used cluster sat around 250 while the
+    # shift was ~2032 sectors, so the ranges were disjoint and a resume could
+    # never read anything a previous pass had overwritten. The suite passed
+    # without ever reaching the case it claimed to cover.
+    #
+    # ~4MB at 512-byte clusters puts the highest used cluster near 8200,
+    # comfortably past the shift distance. The data lives inside the image
+    # file, which is already fully allocated, so this costs no extra tmpfs.
+    # ASSERT_OVERLAPPING_SHIFT below fails the test if this stops holding.
     for i in $(seq 1 20); do
-        dd if=/dev/urandom of="data_$i.bin" bs=512 count=4 2>/dev/null
+        dd if=/dev/urandom of="data_$i.bin" bs=1024 count=200 2>/dev/null
     done
     dd if=/dev/urandom of=subdir/binary.bin bs=1024 count=50 2>/dev/null
     sync
@@ -192,6 +209,55 @@ create_test_image() {
 
     # Extend image
     dd if=/dev/zero bs=1M count=$((FINAL_SIZE_MB - INITIAL_SIZE_MB)) >> "$image" 2>/dev/null
+
+    assert_overlapping_shift "$image"
+}
+
+# Guard the property this whole suite depends on.
+#
+# Resuming the data shift only re-reads sectors a previous pass overwrote when
+# the destination range overlaps the source range. If they are disjoint, every
+# crash point passes whether or not resuming is correct - which is exactly how
+# the non-idempotent resume survived. This turns that silent precondition into
+# a checked one.
+#
+# The plan comes from the tool's own dry run, which writes nothing:
+#   "FAT needs to grow by N sectors"     -> per-FAT growth (calculator.rs)
+#   "Planned data shift for N clusters"  -> in-use clusters being moved
+# Data moves forward by num_fats x per-FAT growth. The image is built with
+# mkfs.fat -F 32 -s 1, so num_fats is 2 and sectors_per_cluster is 1, making
+# the highest in-use cluster equal to the moved-cluster count plus the first
+# data cluster.
+assert_overlapping_shift() {
+    local image="$1"
+    local num_fats=2
+
+    /bin/fat32expander resize --dry-run --verbose "$image" > /tmp/plan.log 2>&1
+
+    local growth moved shift
+    growth=$(sed -n 's/.*FAT needs to grow by \([0-9]*\) sectors.*/\1/p' /tmp/plan.log | head -1)
+    moved=$(sed -n 's/.*Planned data shift for \([0-9]*\) clusters.*/\1/p' /tmp/plan.log | head -1)
+
+    if [ -z "$growth" ] || [ -z "$moved" ]; then
+        echo "ERROR: could not read the shift plan from the dry run"
+        cat /tmp/plan.log
+        return 1
+    fi
+
+    shift=$((growth * num_fats))
+    echo "Shift distance: $shift sectors; in-use clusters moved: $moved"
+
+    if [ "$shift" -ge "$moved" ]; then
+        echo "ERROR: ASSERT_OVERLAPPING_SHIFT failed."
+        echo "       Data moves $shift sectors but only $moved clusters are in use,"
+        echo "       so the source and destination ranges do not overlap and the"
+        echo "       resume path cannot be exercised. Increase the data written"
+        echo "       by create_test_image, or reduce FINAL_SIZE_MB."
+        return 1
+    fi
+
+    echo "Shift overlaps the used cluster range - resume path is reachable"
+    return 0
 }
 
 # Test a single crash point
@@ -206,13 +272,23 @@ test_crash_point() {
 
     # Create fresh test image
     echo "Creating test image..."
-    create_test_image "$image"
+    if ! create_test_image "$image"; then
+        echo "ERROR: could not build a usable test image"
+        return 1
+    fi
 
     # Phase 1: Trigger crash
     echo "Triggering crash at $crash_point..."
-    FAT32_CRASH_AT="$crash_point" /bin/fat32expander resize --verbose --force "$image" > /tmp/crash_${crash_point}.log 2>&1
+    FAT32_CRASH_AT="$crash_point" /bin/fat32expander resize --verbose "$image" > /tmp/crash_${crash_point}.log 2>&1
     CRASH_EXIT=$?
     echo "Crash exit code: $CRASH_EXIT"
+    # A crash point exits 137. Any other code means it was never reached and
+    # the run was an ordinary resize, which the steps below would pass.
+    if [ "$CRASH_EXIT" -ne 137 ]; then
+        echo "ERROR: expected a crash at $crash_point (exit 137), got exit $CRASH_EXIT"
+        cat /tmp/crash_${crash_point}.log
+        return 1
+    fi
 
     # Check boot sector state
     BOOT_SIG=$(dd if="$image" bs=1 skip=510 count=2 2>/dev/null | xxd -p)
@@ -222,14 +298,16 @@ test_crash_point() {
     # Boot sector is invalidated BEFORE FAT write (after_boot_invalidate)
     # and restored AFTER checkpoint_fat_written
     case "$crash_point" in
-        after_checkpoint_start|after_data_shift|after_checkpoint_data_copied)
+        after_checkpoint_start|before_mid_shift_record|after_data_shift|after_checkpoint_data_copied)
             # Crash before boot invalidation - boot sector should be valid
             if [ "$BOOT_SIG" != "55aa" ]; then
                 echo "WARNING: Boot sector unexpectedly invalidated at $crash_point"
             fi
             ;;
-        after_boot_invalidate|after_fat_write)
-            # Crash in danger zone - boot sector should be invalidated
+        after_boot_invalidate|after_fat_write|before_primary_boot_write)
+            # Crash in danger zone - boot sector should be invalidated. At
+            # before_primary_boot_write the backup and FSInfo are already new,
+            # but the primary is still the invalidated old one.
             if [ "$BOOT_SIG" != "0000" ]; then
                 echo "ERROR: Boot sector should be invalidated (0000) at $crash_point but is $BOOT_SIG"
                 return 1
@@ -246,7 +324,7 @@ test_crash_point() {
 
     # Phase 2: Recovery
     echo "Attempting recovery..."
-    /bin/fat32expander resize --verbose --force "$image" > /tmp/recover_${crash_point}.log 2>&1
+    /bin/fat32expander resize --verbose "$image" > /tmp/recover_${crash_point}.log 2>&1
     RECOVER_EXIT=$?
 
     if [ $RECOVER_EXIT -ne 0 ]; then

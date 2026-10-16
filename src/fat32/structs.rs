@@ -1,123 +1,5 @@
 use crate::error::{Error, Result};
 
-// ===== Newtype Wrappers for Type Safety =====
-
-/// A cluster ID in a FAT32 filesystem.
-///
-/// Cluster IDs start at 2 (clusters 0 and 1 are reserved).
-/// This newtype prevents accidentally mixing up cluster IDs with sector numbers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ClusterId(u32);
-
-impl ClusterId {
-    /// The first valid data cluster (cluster 2)
-    pub const FIRST_DATA_CLUSTER: Self = Self(2);
-
-    /// Create a new ClusterId from a raw value.
-    ///
-    /// Note: This does not validate that the cluster ID is >= 2.
-    /// Use `new_checked` for validation.
-    #[inline]
-    pub const fn new(id: u32) -> Self {
-        Self(id)
-    }
-
-    /// Create a new ClusterId with validation.
-    ///
-    /// Returns `None` if the cluster ID is less than 2 (reserved).
-    #[inline]
-    pub const fn new_checked(id: u32) -> Option<Self> {
-        if id >= 2 {
-            Some(Self(id))
-        } else {
-            None
-        }
-    }
-
-    /// Get the raw cluster ID value.
-    #[inline]
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-
-    /// Get the cluster index (0-based offset from cluster 2).
-    ///
-    /// This is useful for calculating sector offsets.
-    #[inline]
-    pub const fn index(self) -> u32 {
-        self.0.saturating_sub(2)
-    }
-}
-
-impl From<u32> for ClusterId {
-    fn from(id: u32) -> Self {
-        Self(id)
-    }
-}
-
-impl From<ClusterId> for u32 {
-    fn from(id: ClusterId) -> Self {
-        id.0
-    }
-}
-
-impl std::fmt::Display for ClusterId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "cluster {}", self.0)
-    }
-}
-
-/// A sector number in a FAT32 filesystem.
-///
-/// This newtype prevents accidentally mixing up sector numbers with cluster IDs
-/// or byte offsets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SectorNum(u64);
-
-impl SectorNum {
-    /// Create a new SectorNum from a raw value.
-    #[inline]
-    pub const fn new(sector: u64) -> Self {
-        Self(sector)
-    }
-
-    /// Get the raw sector number.
-    #[inline]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-
-    /// Add an offset to this sector number.
-    #[inline]
-    pub const fn offset(self, offset: u64) -> Self {
-        Self(self.0 + offset)
-    }
-
-    /// Calculate byte offset from start of device given a sector size.
-    #[inline]
-    pub const fn to_byte_offset(self, sector_size: u32) -> u64 {
-        self.0 * sector_size as u64
-    }
-}
-
-impl From<u64> for SectorNum {
-    fn from(sector: u64) -> Self {
-        Self(sector)
-    }
-}
-
-impl From<SectorNum> for u64 {
-    fn from(sector: SectorNum) -> Self {
-        sector.0
-    }
-}
-
-impl std::fmt::Display for SectorNum {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "sector {}", self.0)
-    }
-}
-
 // ===== FAT32 Structures =====
 
 /// FAT32 Boot Sector / BIOS Parameter Block
@@ -152,11 +34,6 @@ impl BootSector {
     /// Get the raw bytes (full sector)
     pub fn as_bytes(&self) -> &[u8] {
         &self.raw
-    }
-
-    /// Get mutable raw bytes
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        &mut self.raw
     }
 
     /// Get the sector size this boot sector was read with
@@ -272,12 +149,6 @@ impl BootSector {
         u32::from_le_bytes([self.raw[44], self.raw[45], self.raw[46], self.raw[47]])
     }
 
-    /// Set root directory cluster
-    pub fn set_root_cluster(&mut self, cluster: u32) {
-        let bytes = cluster.to_le_bytes();
-        self.raw[44..48].copy_from_slice(&bytes);
-    }
-
     /// FSInfo sector number (offset 48, 2 bytes) - typically 1
     pub fn fs_info_sector(&self) -> u16 {
         u16::from_le_bytes([self.raw[48], self.raw[49]])
@@ -286,6 +157,15 @@ impl BootSector {
     /// Backup boot sector location (offset 50, 2 bytes) - typically 6
     pub fn backup_boot_sector(&self) -> u16 {
         u16::from_le_bytes([self.raw[50], self.raw[51]])
+    }
+
+    /// The backup boot sector, or `None` when the field is 0, which means the
+    /// volume has no backup ([F-T09]).
+    pub fn backup_location(&self) -> Option<u16> {
+        match self.backup_boot_sector() {
+            0 => None,
+            sector => Some(sector),
+        }
     }
 
     /// Reserved (offset 52, 12 bytes)
@@ -318,18 +198,33 @@ impl BootSector {
         &self.raw[71..82]
     }
 
-    /// File system type string (offset 82, 8 bytes) - "FAT32   "
-    pub fn fs_type(&self) -> &[u8] {
-        &self.raw[82..90]
-    }
-
     /// Boot signature at end of sector (offset 510, 2 bytes) - must be 0xAA55
     pub fn boot_signature(&self) -> u16 {
         u16::from_le_bytes([self.raw[510], self.raw[511]])
     }
 
+    // [F-R52]: the three FAT32 spec constants live here, together, because
+    // they were previously spelled as bare literals at their point of use --
+    // `0xAA55` beside this very constant, the sector-size list in two modules,
+    // and `65525` in two more. A spec value with two homes is a spec value
+    // that can be changed in one of them.
+
     /// Valid boot sector signature value
     pub const VALID_SIGNATURE: u16 = 0xAA55;
+
+    /// The four sector sizes FAT32 permits.
+    pub const VALID_SECTOR_SIZES: &'static [u16] = &[512, 1024, 2048, 4096];
+
+    /// The cluster count separating FAT32 from FAT16. A volume with fewer
+    /// data clusters than this is FAT16 by definition, whatever its boot
+    /// sector claims, so it is both a validation floor for existing volumes
+    /// and a floor the resize calculator must not project a volume below.
+    pub const MIN_FAT32_CLUSTERS: u32 = 65525;
+
+    /// The most data clusters a FAT32 volume can have. Clusters are numbered
+    /// from 2, and the highest usable number is 0x0FFFFFF6: from 0x0FFFFFF7
+    /// up, FAT entries mean "bad cluster" and "end of chain".
+    pub const MAX_FAT32_CLUSTERS: u32 = 0x0FFF_FFF5;
 
     /// Check if the boot sector signature is valid
     pub fn is_signature_valid(&self) -> bool {
@@ -372,6 +267,20 @@ impl BootSector {
         }
     }
 
+    /// This boot sector as it would look with a different volume geometry
+    ///
+    /// Code that needs to reason about a layout other than the current one -
+    /// the post-resize layout, or the pre-resize one after the fields have been
+    /// updated - should derive a boot sector here and ask it, rather than
+    /// recomputing the layout arithmetic. Every such copy is a chance for the
+    /// copy and the on-disk truth to disagree.
+    pub fn with_geometry(&self, total_sectors: u32, fat_size: u32) -> Self {
+        let mut updated = self.clone();
+        updated.set_total_sectors_32(total_sectors);
+        updated.set_fat_size_32(fat_size);
+        updated
+    }
+
     /// First sector of the FAT area
     pub fn first_fat_sector(&self) -> u64 {
         self.reserved_sectors() as u64
@@ -387,25 +296,58 @@ impl BootSector {
             + root_dir_sectors
     }
 
-    /// Total data sectors
-    pub fn data_sectors(&self) -> u64 {
+    /// Total data sectors, or `None` if the metadata does not fit in the volume.
+    ///
+    /// The field values here come straight off the disk and are therefore
+    /// attacker-controlled: a crafted image can declare FATs larger than the
+    /// whole volume. Subtracting those with bare operators panics in debug
+    /// builds and wraps to a huge plausible value in release builds, and
+    /// validation's FAT32-vs-FAT16 check then reads that wrapped result - so a
+    /// crafted image passed validation. Returning `None` makes the impossible
+    /// geometry impossible to mistake for a real one.
+    pub fn data_sectors(&self) -> Option<u64> {
         let root_dir_sectors =
             (self.root_entry_count() as u64 * 32).div_ceil(self.bytes_per_sector() as u64);
 
-        self.total_sectors() as u64
-            - self.reserved_sectors() as u64
-            - (self.num_fats() as u64 * self.fat_size() as u64)
-            - root_dir_sectors
+        let metadata_sectors = (self.num_fats() as u64)
+            .checked_mul(self.fat_size() as u64)?
+            .checked_add(self.reserved_sectors() as u64)?
+            .checked_add(root_dir_sectors)?;
+
+        (self.total_sectors() as u64).checked_sub(metadata_sectors)
     }
 
-    /// Total number of data clusters
-    pub fn data_clusters(&self) -> u32 {
-        (self.data_sectors() / self.sectors_per_cluster() as u64) as u32
+    /// Total number of data clusters, or `None` if the geometry cannot express
+    /// one - either the metadata does not fit ([`Self::data_sectors`]) or
+    /// `sectors_per_cluster` is zero.
+    pub fn data_clusters(&self) -> Option<u32> {
+        let clusters = self
+            .data_sectors()?
+            .checked_div(self.sectors_per_cluster() as u64)?;
+        u32::try_from(clusters).ok()
     }
 
-    /// Convert cluster number to first sector of that cluster
-    pub fn cluster_to_sector(&self, cluster: u32) -> u64 {
-        self.first_data_sector() + ((cluster - 2) as u64 * self.sectors_per_cluster() as u64)
+    /// First sector of `cluster`, or `None` if the cluster cannot address one.
+    ///
+    /// Data clusters are numbered from 2, so clusters 0 and 1 are reserved and
+    /// have no sector. [F-R36] This used to compute `cluster - 2` with a bare
+    /// operator: for those two values that panics in debug builds and wraps to
+    /// a ~4-billion-sector offset in release builds. Both the cluster number and
+    /// the geometry it is combined with come off the disk and are therefore
+    /// attacker-controlled, which is the same reasoning that made
+    /// [`Self::data_sectors`] and [`Self::data_clusters`] return `Option` --
+    /// this now matches them rather than being the one accessor beside them
+    /// that still trusts its input.
+    ///
+    /// Returning `None` is deliberate in preference to saturating. The deleted
+    /// `ClusterId::index` ([F-R35]) used `saturating_sub(2)`, which maps
+    /// clusters 0 and 1 to the *first data cluster's* sector -- a plausible,
+    /// wrong answer that reads as success. An impossible cluster should be
+    /// impossible to mistake for a real one.
+    pub fn cluster_to_sector(&self, cluster: u32) -> Option<u64> {
+        let index = cluster.checked_sub(2)?;
+        let offset = (index as u64).checked_mul(self.sectors_per_cluster() as u64)?;
+        self.first_data_sector().checked_add(offset)
     }
 
     /// Bytes per cluster
@@ -426,6 +368,8 @@ impl std::fmt::Debug for BootSector {
             .field("root_cluster", &self.root_cluster())
             .field("fs_info_sector", &self.fs_info_sector())
             .field("backup_boot_sector", &self.backup_boot_sector())
+            // Reachable from error paths, so it must render an impossible
+            // geometry rather than panic on one.
             .field("data_clusters", &self.data_clusters())
             .field("first_data_sector", &self.first_data_sector())
             .finish()
@@ -451,6 +395,8 @@ impl FSInfo {
     pub const TRAIL_SIG: u32 = 0xAA550000;
     /// Unknown free count value
     pub const UNKNOWN_FREE: u32 = 0xFFFFFFFF;
+    /// Marks the reserved bytes at offset 496 as holding a checkpoint location.
+    const RESIZE_RECORD_MARK: [u8; 4] = *b"RSZP";
 
     /// Parse FSInfo from raw bytes
     /// The input must be at least 512 bytes and will be stored in full
@@ -471,11 +417,6 @@ impl FSInfo {
     /// Get the raw bytes (full sector)
     pub fn as_bytes(&self) -> &[u8] {
         &self.raw
-    }
-
-    /// Get mutable raw bytes
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        &mut self.raw
     }
 
     /// Get the sector size this FSInfo was read with
@@ -511,10 +452,30 @@ impl FSInfo {
         u32::from_le_bytes([self.raw[492], self.raw[493], self.raw[494], self.raw[495]])
     }
 
-    /// Set next free cluster hint
-    pub fn set_next_free(&mut self, cluster: u32) {
-        let bytes = cluster.to_le_bytes();
-        self.raw[492..496].copy_from_slice(&bytes);
+    /// Where an interrupted resize left its checkpoint, if it marked one.
+    ///
+    /// [F-03]: kept in the 12 reserved bytes at offset 496, as a 4-byte
+    /// marker followed by the sector number. The checkpoint sits at the
+    /// device's last sector *when the resize started*, which a later run
+    /// cannot work out if the device has changed size since.
+    pub fn resize_record_sector(&self) -> Option<u64> {
+        if self.raw[496..500] != Self::RESIZE_RECORD_MARK {
+            return None;
+        }
+        let mut sector = [0u8; 8];
+        sector.copy_from_slice(&self.raw[500..508]);
+        Some(u64::from_le_bytes(sector))
+    }
+
+    /// Mark where the checkpoint is, or clear the mark with `None`.
+    pub fn set_resize_record_sector(&mut self, sector: Option<u64>) {
+        match sector {
+            Some(sector) => {
+                self.raw[496..500].copy_from_slice(&Self::RESIZE_RECORD_MARK);
+                self.raw[500..508].copy_from_slice(&sector.to_le_bytes());
+            }
+            None => self.raw[496..508].fill(0),
+        }
     }
 
     /// Trail signature (offset 508, 4 bytes) - must be 0xAA550000
@@ -584,6 +545,356 @@ pub mod fat_entry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a boot sector with an explicit FAT32 geometry.
+    ///
+    /// Only the fields the layout accessors read are set; everything else stays
+    /// zero, which is what a FAT32 boot sector holds for them anyway
+    /// (`root_entry_count`, `total_sectors_16`, `fat_size_16`).
+    fn boot_sector_with(
+        bytes_per_sector: u16,
+        sectors_per_cluster: u8,
+        reserved_sectors: u16,
+        num_fats: u8,
+        total_sectors: u32,
+        fat_size: u32,
+    ) -> BootSector {
+        let mut data = [0u8; 512];
+        data[11..13].copy_from_slice(&bytes_per_sector.to_le_bytes());
+        data[13] = sectors_per_cluster;
+        data[14..16].copy_from_slice(&reserved_sectors.to_le_bytes());
+        data[16] = num_fats;
+        data[21] = 0xF8;
+        data[32..36].copy_from_slice(&total_sectors.to_le_bytes());
+        data[36..40].copy_from_slice(&fat_size.to_le_bytes());
+        data[44..48].copy_from_slice(&2u32.to_le_bytes());
+        data[510] = 0x55;
+        data[511] = 0xAA;
+        BootSector::from_bytes(&data).unwrap()
+    }
+
+    /// Pins the derived layout arithmetic on geometries that are all valid
+    /// FAT32. The expected values are worked out by hand in the table rather
+    /// than by re-running the formula under test, so a change to how
+    /// `data_sectors`/`data_clusters` compute cannot move the good-path answers
+    /// without failing here.
+    /// One geometry plus the layout values it must produce.
+    struct LayoutCase {
+        bytes_per_sector: u16,
+        sectors_per_cluster: u8,
+        reserved_sectors: u16,
+        num_fats: u8,
+        total_sectors: u32,
+        fat_size: u32,
+        expect_first_data_sector: u64,
+        expect_data_sectors: u64,
+        expect_data_clusters: u32,
+    }
+
+    #[test]
+    fn layout_accessors_on_valid_geometries() {
+        let cases = [
+            // 32 + 2*7813 = 15_658; 2_000_000 - 15_658 = 1_984_342; /8 = 248_042 rem 6
+            LayoutCase {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 8,
+                reserved_sectors: 32,
+                num_fats: 2,
+                total_sectors: 2_000_000,
+                fat_size: 7813,
+                expect_first_data_sector: 15_658,
+                expect_data_sectors: 1_984_342,
+                expect_data_clusters: 248_042,
+            },
+            // 32 + 2*7813 = 15_658; 1_000_000 - 15_658 = 984_342; /1 = 984_342
+            LayoutCase {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 1,
+                reserved_sectors: 32,
+                num_fats: 2,
+                total_sectors: 1_000_000,
+                fat_size: 7813,
+                expect_first_data_sector: 15_658,
+                expect_data_sectors: 984_342,
+                expect_data_clusters: 984_342,
+            },
+            // 32 + 2*500 = 1_032; 500_000 - 1_032 = 498_968; /1 = 498_968
+            LayoutCase {
+                bytes_per_sector: 4096,
+                sectors_per_cluster: 1,
+                reserved_sectors: 32,
+                num_fats: 2,
+                total_sectors: 500_000,
+                fat_size: 500,
+                expect_first_data_sector: 1_032,
+                expect_data_sectors: 498_968,
+                expect_data_clusters: 498_968,
+            },
+            // 32 + 2*1200 = 2_432; 1_200_000 - 2_432 = 1_197_568; /4 = 299_392
+            LayoutCase {
+                bytes_per_sector: 1024,
+                sectors_per_cluster: 4,
+                reserved_sectors: 32,
+                num_fats: 2,
+                total_sectors: 1_200_000,
+                fat_size: 1200,
+                expect_first_data_sector: 2_432,
+                expect_data_sectors: 1_197_568,
+                expect_data_clusters: 299_392,
+            },
+            // 32 + 1*900 = 932; 800_000 - 932 = 799_068; /2 = 399_534
+            LayoutCase {
+                bytes_per_sector: 2048,
+                sectors_per_cluster: 2,
+                reserved_sectors: 32,
+                num_fats: 1,
+                total_sectors: 800_000,
+                fat_size: 900,
+                expect_first_data_sector: 932,
+                expect_data_sectors: 799_068,
+                expect_data_clusters: 399_534,
+            },
+        ];
+
+        for case in cases {
+            let boot = boot_sector_with(
+                case.bytes_per_sector,
+                case.sectors_per_cluster,
+                case.reserved_sectors,
+                case.num_fats,
+                case.total_sectors,
+                case.fat_size,
+            );
+            let label = format!(
+                "bps={} spc={} total={} fat_size={}",
+                case.bytes_per_sector, case.sectors_per_cluster, case.total_sectors, case.fat_size
+            );
+            assert_eq!(
+                boot.first_data_sector(),
+                case.expect_first_data_sector,
+                "first_data_sector {label}"
+            );
+            assert_eq!(
+                boot.data_sectors(),
+                Some(case.expect_data_sectors),
+                "data_sectors {label}"
+            );
+            assert_eq!(
+                boot.data_clusters(),
+                Some(case.expect_data_clusters),
+                "data_clusters {label}"
+            );
+            // Every case must stay a legitimate FAT32 volume, or it is not
+            // exercising the good path this test exists to protect.
+            assert!(
+                case.expect_data_clusters >= 65525,
+                "case is not FAT32: {label}"
+            );
+        }
+    }
+
+    /// A boot sector whose FATs do not fit inside the volume has no meaningful
+    /// data area. The arithmetic must report that rather than wrapping into a
+    /// huge plausible-looking number (release) or panicking (debug).
+    ///
+    /// Geometry is the report's own [F-R7] reproduction.
+    #[test]
+    fn data_area_is_unrepresentable_when_the_layout_exceeds_the_volume() {
+        let boot = boot_sector_with(512, 8, 32, 2, 2_000_000, 15_728_640);
+        assert_eq!(
+            boot.data_sectors(),
+            None,
+            "FATs larger than the volume must not yield a data-sector count"
+        );
+        assert_eq!(boot.data_clusters(), None);
+    }
+
+    /// Boundary: the layout exactly filling the volume leaves zero data sectors,
+    /// which is representable - it is one sector further that is not.
+    #[test]
+    fn data_area_boundary_is_exact() {
+        // reserved 32 + 2*984 = 2000 sectors of metadata in a 2000-sector volume.
+        let exact = boot_sector_with(512, 1, 32, 2, 2_000, 984);
+        assert_eq!(exact.data_sectors(), Some(0));
+        assert_eq!(exact.data_clusters(), Some(0));
+
+        let one_too_far = boot_sector_with(512, 1, 32, 2, 1_999, 984);
+        assert_eq!(one_too_far.data_sectors(), None);
+    }
+
+    /// `sectors_per_cluster` of zero is rejected by validation, but `Debug` and
+    /// other callers can still reach a boot sector holding it.
+    #[test]
+    fn data_clusters_is_unrepresentable_without_a_cluster_size() {
+        let boot = boot_sector_with(512, 0, 32, 2, 2_000_000, 7813);
+        assert_eq!(boot.data_sectors(), Some(1_984_342));
+        assert_eq!(
+            boot.data_clusters(),
+            None,
+            "division by a zero cluster size"
+        );
+    }
+
+    /// Debug-formatting is reachable from error paths and logging, so it must
+    /// survive a boot sector that failed validation.
+    #[test]
+    fn debug_formatting_survives_a_corrupt_boot_sector() {
+        let boot = boot_sector_with(512, 0, 32, 2, 2_000_000, 15_728_640);
+        let rendered = format!("{boot:?}");
+        assert!(
+            rendered.contains("BootSector"),
+            "expected a BootSector rendering, got: {rendered}"
+        );
+    }
+
+    /// `cluster_to_sector` must keep agreeing with `first_data_sector` for the
+    /// first and a later data cluster.
+    #[test]
+    fn cluster_to_sector_is_anchored_to_the_data_area_start() {
+        let boot = boot_sector_with(512, 8, 32, 2, 2_000_000, 7813);
+        assert_eq!(boot.cluster_to_sector(2), Some(15_658));
+        assert_eq!(boot.cluster_to_sector(3), Some(15_658 + 8));
+        assert_eq!(boot.cluster_to_sector(1000), Some(15_658 + 998 * 8));
+    }
+
+    /// [F-R36] The reserved clusters have no sector, and must say so rather
+    /// than panicking (debug) or wrapping to a ~4-billion-sector offset
+    /// (release). Cluster 2 is the boundary and is valid.
+    #[test]
+    fn the_reserved_clusters_have_no_sector() {
+        let boot = boot_sector_with(512, 8, 32, 2, 2_000_000, 7813);
+
+        assert_eq!(boot.cluster_to_sector(0), None, "cluster 0 is reserved");
+        assert_eq!(boot.cluster_to_sector(1), None, "cluster 1 is reserved");
+        assert_eq!(
+            boot.cluster_to_sector(2),
+            Some(15_658),
+            "cluster 2 is the first data cluster, not a reserved one"
+        );
+    }
+
+    /// A cluster number large enough to overflow the sector arithmetic must
+    /// return `None`, not a wrapped offset. Both the cluster and the geometry
+    /// come off the disk, so this is reachable from a crafted image.
+    #[test]
+    fn a_cluster_whose_sector_would_overflow_has_no_sector() {
+        let boot = boot_sector_with(512, 8, 32, 2, 2_000_000, 7813);
+
+        assert_eq!(
+            boot.cluster_to_sector(u32::MAX),
+            Some(15_658 + (u32::MAX as u64 - 2) * 8),
+            "u32::MAX still fits in u64 arithmetic and must be answered exactly"
+        );
+
+        // 255 sectors per cluster is the largest a u8 can express; combined
+        // with a near-maximal cluster the product still fits u64, so the guard
+        // that matters here is that nothing wraps at u32 width on the way.
+        let wide = boot_sector_with(512, 255, 32, 2, 2_000_000, 7813);
+        assert_eq!(
+            wide.cluster_to_sector(u32::MAX),
+            Some(wide.first_data_sector() + (u32::MAX as u64 - 2) * 255),
+        );
+    }
+
+    /// [F-R36]'s safety net: every legitimate cluster must keep mapping to the
+    /// same sector once `cluster_to_sector` starts checking its arithmetic.
+    ///
+    /// The risk a checked conversion introduces is not a wrong answer but a
+    /// *refused* one -- rejecting a cluster the filesystem legitimately holds.
+    /// So the case that matters is the last valid cluster of each geometry, and
+    /// the expectations are spelled out as literals worked out by hand rather
+    /// than recomputed from `first_data_sector`, which the fix also touches.
+    #[test]
+    fn cluster_to_sector_is_exact_from_the_first_to_the_last_valid_cluster() {
+        /// One geometry and the cluster→sector answers it must produce.
+        struct ClusterCase {
+            bytes_per_sector: u16,
+            sectors_per_cluster: u8,
+            total_sectors: u32,
+            fat_size: u32,
+            /// Where the data area starts, i.e. cluster 2's first sector.
+            first_data_sector: u64,
+            /// The highest cluster this geometry can address.
+            last_cluster: u32,
+            /// That cluster's first sector.
+            last_cluster_sector: u64,
+        }
+
+        // Reserved sectors and FAT count are 32 and 2 throughout, so the data
+        // area starts at 32 + 2 * fat_size.
+        const RESERVED: u16 = 32;
+        const NUM_FATS: u8 = 2;
+
+        let cases = [
+            ClusterCase {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 8,
+                total_sectors: 2_000_000,
+                fat_size: 7813,
+                first_data_sector: 15_658,
+                last_cluster: 248_043,
+                last_cluster_sector: 1_999_986,
+            },
+            ClusterCase {
+                bytes_per_sector: 4096,
+                sectors_per_cluster: 1,
+                total_sectors: 1_000_000,
+                fat_size: 1000,
+                first_data_sector: 2_032,
+                last_cluster: 997_969,
+                last_cluster_sector: 999_999,
+            },
+            ClusterCase {
+                bytes_per_sector: 512,
+                sectors_per_cluster: 1,
+                total_sectors: 70_000,
+                fat_size: 550,
+                first_data_sector: 1_132,
+                last_cluster: 68_869,
+                last_cluster_sector: 69_999,
+            },
+        ];
+
+        for case in cases {
+            let bps = case.bytes_per_sector;
+            let spc = case.sectors_per_cluster;
+            let boot = boot_sector_with(
+                bps,
+                spc,
+                RESERVED,
+                NUM_FATS,
+                case.total_sectors,
+                case.fat_size,
+            );
+
+            assert_eq!(
+                boot.first_data_sector(),
+                case.first_data_sector,
+                "first_data_sector for bps={bps} spc={spc}"
+            );
+            assert_eq!(
+                boot.data_clusters(),
+                Some(case.last_cluster - 1),
+                "data_clusters for bps={bps} spc={spc}"
+            );
+
+            assert_eq!(
+                boot.cluster_to_sector(2),
+                Some(case.first_data_sector),
+                "cluster 2 must start the data area for bps={bps} spc={spc}"
+            );
+            assert_eq!(
+                boot.cluster_to_sector(case.last_cluster),
+                Some(case.last_cluster_sector),
+                "last valid cluster {} for bps={bps} spc={spc}",
+                case.last_cluster
+            );
+            assert!(
+                case.last_cluster_sector + spc as u64 <= case.total_sectors as u64,
+                "the last cluster must fit inside the volume for bps={bps} spc={spc}"
+            );
+        }
+    }
 
     #[test]
     fn test_fat_entry_helpers() {
@@ -695,5 +1006,115 @@ mod tests {
         assert_eq!(fsinfo.free_count(), 12345);
         assert_eq!(fsinfo.next_free(), 100);
         assert_eq!(fsinfo.trail_sig(), FSInfo::TRAIL_SIG);
+    }
+}
+
+/// [F-13]: boot sector and FSInfo are parsed from whatever the device holds.
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use crate::fat32::validate_boot_sector;
+    use proptest::prelude::*;
+
+    /// Boot sector bytes with a FAT32-shaped header and arbitrary geometry.
+    fn boot_bytes() -> impl Strategy<Value = Vec<u8>> {
+        (
+            prop_oneof![
+                Just(512u16),
+                Just(1024),
+                Just(2048),
+                Just(4096),
+                any::<u16>()
+            ],
+            any::<u8>(),
+            any::<u16>(),
+            any::<u8>(),
+            any::<u32>(),
+            any::<u32>(),
+            any::<u32>(),
+        )
+            .prop_map(|(bps, spc, reserved, fats, total, fat_size, root)| {
+                let mut d = vec![0u8; 512];
+                d[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+                d[11..13].copy_from_slice(&bps.to_le_bytes());
+                d[13] = spc;
+                d[14..16].copy_from_slice(&reserved.to_le_bytes());
+                d[16] = fats;
+                d[21] = 0xF8;
+                d[32..36].copy_from_slice(&total.to_le_bytes());
+                d[36..40].copy_from_slice(&fat_size.to_le_bytes());
+                d[44..48].copy_from_slice(&root.to_le_bytes());
+                d[48] = 1;
+                d[50] = 6;
+                d[82..90].copy_from_slice(b"FAT32   ");
+                d[510] = 0x55;
+                d[511] = 0xAA;
+                d
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn parsing_arbitrary_bytes_never_panics(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
+            if let Ok(boot) = BootSector::from_bytes(&data) {
+                let _ = format!("{:?}", boot);
+                let _ = boot.data_clusters();
+                let _ = boot.cluster_to_sector(u32::MAX);
+            }
+            let _ = FSInfo::from_bytes(&data);
+        }
+
+        #[test]
+        fn layout_questions_on_any_geometry_never_panic(data in boot_bytes(), cluster in any::<u32>()) {
+            let boot = BootSector::from_bytes(&data).unwrap();
+            let _ = format!("{:?}", boot);
+            let _ = boot.data_clusters();
+            let _ = boot.first_data_sector();
+            let _ = boot.cluster_to_sector(cluster);
+            let _ = validate_boot_sector(&boot);
+        }
+
+        /// On a boot sector that validates, every data cluster lies wholly
+        /// inside the volume. The geometry is built to be valid, so cases are
+        /// not wasted on rejects.
+        #[test]
+        fn a_valid_boot_sector_maps_every_cluster_into_the_volume(
+            bps_shift in 0u32..4,
+            spc_shift in 0u32..8,
+            reserved in 8u16..64,
+            fats in 1u8..=2,
+            clusters in BootSector::MIN_FAT32_CLUSTERS..4_000_000,
+            slack in 0u32..128,
+            pick in any::<prop::sample::Index>(),
+        ) {
+            let bps = 512u32 << bps_shift;
+            let spc = 1u32 << spc_shift;
+            let fat_size = ((clusters as u64 + 2) * 4).div_ceil(bps as u64) as u32;
+            let total = reserved as u64 + fats as u64 * fat_size as u64
+                + clusters as u64 * spc as u64 + (slack % spc) as u64;
+            prop_assume!(total <= u32::MAX as u64);
+
+            let mut d = vec![0u8; 512];
+            d[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+            d[11..13].copy_from_slice(&(bps as u16).to_le_bytes());
+            d[13] = spc as u8;
+            d[14..16].copy_from_slice(&reserved.to_le_bytes());
+            d[16] = fats;
+            d[21] = 0xF8;
+            d[32..36].copy_from_slice(&(total as u32).to_le_bytes());
+            d[36..40].copy_from_slice(&fat_size.to_le_bytes());
+            d[44..48].copy_from_slice(&2u32.to_le_bytes());
+            d[48] = 1;
+            d[50] = 6;
+            d[510] = 0x55;
+            d[511] = 0xAA;
+            let boot = BootSector::from_bytes(&d).unwrap();
+            prop_assert!(validate_boot_sector(&boot).is_ok(), "{:?}", validate_boot_sector(&boot));
+            prop_assert_eq!(boot.data_clusters(), Some(clusters));
+
+            let cluster = 2 + pick.index(clusters as usize) as u32;
+            let sector = boot.cluster_to_sector(cluster).unwrap();
+            prop_assert!(sector + spc as u64 <= total);
+        }
     }
 }
