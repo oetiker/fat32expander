@@ -9,8 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### New
 - Programs that use `fat32expander` as a library can follow a resize as it runs: `resize_fat32_with_events` reports each step, a resumed or ignored recovery record, and, with `verbose`, the layout and every cluster moved. The library no longer writes these messages to the terminal itself; the `fat32expander` command prints them as before.
-- added a note to the readme why we are not shrinking
-- added `Debug` trait implementation for `Device`
 
 ### Changed
 - `fat32expander info` and `fat32expander resize` now label sizes "MiB" instead of "MB" ("Current size: 35840000 bytes (34.18 MiB)"). The numbers do not change: they were always mebibytes (1024 × 1024 bytes), and the exact byte count is still printed beside them.
@@ -19,9 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - For programs that use `fat32expander` as a library: `Device::write_bytes_at`, `Device::read_bytes_at`, `Device::size_bytes`, `BootSector::as_bytes_mut`, `BootSector::set_root_cluster`, `BootSector::fs_type`, `FSInfo::as_bytes_mut` and `FSInfo::set_next_free` are removed. `write_bytes_at` wrote anywhere on the device without the checks every other write goes through.
 - For programs that use `fat32expander` as a library: `ResizeResult` no longer has a `calculation` field, and `SizeCalculation` is no longer exported. `ResizeResult` now has `old_total_sectors`, `new_total_sectors`, `old_fat_size` and `new_fat_size` directly. The removed "free clusters after resize" value was wrong: it was 0 after a resumed resize.
 - `fat32expander resize` prints the device, old size, new size and size increase in its closing "Summary" instead of in a "Resize operation" block before the work starts, so the numbers are the ones the resize used. The hint to rerun with `--ignore-backup-mismatch` is now part of the error message itself.
-- replaced `String` with `PathBuf` for device paths throughout the codebase
-- public API functions now accept `impl AsRef<Path>` instead of `&str`
-- `ResizeOptions` now uses builder pattern: `ResizeOptions::new(path).dry_run(true)`
 
 ### Fixed
 - After a crash or power loss in the last step of `fat32expander resize`, a rerun on a device that had grown in the meantime did not resume. With FAT growth it stopped with "Filesystem has been invalidated by an interrupted resize operation" and exit code 9; without FAT growth it stopped with "Backup boot sector does not match primary boot sector" and exit code 8. Both cases now resume and finish the resize.
@@ -54,6 +49,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - After a resize was interrupted and run again, the free space shown by `fat32expander info` and the operating system could be too high, because the new clusters were counted twice. This happened when the rerun used `--ignore-backup-mismatch`, or resumed an interrupted resize late in its last step. The free-cluster count is now computed from the FAT on every run, which also replaces an "Unknown" or wrong count with the real value.
 - After `fat32expander resize`, the copy of the free space count next to the backup boot sector (sector 7 on most volumes) still held the value from before the resize. It now holds the same count as the primary.
 - On a volume that has no backup boot sector (the field is 0), `fat32expander info` showed "Backup boot sector: 0" and "Backup matches primary: Yes"; it now shows "Backup boot sector: none". `fat32expander resize` on such a volume wrote the new size into the boot sector before the free space count, so a crash at that moment left the new size with the old free space count; the boot sector is now written last.
+
+## 0.0.2 - 2025-12-02
+### New
+- added a note to the readme why we are not shrinking
+- added `ClusterId` and `SectorNum` newtype wrappers for improved type safety
+- added `Debug` trait implementation for `Device`
+
+### Changed
+- replaced `String` with `PathBuf` for device paths throughout the codebase
+- public API functions now accept `impl AsRef<Path>` instead of `&str`
+- `ResizeOptions` now uses builder pattern: `ResizeOptions::new(path).dry_run(true)`
+- replaced glob re-exports (`pub use module::*`) with explicit exports in `fat32/mod.rs` and `resize/mod.rs`
+- extracted duplicate logic in `Device::open()` and `open_readonly()` into shared `open_impl()` helper
+- extracted `print_verbose_resize_info()` helper from `resize_fat32()`
+- used `let-else` pattern for cleaner checkpoint parsing
 
 ## 0.0.1 - 2025-12-01
 ### New
