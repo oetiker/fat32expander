@@ -46,6 +46,10 @@ pub mod journal {
     }
 
     thread_local! {
+        // clippy 0.1.99 flags every `const` thread-local on illumos, which
+        // has no native TLS and expands the macro differently; the same
+        // static passes on Linux and macOS.
+        #[cfg_attr(target_os = "illumos", allow(clippy::missing_const_for_thread_local))]
         static JOURNAL: RefCell<Vec<Op>> = const { RefCell::new(Vec::new()) };
     }
 
