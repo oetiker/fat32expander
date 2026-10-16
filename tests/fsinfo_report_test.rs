@@ -229,9 +229,10 @@ fn display_output_reports_every_key_fact() {
     );
 }
 
-/// A filesystem that already fills its device reports no headroom. `main.rs`
-/// reads exactly these two values to decide whether to refuse the resize, so
-/// they must not drift.
+/// A filesystem that already fills its device reports no headroom. `info`
+/// prints these two values as "Can grow" and "Max new size", so they must
+/// agree with each other. The resize does not read them; it decides with its
+/// own size calculation.
 #[test]
 fn a_filesystem_filling_its_device_reports_no_headroom() {
     // Device is exactly the size the filesystem declares.
