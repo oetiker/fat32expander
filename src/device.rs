@@ -109,6 +109,42 @@ fn open_error(path: String, source: std::io::Error, busy_is_in_use: bool) -> Err
     }
 }
 
+/// Flush a file or device, including the write cache of the drive.
+#[cfg(not(target_os = "macos"))]
+fn sync_file(file: &File) -> std::io::Result<()> {
+    file.sync_all()
+}
+
+/// macOS: `sync_all` calls `fcntl(F_FULLFSYNC)`, which only filesystems
+/// support; on a raw disk device it fails with `ENOTTY`, as the `macos` CI
+/// job saw on `/dev/rdisk7`. A disk device is flushed with `fsync` for the
+/// kernel's buffers and `DKIOCSYNCHRONIZECACHE` for the drive's write cache,
+/// which is what `F_FULLFSYNC` does for a file.
+#[cfg(target_os = "macos")]
+fn sync_file(file: &File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    let kind = file.metadata()?.file_type();
+    if !kind.is_block_device() && !kind.is_char_device() {
+        return file.sync_all();
+    }
+
+    // From <sys/disk.h>: _IO('d', 22).
+    const DKIOCSYNCHRONIZECACHE: libc::c_ulong = 0x2000_6416;
+
+    // SAFETY: `fd` is borrowed from `file`, which outlives both calls. fsync
+    // takes only the descriptor, and DKIOCSYNCHRONIZECACHE takes no argument,
+    // so no memory is shared with the kernel.
+    unsafe {
+        if libc::fsync(file.as_raw_fd()) == -1
+            || libc::ioctl(file.as_raw_fd(), DKIOCSYNCHRONIZECACHE) == -1
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 impl Device {
     /// Open a device and establish its geometry in a single step.
     ///
@@ -316,7 +352,7 @@ impl Device {
 
     /// Flush all writes to disk
     pub fn sync(&self) -> Result<()> {
-        self.file.sync_all().map_err(|source| Error::DeviceSync {
+        sync_file(&self.file).map_err(|source| Error::DeviceSync {
             path: self.path.display().to_string(),
             source,
         })?;
