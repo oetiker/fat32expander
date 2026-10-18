@@ -234,7 +234,11 @@ sleep 999
 INIT_SCRIPT
     chmod +x "$overlay_dir/init"
 
-    (cd "$overlay_dir" && find . | cpio -o -H newc 2>/dev/null) | gzip > "$OVERLAY_CPIO.gz"
+    # cpio's exit status and its errors must reach set -e. Piped straight into
+    # gzip, a missing or failing cpio produced an empty overlay, and the VM
+    # stopped at "Mounting boot media failed" with nothing to say why.
+    (cd "$overlay_dir" && find . | cpio --quiet -o -H newc) > "$OVERLAY_CPIO"
+    gzip -f "$OVERLAY_CPIO"
     cat "$INITRD" "$OVERLAY_CPIO.gz" > "$COMBINED_INITRD"
     rm -rf "$overlay_dir"
 }

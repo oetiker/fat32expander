@@ -68,6 +68,13 @@ check_qemu_prerequisites() {
         missing=1
     fi
 
+    # cpio packs the init overlay the VM boots with. Without it the overlay
+    # is empty and every VM stops at "Mounting boot media failed".
+    if ! command -v cpio &>/dev/null; then
+        log_error "cpio not found. Please install cpio."
+        missing=1
+    fi
+
     # mtools (optional)
     if command -v mcopy &>/dev/null; then
         export HAVE_MTOOLS=1
