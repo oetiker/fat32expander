@@ -4,6 +4,10 @@
 # mounted at /src.
 FROM docker.io/library/rust:1-trixie
 
+# Without it, apt-get fills the build log with "debconf: unable to initialize
+# frontend: Dialog" for each package; the build has no terminal to ask on.
+ARG DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       cpio curl dosfstools mtools musl-tools qemu-system-x86 \
