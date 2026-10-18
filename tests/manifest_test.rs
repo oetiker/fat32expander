@@ -12,12 +12,9 @@
 //! manifest alone could declare the split while `src/lib.rs` quietly started
 //! using `anyhow`; only that build would notice.
 
-use std::path::PathBuf;
+mod common;
 
-fn read(relative: &str) -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
-}
+use common::read;
 
 /// The lines of one `[section]` of `Cargo.toml`, whitespace-normalised.
 fn section(manifest: &str, name: &str) -> Vec<String> {
@@ -76,10 +73,13 @@ fn the_default_cli_feature_enables_them_and_the_binary_requires_it() {
 
 #[test]
 fn ci_builds_the_library_without_default_features() {
-    let workflow = read(".github/workflows/tests.yml");
+    common::assert_ci_runs_ci_heavy();
     assert!(
-        workflow.contains("cargo check --lib --no-default-features"),
-        "tests.yml must build the library without the `cli` feature; it is \
-         the only check that `src/lib.rs` does not use `clap` or `anyhow`"
+        common::ci_heavy_recipe()
+            .iter()
+            .any(|line| line == "cargo check --lib --no-default-features"),
+        "the `ci-heavy` recipe in the Makefile must build the library without \
+         the `cli` feature; it is the only check that `src/lib.rs` does not \
+         use `clap` or `anyhow`"
     );
 }

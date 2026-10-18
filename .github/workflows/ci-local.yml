@@ -1,0 +1,62 @@
+name: CI (fat32expander's own jobs)
+
+# Called from ci.yml. The repo-infra pieces there run fmt, clippy, the plain
+# `cargo test`, the musl build and the man page; this file runs what they
+# cannot.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit to test; empty on push and pull_request.
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  # The tests that need mkfs.fat, dosfsck, mtools and QEMU. The runner image
+  # has none of them, so they run in the Containerfile image: the Makefile
+  # target ci-heavy lists them, and scripts/ci-container.sh runs the same
+  # thing on a developer machine.
+  heavy:
+    name: Filesystem and QEMU tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Run make ci-heavy in the container
+        run: ./scripts/ci-container.sh ci-heavy
+
+  # macOS has its own mount table (getfsstat), its own raw device names
+  # (/dev/rdiskN) and its own way to size a disk: a seek to the end of a disk
+  # device gives 0 there. Unit tests on Linux cannot reach any of that, so
+  # this job resizes a filesystem on a real macOS disk device.
+  macos:
+    name: macOS disk device
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run library tests
+        run: cargo test --lib
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Resize on a disk device
+        run: ./scripts/test-macos.sh

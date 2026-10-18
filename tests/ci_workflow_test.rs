@@ -2,23 +2,24 @@
 //! by CI.
 //!
 //! The flaw this prevents is not a bug in the code but a gap in the harness.
-//! `tests.yml` used to name its targets one by one -- `--test integration_test`,
-//! `--test durability_test` -- so three test binaries totalling 30 tests, two of
-//! them written as safety nets by earlier fix sessions, ran only on developers'
-//! machines. A safety net CI does not run cannot fail a pull request, which is
-//! the only thing that makes it a net.
+//! The CI workflow used to name its targets one by one -- `--test
+//! integration_test`, `--test durability_test` -- so three test binaries
+//! totalling 30 tests, two of them written as safety nets by earlier fix
+//! sessions, ran only on developers' machines. A safety net CI does not run
+//! cannot fail a pull request, which is the only thing that makes it a net.
 //!
 //! Naming targets individually fails silently and in the safe-looking
-//! direction: the workflow stays green, the summary still says "test result:
-//! ok", and the omission is visible only to someone who diffs `ls tests/`
-//! against the YAML. This test does that diff on every run.
+//! direction: CI stays green, the summary still says "test result: ok", and
+//! the omission is visible only to someone who diffs `ls tests/` against the
+//! CI commands. This test does that diff on every run, against the
+//! `ci-heavy` recipe in the Makefile, which CI runs in the container.
+//! The plain `cargo test` of the repo-infra piece `ri-ci-rust` covers the
+//! tests that are not ignored.
+
+mod common;
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
+use std::path::Path;
 
 /// Every `tests/*.rs` file, by target name (the file stem).
 fn test_target_names(root: &Path) -> BTreeSet<String> {
@@ -34,30 +35,24 @@ fn test_target_names(root: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// The `cargo test` command lines in the workflow, one per line, whitespace
-/// normalised so a line continuation does not hide a flag.
-fn cargo_test_invocations(workflow: &str) -> Vec<String> {
-    let joined = workflow.replace("\\\n", " ");
-    joined
-        .lines()
-        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+/// The `cargo test` command lines CI runs in the container.
+fn cargo_test_invocations() -> Vec<String> {
+    common::assert_ci_runs_ci_heavy();
+    common::ci_heavy_recipe()
+        .into_iter()
         .filter(|line| line.contains("cargo test"))
         .collect()
 }
 
 #[test]
 fn ci_executes_every_integration_test_binary() {
-    let root = repo_root();
-    let workflow_path = root.join(".github/workflows/tests.yml");
-    let workflow = std::fs::read_to_string(&workflow_path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", workflow_path.display()));
-
-    let invocations = cargo_test_invocations(&workflow);
+    let root = common::repo_root();
+    let invocations = cargo_test_invocations();
     assert!(
         !invocations.is_empty(),
-        "no `cargo test` invocation found in {} -- the workflow no longer runs \
-         tests at all, or its shape changed enough that this guard is blind",
-        workflow_path.display()
+        "no `cargo test` invocation in the `ci-heavy` recipe -- CI no longer \
+         runs the ignored tests at all, or its shape changed enough that this \
+         guard is blind"
     );
 
     // A target is covered either by a sweep (`--all-targets` / `--tests`, which
@@ -95,15 +90,12 @@ fn ci_executes_every_integration_test_binary() {
 /// explicitly-featured invocation.
 #[test]
 fn the_durability_suite_keeps_its_explicit_feature_invocation() {
-    let root = repo_root();
-    let workflow = std::fs::read_to_string(root.join(".github/workflows/tests.yml"))
-        .expect("cannot read .github/workflows/tests.yml");
-
     assert!(
-        cargo_test_invocations(&workflow).iter().any(|line| {
+        cargo_test_invocations().iter().any(|line| {
             line.contains("--features device-journal") && line.contains("--test durability_test")
         }),
-        "no `cargo test --features device-journal --test durability_test` in CI. \
+        "no `cargo test --features device-journal --test durability_test` in the \
+         `ci-heavy` recipe. \
          A plain --all-targets run compiles that suite to nothing and still \
          reports ok, so dropping this invocation silently deletes the \
          durability tests."

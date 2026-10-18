@@ -11,11 +11,12 @@
 #   make fmt         - Format code
 #   make lint        - Run clippy linter
 #   make check       - Run fmt check + clippy + tests
+#   make ci-heavy    - Run the CI suite that needs dosfstools, mtools and QEMU
+#   make ci-container - Run ci-heavy in the Containerfile image (podman/docker)
 #
 # Cross-compilation targets:
 #   make linux-x64   - Linux x86_64 (static musl)
 #   make linux-arm64 - Linux ARM64 (static musl)
-#   make windows     - Windows x86_64
 #   make macos-x64   - macOS x86_64 (requires macOS or cross toolchain)
 #   make macos-arm64 - macOS ARM64 (requires macOS or cross toolchain)
 #   make all-targets - Build all cross-compilation targets
@@ -28,15 +29,20 @@ TARGET_DIR := $(or $(CARGO_TARGET_DIR),target)
 # Target triples
 TARGET_LINUX_X64    := x86_64-unknown-linux-musl
 TARGET_LINUX_ARM64  := aarch64-unknown-linux-musl
-TARGET_WINDOWS_X64  := x86_64-pc-windows-gnu
 TARGET_MACOS_X64    := x86_64-apple-darwin
 TARGET_MACOS_ARM64  := aarch64-apple-darwin
 
 # Output directory for release binaries
 DIST_DIR := dist
 
+# `make man` writes man/fat32expander.8 from docs/manual.md
+MAN_NAME = fat32expander
+include build/man.mk
+
 .PHONY: all build release static test test-unit test-qemu test-all clean fmt lint check help
-.PHONY: linux-x64 linux-arm64 windows macos-x64 macos-arm64 all-targets dist setup-targets
+.PHONY: ci-heavy ci-container
+# No Windows target: the program uses Unix file APIs and does not build there.
+.PHONY: linux-x64 linux-arm64 macos-x64 macos-arm64 all-targets dist setup-targets
 
 # Default target
 all: build
@@ -68,13 +74,6 @@ linux-arm64:
 	$(CARGO) build --release --target $(TARGET_LINUX_ARM64)
 	@echo "Built: $(TARGET_DIR)/$(TARGET_LINUX_ARM64)/release/$(BINARY_NAME)"
 
-# Windows x86_64
-# Requires: rustup target add x86_64-pc-windows-gnu
-#           Install cross-compiler: apt install gcc-mingw-w64-x86-64
-windows:
-	$(CARGO) build --release --target $(TARGET_WINDOWS_X64)
-	@echo "Built: $(TARGET_DIR)/$(TARGET_WINDOWS_X64)/release/$(BINARY_NAME).exe"
-
 # macOS x86_64
 # Requires: rustup target add x86_64-apple-darwin
 #           On Linux: Install osxcross or use cross-rs
@@ -92,27 +91,24 @@ macos-arm64:
 	@echo "Built: $(TARGET_DIR)/$(TARGET_MACOS_ARM64)/release/$(BINARY_NAME)"
 
 # Build all targets (will fail if cross-compilers not installed)
-all-targets: linux-x64 linux-arm64 windows macos-x64 macos-arm64
+all-targets: linux-x64 linux-arm64 macos-x64 macos-arm64
 
 # Install Rust targets (still need system cross-compilers)
 setup-targets:
 	rustup target add $(TARGET_LINUX_X64)
 	rustup target add $(TARGET_LINUX_ARM64)
-	rustup target add $(TARGET_WINDOWS_X64)
 	rustup target add $(TARGET_MACOS_X64)
 	rustup target add $(TARGET_MACOS_ARM64)
 	@echo ""
 	@echo "Rust targets installed. You also need system cross-compilers:"
 	@echo "  Linux ARM64: apt install gcc-aarch64-linux-gnu"
-	@echo "  Windows:     apt install gcc-mingw-w64-x86-64"
 	@echo "  macOS:       Use osxcross or build on macOS"
 
 # Create distribution directory with all binaries
-dist: linux-x64 linux-arm64 windows
+dist: linux-x64 linux-arm64
 	@mkdir -p $(DIST_DIR)
 	cp $(TARGET_DIR)/$(TARGET_LINUX_X64)/release/$(BINARY_NAME) $(DIST_DIR)/$(BINARY_NAME)-linux-x64
 	cp $(TARGET_DIR)/$(TARGET_LINUX_ARM64)/release/$(BINARY_NAME) $(DIST_DIR)/$(BINARY_NAME)-linux-arm64
-	cp $(TARGET_DIR)/$(TARGET_WINDOWS_X64)/release/$(BINARY_NAME).exe $(DIST_DIR)/$(BINARY_NAME)-windows-x64.exe
 	@echo "Distribution binaries in $(DIST_DIR)/"
 	@ls -la $(DIST_DIR)/
 
@@ -154,6 +150,34 @@ lint:
 # Full check: format, lint, and test
 check: fmt-check lint test-unit
 
+# The CI suite beyond what ri-ci-rust runs (fmt, clippy, plain cargo test).
+# It needs dosfstools, mtools, musl-tools and QEMU; CI runs it inside the
+# Containerfile image through `make ci-container`.
+#
+# tests/ci_workflow_test.rs and tests/manifest_test.rs read this recipe:
+# - the ignored tests run as an --all-targets sweep, so a new tests/*.rs
+#   file runs in CI the day it is written ([F-R61]);
+# - durability_test and crash_recovery_test compile to zero tests without
+#   their feature, so a sweep cannot cover them and each keeps its own line;
+# - the library must build without the `cli` feature ([F-27]).
+# test-crash-recovery.sh is not found by test-qemu.sh's glob of
+# scripts/qemu/tests/, so it is called on its own line too.
+ci-heavy:
+	$(CARGO) clippy --all-targets --all-features -- -D warnings
+	$(CARGO) check --lib --no-default-features
+	$(CARGO) test --all-targets -- --ignored
+	$(CARGO) test --features device-journal --test durability_test -- --ignored
+	$(CARGO) test --features fault-injection --test crash_recovery_test -- --ignored
+	./scripts/test-resize.sh
+	./scripts/qemu/setup-alpine.sh setup
+	$(CARGO) build --release --target $(TARGET_LINUX_X64)
+	./scripts/qemu/test-qemu.sh
+	./scripts/qemu/test-crash-recovery.sh
+
+# Run ci-heavy in the Containerfile image, as CI does
+ci-container:
+	./scripts/ci-container.sh ci-heavy
+
 # Show filesystem info (usage: make info DEVICE=/path/to/device)
 info: release
 	$(TARGET_DIR)/release/$(BINARY_NAME) info $(DEVICE)
@@ -174,11 +198,10 @@ help:
 	@echo "Cross-compilation targets:"
 	@echo "  make linux-x64    Linux x86_64 (static musl)"
 	@echo "  make linux-arm64  Linux ARM64 (static musl)"
-	@echo "  make windows      Windows x86_64 (.exe)"
 	@echo "  make macos-x64    macOS x86_64 (Intel)"
 	@echo "  make macos-arm64  macOS ARM64 (Apple Silicon)"
 	@echo "  make all-targets  Build all cross-compilation targets"
-	@echo "  make dist         Build Linux + Windows and copy to dist/"
+	@echo "  make dist         Build the Linux binaries into dist/"
 	@echo "  make setup-targets  Install Rust cross-compilation targets"
 	@echo ""
 	@echo "Test targets:"
@@ -193,6 +216,8 @@ help:
 	@echo "  make fmt-check    Check formatting"
 	@echo "  make lint         Run clippy linter"
 	@echo "  make check        Run fmt-check + lint + test-unit"
+	@echo "  make ci-heavy     Run the CI suite that needs dosfstools, mtools, QEMU"
+	@echo "  make ci-container Run ci-heavy in the Containerfile image"
 	@echo ""
 	@echo "Utilities:"
 	@echo "  make info DEVICE=<path>     Show filesystem info"
@@ -201,10 +226,9 @@ help:
 	@echo ""
 	@echo "Cross-compilation prerequisites:"
 	@echo "  Linux ARM64: apt install gcc-aarch64-linux-gnu"
-	@echo "  Windows:     apt install gcc-mingw-w64-x86-64"
 	@echo "  macOS:       Use osxcross or build on macOS natively"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make static && make test-qemu"
 	@echo "  make test-qemu-one TEST=test-near-full"
-	@echo "  make dist  # Build release binaries for distribution"
+	@echo "  make dist  # Build the Linux binaries into dist/"

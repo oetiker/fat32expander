@@ -18,6 +18,10 @@ cargo test
 
 # Run integration tests (requires mkfs.fat, dosfsck)
 cargo test --test integration_test -- --ignored
+
+# Run the CI suite beyond fmt/clippy/cargo test (make ci-heavy) in the
+# Containerfile image, as .github/workflows/ci-local.yml does
+CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 CONTAINER_OPTS="--cpus=4 --memory=6g" make ci-container
 ```
 
 ## Architecture

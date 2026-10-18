@@ -17,3 +17,6 @@
 # Environment
 .env
 .env.local
+
+# Generated man page (make man)
+man/
