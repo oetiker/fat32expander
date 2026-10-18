@@ -43,6 +43,11 @@ EXTRA_OPTS=(${CONTAINER_OPTS:-})
 KVM_OPTS=()
 if [ -e /dev/kvm ]; then
     KVM_OPTS=(--device /dev/kvm --group-add "$KVM_GROUP")
+    # QEMU falls back to TCG without a word beyond "KVM not available", so say
+    # what the container gets.
+    echo "ci-container: /dev/kvm $(stat -c '%A %U:%G' /dev/kvm), group-add $KVM_GROUP, caller $(id)"
+else
+    echo "ci-container: no /dev/kvm on this host, QEMU will use TCG"
 fi
 
 exec "$ENGINE" run --rm \
