@@ -1,0 +1,46 @@
+{
+  "moving_major_tag": false,
+  "version_files": [
+    {
+      "path": "Cargo.toml",
+      "pattern": "^version\\s*=\\s*\"[^\"]*\"",
+      "replacement": "version = \"$VERSION\"",
+      "verify": "^version\\s*=\\s*\"$VERSION\""
+    },
+    {
+      "path": "Cargo.lock",
+      "pattern": "^name = \"fat32expander\"\nversion = \"[^\"]*\"",
+      "replacement": "name = \"fat32expander\"\nversion = \"$VERSION\"",
+      "verify": "^name = \"fat32expander\"\nversion = \"$VERSION\""
+    }
+  ],
+  "release_files": [
+    "Formula/fat32expander.rb"
+  ],
+  "release_assets": [
+    "fat32expander-*-x86_64-unknown-linux-musl.tar.gz",
+    "fat32expander-*-aarch64-unknown-linux-musl.tar.gz",
+    "fat32expander-*-x86_64-unknown-illumos.tar.gz",
+    "fat32expander-*-x86_64-apple-darwin.tar.gz",
+    "fat32expander-*-aarch64-apple-darwin.tar.gz",
+    "fat32expander_*_amd64.deb",
+    "fat32expander_*_arm64.deb",
+    "fat32expander-*.x86_64.rpm",
+    "fat32expander-*.aarch64.rpm",
+    "fat32expander-*.arm64_sonoma.bottle.tar.gz"
+  ],
+  "gitea_packages": {
+    "url": "https://gitea.oetiker.ch",
+    "owner": "oposs",
+    "debian": {
+      "distribution": "stable",
+      "component": "main"
+    },
+    "rpm": {
+      "group": ""
+    }
+  },
+  "exceptions": {
+    "native-targets": "no Windows build: the program opens, sizes and locks raw block devices through Unix file APIs (O_EXCL, positioned I/O, block-device checks, geteuid)"
+  }
+}
