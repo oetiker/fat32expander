@@ -31,7 +31,11 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
+      # docker, not podman: the runner user is not in the kvm group, and
+      # rootless podman cannot add it, so QEMU fell back to TCG.
       - name: Run make ci-heavy in the container
+        env:
+          CONTAINER_ENGINE: docker
         run: ./scripts/ci-container.sh ci-heavy
 
   # macOS has its own mount table (getfsstat), its own raw device names
