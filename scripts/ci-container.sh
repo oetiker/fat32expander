@@ -34,9 +34,10 @@ if [ -z "$ENGINE" ]; then
 fi
 
 if [ "$ENGINE" = podman ]; then
-    # No --userns=keep-id: a podman whose storage cannot remap the image
-    # layers refuses every custom mapping with "make .../merged private:
-    # Permission denied" (podman 4.9.3, storage under /opt).
+    # No --userns=keep-id: podman with fuse-overlayfs as mount_program in
+    # storage.conf refuses every custom mapping with "make .../merged
+    # private: Permission denied" (podman 4.9.3). Native rootless overlay
+    # does not, but the container's root is the caller anyway.
     USER_OPTS=()
     # Rootless podman cannot map a host group by number; keep-groups hands
     # the calling user's own groups, kvm among them, to the container.
