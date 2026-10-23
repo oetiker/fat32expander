@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### New
+
+### Changed
+
+### Fixed
+
+## 0.1.0 - 2026-10-23
+### New
 - `fat32expander` now runs on macOS and illumos. It finds the size of a disk device there, accepts the raw device names (`/dev/rdiskN` on macOS, `/dev/rdsk/...` on illumos), and refuses a device that is mounted under its block or its raw name with exit code 4. Before, every `resize` on these systems stopped with "failed to read /proc/mounts" and exit code 12.
 - Programs that use `fat32expander` as a library can follow a resize as it runs: `resize_fat32_with_events` reports each step, a resumed or ignored recovery record, and, with `verbose`, the layout and every cluster moved. The library no longer writes these messages to the terminal itself; the `fat32expander` command prints them as before.
 
