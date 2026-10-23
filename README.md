@@ -1,7 +1,7 @@
 # fat32expander
 
-[![Rust Tests](https://github.com/oetiker/fat32expander/actions/workflows/tests.yml/badge.svg)](https://github.com/oetiker/fat32expander/actions/workflows/tests.yml)
-[![Latest Release](https://img.shields.io/github/v/release/oetiker/fat32expander)](https://github.com/oetiker/fat32expander/releases/latest)
+[![CI](https://github.com/oetiker/fat32expander/actions/workflows/ci.yml/badge.svg)](https://github.com/oetiker/fat32expander/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/oetiker/fat32expander)](https://github.com/oetiker/fat32expander/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A command-line tool to expand FAT32 filesystems in-place after their underlying partition or disk image has been grown.
@@ -12,38 +12,72 @@ A command-line tool to expand FAT32 filesystems in-place after their underlying 
 
 ## Overview
 
-When you resize a partition (e.g., with `parted`, `fdisk`, or by expanding a virtual disk), the filesystem inside does not automatically grow to fill the new space. `fat32expander` handles this for FAT32 filesystems, including the case where the FAT tables need to grow, which requires relocating data clusters.
+When you resize a partition (for example with `parted`, `fdisk`, or by expanding a virtual disk), the filesystem inside does not automatically grow to fill the new space. `fat32expander` handles this for FAT32 filesystems, including the case where the FAT tables need to grow, which requires relocating data clusters.
 
 ## Features
 
-- **In-place expansion** - Modifies filesystem directly without requiring temporary storage
-- **FAT table growth** - Relocates clusters when FAT tables need to expand
-- **Multiple sector sizes** - Supports 512, 1024, 2048, and 4096-byte sectors (including EFI partitions on 4Kn drives)
-- **Crash recovery** - Resumes interrupted operations; protects against partial completion
-- **Dry-run mode** - Preview changes without modifying the filesystem
-- **Verbose output** - Detailed logging of all operations
+- **In-place expansion**: modifies the filesystem directly, without temporary storage
+- **FAT table growth**: relocates clusters when the FAT tables need to expand
+- **Multiple sector sizes**: 512, 1024, 2048 and 4096-byte sectors (including EFI partitions on 4Kn drives)
+- **Crash recovery**: an interrupted resize continues on the next run
+- **Dry-run mode**: preview changes without modifying the filesystem
+- **Verbose output**: each step of the resize as it runs
 
 ## Installation
 
-### Pre-built Binaries
+Debian and Ubuntu:
 
-Download from the [releases page](https://github.com/oetiker/fat32expander/releases).
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSL -o /etc/apt/keyrings/gitea-oposs.asc https://gitea.oetiker.ch/api/packages/oposs/debian/repository.key
+echo "deb [signed-by=/etc/apt/keyrings/gitea-oposs.asc] https://gitea.oetiker.ch/api/packages/oposs/debian stable main" | sudo tee /etc/apt/sources.list.d/oposs.list
+sudo apt update && sudo apt install fat32expander
+```
 
-### Building from Source
+Fedora, RHEL, Rocky and Alma:
 
-Requires Rust 1.70 or later.
+```sh
+sudo curl -fsSL -o /etc/yum.repos.d/oposs.repo https://gitea.oetiker.ch/api/packages/oposs/rpm.repo
+sudo dnf install fat32expander
+```
+
+Homebrew (macOS and Linux):
+
+```sh
+brew tap oetiker/fat32expander https://github.com/oetiker/fat32expander
+brew trust --formula oetiker/fat32expander/fat32expander
+brew install fat32expander
+```
+
+`brew trust` exists from Homebrew 6 on; skip it on older versions.
+
+mise:
+
+```sh
+mise use -g github:oetiker/fat32expander
+```
+
+Direct download: static binaries for Linux (x86_64, arm64), macOS (Intel,
+Apple Silicon) and illumos on the
+[releases page](https://github.com/oetiker/fat32expander/releases/latest).
+
+### Building from source
+
+Requires a current stable Rust.
 
 ```bash
-# Clone the repository
 git clone https://github.com/oetiker/fat32expander.git
 cd fat32expander
 
-# Build release binary
+# Release binary for this machine
 make release
 
-# Or build static Linux binary (recommended for portability)
+# Static Linux x86_64 binary
 make static
 ```
+
+The manual is `docs/manual.md`; `make man` builds the man page
+`man/fat32expander.8` from it.
 
 ### Cross-compilation
 
@@ -54,11 +88,10 @@ make setup-targets
 # Build for specific platforms
 make linux-x64      # Linux x86_64 (static)
 make linux-arm64    # Linux ARM64 (static)
-make windows        # Windows x86_64
 make macos-x64      # macOS Intel
 make macos-arm64    # macOS Apple Silicon
 
-# Build distribution package (Linux + Windows)
+# Build the Linux binaries into dist/
 make dist
 ```
 
@@ -102,31 +135,10 @@ fat32expander resize disk.img
 
 ### Exit Codes
 
-Failures are reported with distinct exit codes so a calling script can tell
-them apart without parsing messages. Codes are grouped by what the caller
-should do about the failure, not one per internal error, so they stay stable
-as the tool changes.
-
-| Code | Meaning |
-|------|---------|
-| 0 | Success — including a resize that found nothing to do |
-| 1 | Unexpected internal failure |
-| 2 | Invalid command line (produced by the argument parser) |
-| 3 | Device could not be opened — check the path, permissions, and whether it is in use |
-| 4 | Device is mounted (also through a loop device), or another program holds it — unmount it or stop that program first |
-| 5 | Not a usable FAT32 filesystem |
-| 6 | Already at maximum size *(reserved; a no-op resize exits 0)* |
-| 7 | Device is smaller than the filesystem claims — truncated image or wrong device |
-| 8 | Backup boot sector does not match the primary — re-run with `--ignore-backup-mismatch` to trust the primary and rewrite the backup from it |
-| 9 | An interrupted resize needs recovery and could not be recovered automatically |
-| 10 | I/O failure reading or writing the device |
-| 12 | Could not check whether the device is mounted: the mount table could not be read |
-| 13 | The grown filesystem would have more clusters than FAT32 allows (268,435,445) — the filesystem needs a larger cluster size for this device |
-
-Code 11 previously meant "root privileges required". The tool no longer guesses
-at write access from the effective uid — it attempts the open and reports what
-the kernel says, so a caller who cannot write the device now gets code 3. The
-number is not reused.
+Failures are reported with distinct exit codes, so a calling script can tell
+them apart without parsing messages. The codes are grouped by what the caller
+should do about the failure. The manual lists them under
+[EXIT STATUS](docs/manual.md#exit-status).
 
 `resize` is safe to re-run: a filesystem that is already at its maximum size
 exits 0 rather than reporting an error, so the tool can be called
@@ -205,17 +217,21 @@ make test-qemu-one TEST=test-fragmented
 - Linux, macOS or illumos. CI tests Linux and macOS on real disk devices;
   illumos builds, but no test has run on an illumos system yet.
 - Write access to the target device. That usually means root for a block
-  device, but the tool does not require root as such — membership of `disk`,
-  a suitable ACL, or simply owning the image file all work.
+  device, but the tool does not require root as such: membership of `disk`,
+  a suitable ACL, or owning the image file all work.
 
 ### Building
-- Rust 1.70+
+- A current stable Rust
 - For cross-compilation: appropriate GCC cross-compilers
+- For the man page: pandoc
 
 ### Testing
 - QEMU with KVM support
 - dosfstools (`mkfs.fat`, `fsck.fat`)
 - mtools (`mcopy`, `mdir`)
+
+`make ci-container` runs the full CI test suite in a container that has all
+of these, with podman or docker.
 
 ## Limitations
 
@@ -237,7 +253,7 @@ Expanding is straightforward: shift cluster data forward, keep cluster numbers u
 
 When shrinking, clusters beyond the new boundary must be relocated to free space within it. Unlike expanding, this changes cluster numbers, requiring updates to FAT chains and every directory entry pointing to moved files. This means traversing the entire directory tree, parsing entries (including long filename handling), and updating cluster pointers in place.
 
-Additionally, shrinking a filesystem without also shrinking its partition is pointless—partitioning tools won't recognize the reduced size. Supporting both MBR and GPT partition tables adds further complexity.
+Additionally, shrinking a filesystem without also shrinking its partition is pointless: partitioning tools won't recognize the reduced size. Supporting both MBR and GPT partition tables adds further complexity.
 
 The result would roughly double the codebase size and risk. Since expanding (growing VM disks, SD cards, disk images) is the common use case, the added complexity isn't justified.
 
@@ -249,7 +265,7 @@ The result would roughly double the codebase size and risk. Since expanding (gro
 
 Before submitting changes:
 
-1. All tests pass: `make test-all`
+1. All tests pass: `make test` and `make ci-container`
 2. Code is formatted: `make fmt`
 3. No clippy warnings: `make lint`
 
