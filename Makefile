@@ -40,7 +40,8 @@ DIST_DIR := dist
 MAN_NAME = fat32expander
 include build/man.mk
 
-.PHONY: all build release static test test-unit test-qemu test-all clean fmt lint check help
+.PHONY: all build release static test test-unit test-qemu test-qemu-one test-all clean fmt fmt-check lint check help
+.PHONY: info dry-run
 .PHONY: ci-heavy ci-container demo
 # No Windows target: the program uses Unix file APIs and does not build there.
 .PHONY: linux-x64 linux-arm64 macos-x64 macos-arm64 all-targets dist setup-targets
