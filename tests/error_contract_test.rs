@@ -1232,7 +1232,8 @@ fn a_cli_resize_lists_the_operations_it_performed() {
     for expected in [
         "Operations performed:",
         "Verified device is not mounted",
-        "Planned data shift for 1 clusters",
+        "Planned data shift for 1 cluster (",
+        "Shifted 1 cluster forward",
         "Resize complete!",
     ] {
         assert!(
@@ -1253,7 +1254,8 @@ fn a_verbose_cli_resize_shows_the_layout_and_the_shift() {
         "After resize:",
         "FAT needs growth: true",
         "Data shift plan",
-        "1 clusters will be moved",
+        "1 cluster will be moved",
+        "1 of 1 cluster needs movement",
         "Old first data sector:",
         "Moving cluster 2 from sector",
     ] {

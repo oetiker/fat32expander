@@ -412,8 +412,8 @@ fn run_fat_phases(
     }
 
     report.step(format!(
-        "FAT needs to grow by {} sectors",
-        calculation.fat_growth_sectors
+        "FAT needs to grow by {}",
+        count(calculation.fat_growth_sectors.into(), "sector")
     ));
 
     // The boot sector as it will be committed once the resize completes.
@@ -427,8 +427,8 @@ fn run_fat_phases(
     // An empty plan still goes through both phases: the FAT has to grow and
     // FAT2 has to move even when no cluster data does ([F-20]).
     report.step(format!(
-        "Planned data shift for {} clusters ({} bytes)",
-        plan.cluster_count(),
+        "Planned data shift for {} ({} bytes)",
+        count(plan.cluster_count() as u64, "cluster"),
         plan.total_bytes
     ));
 
@@ -542,7 +542,10 @@ fn shift_cluster_data(
     let mut progress = ShiftProgress::new(plan, &boot, resume_from, &mut record_progress);
     execute_relocation(device, &boot, plan, &mut progress, report)?;
     let clusters_relocated = plan.cluster_count();
-    report.step(format!("Shifted {} clusters forward", clusters_relocated));
+    report.step(format!(
+        "Shifted {} forward",
+        count(clusters_relocated as u64, "cluster")
+    ));
 
     maybe_crash_at(CrashPoint::AfterDataShift);
 
@@ -788,6 +791,16 @@ fn free_clusters_after_resize(
         .new_data_clusters
         .saturating_sub(old_data_clusters);
     old_free.saturating_add(additional_clusters)
+}
+
+/// `n` followed by `noun`, in the plural unless `n` is 1: "1 cluster",
+/// "18435 clusters". The report printed "Planned data shift for 1 clusters".
+fn count(n: u64, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 #[cfg(test)]

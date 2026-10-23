@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - After a resize was interrupted and run again, the free space shown by `fat32expander info` and the operating system could be too high, because the new clusters were counted twice. This happened when the rerun used `--ignore-backup-mismatch`, or resumed an interrupted resize late in its last step. The free-cluster count is now computed from the FAT on every run, which also replaces an "Unknown" or wrong count with the real value.
 - After `fat32expander resize`, the copy of the free space count next to the backup boot sector (sector 7 on most volumes) still held the value from before the resize. It now holds the same count as the primary.
 - On a volume that has no backup boot sector (the field is 0), `fat32expander info` showed "Backup boot sector: 0" and "Backup matches primary: Yes"; it now shows "Backup boot sector: none". `fat32expander resize` on such a volume wrote the new size into the boot sector before the free space count, so a crash at that moment left the new size with the old free space count; the boot sector is now written last.
+- `fat32expander resize` printed "Planned data shift for 1 clusters" and "Shifted 1 clusters forward" when one cluster moved, and with `--verbose` also "1 clusters will be moved" and "1 of 1 clusters need movement". These lines, "FAT needs to grow by ... sectors" and the note on unused device sectors now use the singular for a count of 1.
 
 ## 0.0.2 - 2025-12-02
 ### New
