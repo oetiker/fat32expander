@@ -236,8 +236,12 @@ pub fn print_resize_report(device: &str, result: &ResizeResult, dry_run: bool) {
         println!("  Clusters relocated: {}", result.clusters_relocated);
     }
 
-    if !dry_run {
-        println!();
+    println!();
+    if dry_run {
+        // Matches the banner `resize` prints first, so the tail of the
+        // report alone still says that nothing was written.
+        println!("DRY RUN MODE - No changes were made");
+    } else {
         println!("The filesystem has been resized successfully.");
     }
 }

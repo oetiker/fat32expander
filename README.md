@@ -6,6 +6,8 @@
 
 A command-line tool to expand FAT32 filesystems in-place after their underlying partition or disk image has been grown.
 
+![fat32expander: grow a 256 MiB FAT32 image to 1 GiB, resize the filesystem, then check it with fsck.fat and list its files](docs/demo/fat32expander.webp)
+
 ## Warning
 
 **Filesystem modification is inherently risky.** While this tool includes safeguards, data loss is possible due to hardware failure, power loss, bugs, or unexpected conditions. Always maintain backups of important data before modifying any filesystem.

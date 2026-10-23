@@ -62,9 +62,9 @@ pub fn resize(
         }
     }
 
+    // The report opens with a blank line, so the banner needs none.
     if dry_run {
         println!("DRY RUN MODE - No changes will be made");
-        println!();
     }
 
     // Perform the resize

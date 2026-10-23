@@ -211,6 +211,43 @@ fn a_backup_mismatch_exits_8_and_names_the_override() {
     );
 }
 
+/// A dry run says so on its first and on its last line, so a reader who
+/// sees only the top or only the tail of the report cannot take it for a
+/// resize that ran. The report has no double blank line between the two.
+#[test]
+fn a_dry_run_report_starts_and_ends_with_a_dry_run_line() {
+    let image = valid_image(96, 64);
+
+    let output = run(&[
+        std::ffi::OsStr::new("resize"),
+        std::ffi::OsStr::new("--dry-run"),
+        image.path().as_os_str(),
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        stderr_of(&output)
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.first().copied(),
+        Some("DRY RUN MODE - No changes will be made"),
+        "stdout:\n{stdout}"
+    );
+    assert_eq!(
+        lines.last().copied(),
+        Some("DRY RUN MODE - No changes were made"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("\n\n\n"),
+        "the report must not hold a double blank line.\nstdout:\n{stdout}"
+    );
+}
+
 /// Safety net for [F-05]: before it changes anything, a resize tells the user
 /// how big the filesystem is and how big it will be, in bytes.
 #[test]

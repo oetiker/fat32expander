@@ -45,7 +45,7 @@ For a block device that is usually root, but group membership or an ACL suffices
 
 # OPTIONS
 
-- `-n, --dry-run`: With **resize**, print what the resize would do and change nothing.
+- `-n, --dry-run`: With **resize**, print what the resize would do and change nothing. The first and the last line of the report start with "DRY RUN MODE".
 - `-v, --verbose`: With **resize**, print each step while it runs.
 - `--ignore-backup-mismatch`: With **resize**, proceed when the backup boot sector differs from the primary. The resize trusts the primary and rewrites the backup from it. If the primary is the damaged copy, this discards the only good record of the original layout.
 - `-V, --version`: Print the version and exit.
