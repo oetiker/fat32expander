@@ -13,6 +13,7 @@
 #   make check       - Run fmt check + clippy + tests
 #   make ci-heavy    - Run the CI suite that needs dosfstools, mtools and QEMU
 #   make ci-container - Run ci-heavy in the Containerfile image (podman/docker)
+#   make demo        - Record docs/demo/fat32expander.webp (needs ansidrama)
 #
 # Cross-compilation targets:
 #   make linux-x64   - Linux x86_64 (static musl)
@@ -40,7 +41,7 @@ MAN_NAME = fat32expander
 include build/man.mk
 
 .PHONY: all build release static test test-unit test-qemu test-all clean fmt lint check help
-.PHONY: ci-heavy ci-container
+.PHONY: ci-heavy ci-container demo
 # No Windows target: the program uses Unix file APIs and does not build there.
 .PHONY: linux-x64 linux-arm64 macos-x64 macos-arm64 all-targets dist setup-targets
 
@@ -178,6 +179,12 @@ ci-heavy:
 ci-container:
 	./scripts/ci-container.sh ci-heavy
 
+# Record the README demo, docs/demo/fat32expander.webp, from
+# demo/fat32expander.toml. Needs ansidrama on PATH (or ANSIDRAMA=<path>),
+# dosfstools and mtools. CI does not run it; commit the WebP by hand.
+demo: release
+	demo/record.sh "$(abspath $(TARGET_DIR))/release"
+
 # Show filesystem info (usage: make info DEVICE=/path/to/device)
 info: release
 	$(TARGET_DIR)/release/$(BINARY_NAME) info $(DEVICE)
@@ -222,6 +229,7 @@ help:
 	@echo "Utilities:"
 	@echo "  make info DEVICE=<path>     Show filesystem info"
 	@echo "  make dry-run DEVICE=<path>  Dry run resize"
+	@echo "  make demo                   Record the README demo (needs ansidrama)"
 	@echo "  make clean                  Clean build artifacts"
 	@echo ""
 	@echo "Cross-compilation prerequisites:"

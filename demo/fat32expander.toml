@@ -1,0 +1,91 @@
+# The README demo: docs/demo/fat32expander.webp. Record it with `make demo`.
+#
+# record.sh runs this in a scratch directory that holds disk.img: a 256 MiB
+# FAT32 image with a few files on it. The disk grows with truncate, then
+# fat32expander grows the filesystem, and fsck.fat and mdir check the result.
+launch    = "PS1='$ ' bash --norc --noprofile -i"
+cols      = 88
+rows      = 36
+font      = "smalti"
+font_px   = 16
+card_font_px     = 64
+card_subtitle_px = 32
+out       = "../docs/demo/fat32expander.webp"
+quit_keys = ["C-d"]
+
+[chrome]
+style   = "macos"
+title   = "fat32expander"
+padding = 12
+
+[[scene]]
+card    = { lines = ["fat32expander", "grow a FAT32 filesystem in place"], fg = "#fef9c3" }
+hold_cs = 250
+
+# The filesystem as it is: 256 MiB with some files on it.
+[[scene]]
+text    = "mdir -i disk.img ::/"
+hold_cs = 40
+[[scene]]
+keys    = ["Enter"]
+await   = "bytes free"
+hold_cs = 200
+
+# The disk grows, the filesystem does not.
+[[scene]]
+text    = "truncate -s 1G disk.img"
+hold_cs = 40
+[[scene]]
+keys    = ["Enter"]
+hold_cs = 80
+[[scene]]
+text    = "fat32expander info disk.img"
+hold_cs = 40
+[[scene]]
+keys    = ["Enter"]
+await   = "Max new size"
+hold_cs = 350
+
+[[scene]]
+text    = "clear"
+hold_cs = 20
+[[scene]]
+keys    = ["Enter"]
+hold_cs = 20
+
+# The FAT must grow too, so the data clusters move.
+[[scene]]
+text    = "fat32expander resize disk.img"
+hold_cs = 40
+[[scene]]
+keys     = ["Enter"]
+await    = "resized successfully"
+await_ms = 20000
+hold_cs  = 400
+
+[[scene]]
+text    = "clear"
+hold_cs = 20
+[[scene]]
+keys    = ["Enter"]
+hold_cs = 20
+
+# Clean, and the same files with 1 GiB of room.
+[[scene]]
+text    = "fsck.fat -n disk.img"
+hold_cs = 40
+[[scene]]
+keys    = ["Enter"]
+await   = "clusters"
+hold_cs = 150
+[[scene]]
+text    = "mdir -i disk.img ::/"
+hold_cs = 40
+[[scene]]
+keys    = ["Enter"]
+await   = "bytes free"
+hold_cs = 350
+
+[[scene]]
+card    = { lines = ["fat32expander", "github.com/oetiker/fat32expander"], fg = "#fef9c3" }
+hold_cs = 250
