@@ -2,6 +2,16 @@
 
 use fat32expander::{FSInfo, FSInfoReport, ResizeEvent, ResizeResult};
 
+/// `n` followed by `noun`, in the plural unless `n` is 1: "1 cluster",
+/// "18435 clusters". The resize report printed "Planned data shift for 1 clusters".
+fn count(n: u64, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
 /// `bytes` in mebibytes, for display next to the exact byte count.
 fn mib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
@@ -130,10 +140,12 @@ pub fn print_event(event: &ResizeEvent) {
             device_sectors,
             used_sectors,
         } => {
+            let unused = device_sectors - *used_sectors as u64;
             eprintln!(
                 "The device has {device_sectors} sectors, but FAT32 can use at most \
-                 {used_sectors}; the remaining {} sectors stay unused",
-                device_sectors - *used_sectors as u64
+                 {used_sectors}; the remaining {} {} unused",
+                count(unused, "sector"),
+                if unused == 1 { "stays" } else { "stay" }
             );
         }
         ResizeEvent::Layout {
@@ -161,7 +173,7 @@ pub fn print_event(event: &ResizeEvent) {
         }
         ResizeEvent::ShiftPlanned { clusters } => {
             eprintln!("\nData shift plan (cluster numbers unchanged, sectors shift forward):");
-            eprintln!("  {clusters} clusters will be moved");
+            eprintln!("  {} will be moved", count(*clusters as u64, "cluster"));
         }
         ResizeEvent::ShiftStarting {
             remaining,
@@ -170,7 +182,11 @@ pub fn print_event(event: &ResizeEvent) {
             new_first_data_sector,
             resumed_at,
         } => {
-            eprintln!("Shifting data forward: {remaining} of {total} clusters need movement");
+            eprintln!(
+                "Shifting data forward: {remaining} of {} {} movement",
+                count(*total as u64, "cluster"),
+                if *remaining == 1 { "needs" } else { "need" }
+            );
             eprintln!("  Old first data sector: {old_first_data_sector}");
             eprintln!("  New first data sector: {new_first_data_sector}");
             if let Some(cluster) = resumed_at {

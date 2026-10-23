@@ -222,8 +222,8 @@ create_test_image() {
 # a checked one.
 #
 # The plan comes from the tool's own dry run, which writes nothing:
-#   "FAT needs to grow by N sectors"     -> per-FAT growth (calculator.rs)
-#   "Planned data shift for N clusters"  -> in-use clusters being moved
+#   "FAT needs to grow by N sector(s)"     -> per-FAT growth (calculator.rs)
+#   "Planned data shift for N cluster(s)"  -> in-use clusters being moved
 # Data moves forward by num_fats x per-FAT growth. The image is built with
 # mkfs.fat -F 32 -s 1, so num_fats is 2 and sectors_per_cluster is 1, making
 # the highest in-use cluster equal to the moved-cluster count plus the first
@@ -235,8 +235,8 @@ assert_overlapping_shift() {
     /bin/fat32expander resize --dry-run --verbose "$image" > /tmp/plan.log 2>&1
 
     local growth moved shift
-    growth=$(sed -n 's/.*FAT needs to grow by \([0-9]*\) sectors.*/\1/p' /tmp/plan.log | head -1)
-    moved=$(sed -n 's/.*Planned data shift for \([0-9]*\) clusters.*/\1/p' /tmp/plan.log | head -1)
+    growth=$(sed -n 's/.*FAT needs to grow by \([0-9]*\) sectors\{0,1\}.*/\1/p' /tmp/plan.log | head -1)
+    moved=$(sed -n 's/.*Planned data shift for \([0-9]*\) clusters\{0,1\}.*/\1/p' /tmp/plan.log | head -1)
 
     if [ -z "$growth" ] || [ -z "$moved" ]; then
         echo "ERROR: could not read the shift plan from the dry run"

@@ -161,7 +161,12 @@ fn expected_verbose_stderr(events: &[ResizeEvent]) -> String {
             }
             ResizeEvent::ShiftPlanned { clusters } => {
                 s += "\nData shift plan (cluster numbers unchanged, sectors shift forward):\n";
-                s += &format!("  {clusters} clusters will be moved\n");
+                let noun = if *clusters == 1 {
+                    "cluster"
+                } else {
+                    "clusters"
+                };
+                s += &format!("  {clusters} {noun} will be moved\n");
             }
             ResizeEvent::ShiftStarting {
                 remaining,
@@ -171,8 +176,10 @@ fn expected_verbose_stderr(events: &[ResizeEvent]) -> String {
                 resumed_at,
             } => {
                 assert!(resumed_at.is_none(), "the fixture is a fresh resize");
+                let noun = if *total == 1 { "cluster" } else { "clusters" };
+                let verb = if *remaining == 1 { "needs" } else { "need" };
                 s += &format!(
-                    "Shifting data forward: {remaining} of {total} clusters need movement\n"
+                    "Shifting data forward: {remaining} of {total} {noun} {verb} movement\n"
                 );
                 s += &format!("  Old first data sector: {old_first_data_sector}\n");
                 s += &format!("  New first data sector: {new_first_data_sector}\n");
