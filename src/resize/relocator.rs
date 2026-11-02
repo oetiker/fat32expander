@@ -1,8 +1,17 @@
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::fat32::{fat_entry, BootSector};
-use crate::resize::checkpoint::PROGRESS_RECORD_EVERY;
+use crate::resize::checkpoint::PROGRESS_RECORD_EVERY_BYTES;
 use crate::resize::events::{Reporter, ResizeEvent};
+
+/// The most a data shift reads and writes in one go.
+///
+/// Adjacent clusters lie in adjacent sectors before and after the shift, so a
+/// run of them is copied with one read and one write instead of one of each
+/// per cluster. With 512-byte clusters, one per call meant three million
+/// calls to shift 750 MiB, in small writes running backwards over the disk,
+/// which USB sticks handle worst of all.
+const MAX_COPY_BYTES: u64 = 4 * 1024 * 1024;
 
 /// A planned cluster relocation representing physical sector movement
 ///
@@ -200,8 +209,8 @@ pub struct ShiftProgress<'a> {
 impl<'a> ShiftProgress<'a> {
     /// Progress tracking for `plan`, resuming below `resume_from`.
     ///
-    /// The interval is at most [`PROGRESS_RECORD_EVERY`] clusters, and never
-    /// more than the shift distance. A shift shorter than one cluster overlaps
+    /// The interval is at most [`PROGRESS_RECORD_EVERY_BYTES`] worth of
+    /// clusters, at least one cluster, and never more than the shift distance. A shift shorter than one cluster overlaps
     /// each cluster with itself, so no move may ever be replayed; such a pass
     /// records only once, at its start, and the caller must not treat that
     /// record as resumable.
@@ -213,7 +222,7 @@ impl<'a> ShiftProgress<'a> {
     ) -> Self {
         let record_every = match plan.shift_clusters(boot) {
             0 => u32::MAX,
-            shift_clusters => PROGRESS_RECORD_EVERY.min(shift_clusters),
+            shift_clusters => clusters_in(PROGRESS_RECORD_EVERY_BYTES, boot).min(shift_clusters),
         };
         ShiftProgress {
             resume_from,
@@ -221,6 +230,12 @@ impl<'a> ShiftProgress<'a> {
             record,
         }
     }
+}
+
+/// How many whole clusters of `boot` fit in `bytes`, and at least one.
+fn clusters_in(bytes: u64, boot: &BootSector) -> u32 {
+    let per_cluster = (boot.bytes_per_cluster() as u64).max(1);
+    (bytes / per_cluster).clamp(1, u32::MAX as u64) as u32
 }
 
 /// Execute a relocation plan by shifting all data forward
@@ -260,13 +275,17 @@ pub fn execute_relocation(
     });
 
     let record_every = progress.record_every.max(1);
+    let max_run = clusters_in(MAX_COPY_BYTES, boot) as usize;
     let mut last_recorded: Option<u32> = None;
+    let mut done = 0;
 
-    // Copy data from highest cluster to lowest (already sorted in plan_relocation)
-    for (i, mv) in remaining.iter().enumerate() {
+    // Copy data from highest cluster to lowest (already sorted in
+    // plan_relocation), a run of adjacent clusters at a time.
+    while done < remaining.len() {
+        let top = remaining[done].from_cluster;
         let due = match last_recorded {
             None => true,
-            Some(last) => last - mv.from_cluster >= record_every,
+            Some(last) => last - top >= record_every,
         };
         if due {
             // Everything copied since the last record has to reach the medium
@@ -275,25 +294,45 @@ pub fn execute_relocation(
             if last_recorded.is_some() {
                 device.sync()?;
             }
-            (progress.record)(mv.from_cluster)?;
-            last_recorded = Some(mv.from_cluster);
+            (progress.record)(top)?;
+            last_recorded = Some(top);
         }
+        let last = last_recorded.unwrap_or(top);
+
+        // Extend the run down over adjacent clusters. It stops before a free
+        // cluster, at MAX_COPY_BYTES, and before the next record falls due:
+        // a run that crossed it would carry the pass `record_every` clusters
+        // or more below the last record, beyond what a resume may replay.
+        let mut len = 1;
+        while done + len < remaining.len() && len < max_run {
+            let next = remaining[done + len].from_cluster;
+            if next + 1 != remaining[done + len - 1].from_cluster || last - next >= record_every {
+                break;
+            }
+            len += 1;
+        }
+        let run = &remaining[done..done + len];
 
         if report.wants_detail() {
-            report.detail(ResizeEvent::ClusterMoved {
-                cluster: mv.from_cluster,
-                from_sector: mv.from_sector,
-                to_sector: mv.to_sector,
-                done: i + 1,
-                of: remaining.len(),
-            });
+            for (j, mv) in run.iter().enumerate() {
+                report.detail(ResizeEvent::ClusterMoved {
+                    cluster: mv.from_cluster,
+                    from_sector: mv.from_sector,
+                    to_sector: mv.to_sector,
+                    done: done + j + 1,
+                    of: remaining.len(),
+                });
+            }
         }
 
-        // Read from old position
-        let data = device.read_sectors(mv.from_sector, sectors_per_cluster)?;
-
-        // Write to new position
-        device.write_sectors(mv.to_sector, &data)?;
+        // The whole run is read before any of it is written, so its
+        // destination may overlap its own source. The destination lies above
+        // the source and so overlaps only the run and clusters above it,
+        // which are already moved.
+        let lowest = &run[len - 1];
+        let data = device.read_sectors(lowest.from_sector, len as u32 * sectors_per_cluster)?;
+        device.write_sectors(lowest.to_sector, &data)?;
+        done += len;
     }
 
     // Sync after data movement
@@ -834,10 +873,20 @@ mod tests {
             u32::MAX
         );
 
-        // 1200 clusters at 1 sector per cluster: the cap applies.
+        // 1200 clusters at 1 sector per cluster: below the cap, the shift
+        // distance applies.
         let old_boot = boot_sector_with(1, TOTAL_SECTORS, OLD_FAT_SIZE);
         let new_boot = boot_sector_with(1, TOTAL_SECTORS, OLD_FAT_SIZE + 600);
-        assert_eq!(interval(&old_boot, &new_boot), PROGRESS_RECORD_EVERY);
+        assert_eq!(interval(&old_boot, &new_boot), 1200);
+
+        // 80000 clusters of 512 bytes, 39 MiB: the cap of
+        // PROGRESS_RECORD_EVERY_BYTES applies, counted in bytes.
+        let old_boot = boot_sector_with(1, 4_000_000, OLD_FAT_SIZE);
+        let new_boot = boot_sector_with(1, 4_000_000, OLD_FAT_SIZE + 40_000);
+        assert_eq!(
+            interval(&old_boot, &new_boot) as u64,
+            PROGRESS_RECORD_EVERY_BYTES / 512
+        );
     }
 
     /// The negative control for the test above: restarting an interrupted
@@ -1079,6 +1128,129 @@ mod tests {
                 cluster
             );
         }
+    }
+
+    // A 512-byte-cluster geometry with a long shift: 2 FATs x 5000 sectors of
+    // growth = 10000 clusters. Clusters 2..=20000 are in use but for a gap
+    // at 5000..=5009, so the pass copies runs longer than MAX_COPY_BYTES as
+    // well as runs that end at a free cluster.
+    const LONG_TOTAL_SECTORS: u32 = 40_000;
+    const LONG_OLD_FAT_SIZE: u32 = 100;
+    const LONG_NEW_FAT_SIZE: u32 = 5_100;
+
+    fn long_in_use() -> Vec<u32> {
+        (2..=20_000)
+            .filter(|c| !(5_000..=5_009).contains(c))
+            .collect()
+    }
+
+    /// The content of cluster `cluster`: its number, repeated.
+    fn numbered(cluster: u32) -> Vec<u8> {
+        cluster.to_le_bytes().repeat(BPS as usize / 4)
+    }
+
+    /// Old and new boot sector, device, FAT and plan of the long geometry,
+    /// with every cluster in use holding [`numbered`] content.
+    fn long_shift() -> (
+        BootSector,
+        BootSector,
+        NamedTempFile,
+        Device,
+        RelocationPlan,
+    ) {
+        let old_boot = boot_sector_with(1, LONG_TOTAL_SECTORS, LONG_OLD_FAT_SIZE);
+        let new_boot = boot_sector_with(1, LONG_TOTAL_SECTORS, LONG_NEW_FAT_SIZE);
+        let (file, device) = temp_device_of(LONG_TOTAL_SECTORS);
+        let mut fat = vec![0u32; LONG_TOTAL_SECTORS as usize];
+        for cluster in long_in_use() {
+            fat[cluster as usize] = 0x0FFF_FFFF;
+            device
+                .write_sectors(
+                    old_boot.cluster_to_sector(cluster).unwrap(),
+                    &numbered(cluster),
+                )
+                .unwrap();
+        }
+        let plan = plan_relocation(&old_boot, &new_boot, &fat, 2).unwrap();
+        assert_eq!(plan.shift_clusters(&old_boot), 10_000);
+        assert!(
+            20_000 - 5_010 > clusters_in(MAX_COPY_BYTES, &old_boot),
+            "test geometry must hold a run longer than one copy"
+        );
+        (old_boot, new_boot, file, device, plan)
+    }
+
+    fn assert_long_shift_landed(device: &Device, new_boot: &BootSector) {
+        for cluster in long_in_use() {
+            assert_eq!(
+                device
+                    .read_sectors(new_boot.cluster_to_sector(cluster).unwrap(), 1)
+                    .unwrap(),
+                numbered(cluster),
+                "cluster {cluster} did not land intact"
+            );
+        }
+    }
+
+    /// Runs of adjacent clusters are copied a run at a time. Every cluster
+    /// still lands intact, across the end of a copy and across a gap of free
+    /// clusters, where a run must end.
+    #[test]
+    fn execute_relocation_copies_runs_of_adjacent_clusters() {
+        let (old_boot, new_boot, _file, device, plan) = long_shift();
+        execute_whole_plan(&device, &old_boot, &plan).unwrap();
+        assert_long_shift_landed(&device, &new_boot);
+    }
+
+    /// A run never carries the pass past the point where the next record is
+    /// due, so the records fall where they did with one cluster per copy,
+    /// and a resume from the last of them finds every source it replays.
+    #[test]
+    fn execute_relocation_runs_stop_at_each_record_and_resume_cleanly() {
+        let (old_boot, new_boot, _file, device, plan) = long_shift();
+
+        // First pass: abort on the fourth record.
+        let mut recorded = Vec::new();
+        {
+            let mut record = |next_cluster: u32| -> Result<()> {
+                if recorded.len() == 3 {
+                    return Err(Error::Relocation("simulated power loss".to_string()));
+                }
+                recorded.push(next_cluster);
+                Ok(())
+            };
+            let mut progress = ShiftProgress {
+                resume_from: plan.highest_cluster(),
+                record_every: 3_000,
+                record: &mut record,
+            };
+            execute_relocation(
+                &device,
+                &old_boot,
+                &plan,
+                &mut progress,
+                &mut Reporter::silent(),
+            )
+            .unwrap_err();
+        }
+        assert_eq!(recorded, vec![20_000, 17_000, 14_000]);
+
+        let mut record = |_next_cluster: u32| Ok(());
+        let mut progress = ShiftProgress {
+            resume_from: *recorded.last().unwrap(),
+            record_every: 3_000,
+            record: &mut record,
+        };
+        execute_relocation(
+            &device,
+            &old_boot,
+            &plan,
+            &mut progress,
+            &mut Reporter::silent(),
+        )
+        .unwrap();
+
+        assert_long_shift_landed(&device, &new_boot);
     }
 
     #[test]

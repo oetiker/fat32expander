@@ -524,3 +524,70 @@ fn a_second_resize_after_a_completed_one_finds_nothing_to_recover() {
         "dosfsck rejected the result"
     );
 }
+
+/// A 128 MiB image with 512-byte clusters and an 8 MiB file on it, room to
+/// grow to 512 MiB. Its shift moves about 16400 clusters by about 12300.
+fn image_with_small_clusters_and_a_long_file() -> NamedTempFile {
+    let image =
+        NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp file");
+    extend_image(image.path(), 128);
+    let status = Command::new("mkfs.fat")
+        .args(["-F", "32", "-S", "512", "-s", "1"])
+        .arg(image.path())
+        .status()
+        .expect("Failed to run mkfs.fat");
+    assert!(status.success(), "mkfs.fat failed");
+
+    let src = NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).expect("temp file");
+    let content: Vec<u8> = (0..8 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(src.path(), &content).expect("write source file");
+    let status = Command::new("mcopy")
+        .arg("-i")
+        .arg(image.path())
+        .arg(src.path())
+        .arg("::long.bin")
+        .status()
+        .expect("Failed to run mcopy");
+    assert!(status.success(), "mcopy failed");
+
+    extend_image(image.path(), 512);
+    image
+}
+
+/// The shift copies runs of adjacent clusters, not one cluster per write,
+/// and records its progress per 32 MiB or shift distance, not per 1024
+/// clusters. Before, it took 16385 writes and 32 flushes here, and three
+/// million writes and 3000 flushes on a 3000 MiB ESP grown to 6 GiB.
+#[test]
+#[ignore] // Requires mkfs.fat, mcopy and dosfsck
+fn the_data_shift_copies_runs_of_clusters_and_flushes_rarely() {
+    let image = image_with_small_clusters_and_a_long_file();
+
+    journal::reset();
+    resize(image.path());
+    let ops = journal::recorded();
+    let l = layout_of(image.path());
+
+    let is_data_write = |op: &Op| is_write_within(op, l.fat_end, l.checkpoint);
+    let data_writes = ops.iter().filter(|op| is_data_write(op)).count();
+    let first = ops.iter().position(is_data_write).expect("no data moved");
+    let last = ops.iter().rposition(is_data_write).expect("no data moved");
+    let syncs = ops[first..last]
+        .iter()
+        .filter(|op| matches!(op, Op::Sync))
+        .count();
+
+    assert!(
+        data_writes <= 10,
+        "the shift wrote its 8 MiB in {data_writes} writes; runs of 4 MiB need at most a few"
+    );
+    assert!(
+        syncs <= 2,
+        "the shift flushed {syncs} times while it ran; moving 8 MiB by 6 MiB needs one \
+         progress record, which is two flushes"
+    );
+    assert!(
+        check_filesystem(image.path()),
+        "dosfsck rejected the result"
+    );
+}

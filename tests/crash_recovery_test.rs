@@ -410,9 +410,10 @@ fn a_crash_before_the_primary_boot_write_resumes_from_fat_written() {
 
 /// A file large enough that the shift records its progress more than once.
 ///
-/// The shift records progress at most every 1024 clusters. `FILES` fill about
-/// 90 clusters of 512 bytes, so their shift has only its first record and
-/// `before_mid_shift_record` never fires. This file adds about 2900 clusters.
+/// The shift records progress at most once per shift distance, which here is
+/// 2316 clusters of 512 bytes (the FAT grows from 2017 to 3175 sectors).
+/// `FILES` fill about 90 clusters, so their shift has only its first record
+/// and `before_mid_shift_record` never fires. This file adds about 2900.
 const LONG_FILE: (&str, usize) = ("long.bin", 1_500_000);
 
 /// `image_with_files(128, 200)` plus `LONG_FILE`.
