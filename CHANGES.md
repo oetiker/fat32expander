@@ -10,9 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### New
 
 ### Changed
-- `fat32expander resize` is much faster on a filesystem whose FAT grows, most of all on USB sticks and with small clusters. It now moves data up to 4 MiB per write instead of one cluster per write, and clears the new FAT space 128 KiB per write instead of one sector per write. It also records its progress every 32 MiB at most, where it flushed the device every 1024 clusters (every 512 KiB with 512-byte clusters): growing a 3000 MiB ESP with 512-byte clusters to 6 GiB took 1.57 million writes and 2970 flushes, and now takes 799 writes and 58 flushes.
 
 ### Fixed
+
+## 0.1.2 - 2026-11-02
+### Changed
+- `fat32expander resize` is much faster on a filesystem whose FAT grows, most of all on USB sticks and with small clusters. It now moves data up to 4 MiB per write instead of one cluster per write, and clears the new FAT space 128 KiB per write instead of one sector per write. It also records its progress every 32 MiB at most, where it flushed the device every 1024 clusters (every 512 KiB with 512-byte clusters): growing a 3000 MiB ESP with 512-byte clusters to 6 GiB took 1.57 million writes and 2970 flushes, and now takes 799 writes and 58 flushes.
 
 ## 0.1.1 - 2026-11-02
 ### Changed
