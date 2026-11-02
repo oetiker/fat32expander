@@ -70,9 +70,17 @@ fn get_u32(data: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
 }
 
-/// Record shift progress at least once per this many clusters. The effective interval
-/// is also capped by the shift distance in clusters - see [`ShiftProgress`].
-pub(crate) const PROGRESS_RECORD_EVERY: u32 = 1024;
+/// Record shift progress at least once per this many bytes of clusters. The
+/// effective interval is also capped by the shift distance in clusters - see
+/// [`ShiftProgress`].
+///
+/// Each record costs a flush of the device. The interval was 1024 clusters,
+/// which with 512-byte clusters meant a flush every 512 KiB: about 1500 of
+/// them to shift 750 MiB. A crash costs at most one interval of redone moves,
+/// so a wide interval is cheap where it matters least.
+///
+/// [`ShiftProgress`]: crate::resize::relocator::ShiftProgress
+pub(crate) const PROGRESS_RECORD_EVERY_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Resize phase values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

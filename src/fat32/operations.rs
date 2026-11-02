@@ -146,10 +146,17 @@ pub(crate) fn zero_fat_extension(
         return Ok(());
     }
 
+    // A chunk per write, not a sector: growing a 3000 MiB FAT32 with
+    // 512-byte clusters to 6 GiB zeroes 51000 sectors.
     let fat1_start = fat_copy_start(boot, 0, new_fat_size);
-    let free_sector = vec![0u8; boot.bytes_per_sector() as usize];
-    for sector_offset in old_fat_size..new_fat_size {
-        device.write_sector(fat1_start + sector_offset as u64, &free_sector)?;
+    let chunk_sectors = fat_chunk_sectors(boot);
+    let zeros = vec![0u8; chunk_sectors as usize * boot.bytes_per_sector() as usize];
+    let mut offset = old_fat_size;
+    while offset < new_fat_size {
+        let count = std::cmp::min(chunk_sectors, new_fat_size - offset);
+        let bytes = count as usize * boot.bytes_per_sector() as usize;
+        device.write_sectors(fat1_start + offset as u64, &zeros[..bytes])?;
+        offset += count;
     }
 
     Ok(())
@@ -269,6 +276,39 @@ mod tests {
         assert_eq!(fat_copy_start(&boot(7), 1, 3), 10);
         // Large enough that a 32-bit product would wrap.
         assert_eq!(fat_copy_start(&boot(32), 1, u32::MAX), 32 + u32::MAX as u64);
+    }
+
+    /// The FAT1 growth is zeroed exactly: every sector of it, over more than
+    /// one chunk and a partial last one, and not a sector beyond either end.
+    #[test]
+    fn zero_fat_extension_zeroes_exactly_the_growth() {
+        let mut data = vec![0u8; 512];
+        data[11..13].copy_from_slice(&512u16.to_le_bytes());
+        data[14..16].copy_from_slice(&32u16.to_le_bytes());
+        data[16] = 2;
+        data[510] = 0x55;
+        data[511] = 0xAA;
+        let boot = BootSector::from_bytes(&data).unwrap();
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![0xFFu8; 2000 * 512]).unwrap();
+        let device = Device::open_with_sector_size(file.path(), 512).unwrap();
+
+        // 600 sectors: two chunks of 256 and one of 88.
+        let (old_fat_size, new_fat_size) = (100, 700);
+        assert!(new_fat_size - old_fat_size > 2 * fat_chunk_sectors(&boot));
+        zero_fat_extension(&device, &boot, old_fat_size, new_fat_size).unwrap();
+
+        let image = std::fs::read(file.path()).unwrap();
+        for sector in 0..2000u64 {
+            let bytes = &image[sector as usize * 512..(sector as usize + 1) * 512];
+            let zeroed = (32 + old_fat_size as u64..32 + new_fat_size as u64).contains(&sector);
+            let expected = if zeroed { 0x00 } else { 0xFF };
+            assert!(
+                bytes.iter().all(|&b| b == expected),
+                "sector {sector} should hold {expected:#04x}"
+            );
+        }
     }
 
     /// Safety net for [F-22]. The probe that addresses the device must accept
